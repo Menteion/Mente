@@ -600,11 +600,13 @@ fn run_time_checks(src: &str) -> String {
 /// a file of its own, `<dir>/<the file's path without .mn>/<function>-<line>-<kind>.smt2`, whose
 /// first line is `; source: <file>:<line>:<col>`. An obligation no path reaches, which no query
 /// can check, is listed instead. Exits 2 when a file cannot be read or written. `mn smt
-/// --independent` and `mn smt --confirm` are the independent cross-check (`smt_independent`).
+/// --independent`, `mn smt --confirm` and `mn smt --compare` are the independent cross-check
+/// (`smt_independent`).
 fn cmd_smt(args: &[String]) {
     match args.first().map(String::as_str) {
         Some("--independent") => return smt_independent::cmd_independent(&args[1..]),
         Some("--confirm") => return smt_independent::cmd_confirm(&args[1..]),
+        Some("--compare") => return smt_independent::cmd_compare(&args[1..]),
         _ => {}
     }
     let mut out = None;

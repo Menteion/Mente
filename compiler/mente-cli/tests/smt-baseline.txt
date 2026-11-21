@@ -1,8 +1,0 @@
-# The counts of the independent SMT cross-check on the CI job's corpus (.github/workflows/smt.yml),
-# which each run is held to (compiler/mente-cli/src/smt_independent.rs, Baseline): the queries it
-# writes and the checks Tier 1 erased that are cut off by the bound must equal the record, in either
-# direction; the undecided answers, which depend on the runner's speed, may differ from it by 5 either
-# way. A change that moves a count records the new count here, and says why in its pull request.
-queries: 4790
-beyond-bound: 1559
-undecided: 1

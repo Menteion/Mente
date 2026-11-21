@@ -223,6 +223,8 @@ pub struct Written {
     pub unchecked: usize,
     /// Obligations of Tier 1 with no site.
     pub unmatched: usize,
+    /// Each file read and each check Tier 1 erased, for the comparison with the base.
+    pub export: Export,
 }
 
 /// The path of a file below `out`, as `mn smt` places a file's queries: its path without `.mn`,
@@ -255,6 +257,8 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
         let shown = file.display().to_string();
         let src =
             fs::read_to_string(file).map_err(|e| format!("cannot read `{}`: {}", shown, e))?;
+        let hash = text_hash(&src);
+        w.export.files.insert(shown.clone(), hash.clone());
         let Ok(checked) = mente_sema::check_program(&src) else {
             println!(
                 "unchecked: {}: the module does not check, so it has no queries",
@@ -294,12 +298,33 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
             for g in groups(&enc, |k| keys.contains(k)) {
                 let site = &enc.sites[g[0]];
                 let (kind, span) = (site.kind, site.span);
+                let mut erased = Erased {
+                    file: shown.clone(),
+                    hash: hash.clone(),
+                    function: cf.syntax.name.clone(),
+                    obligation: site.obligation(),
+                    trap: format!(
+                        "{} at {}:{}",
+                        site.trap.kind, site.trap.span.line, site.trap.span.col
+                    ),
+                    class: Class::Unreachable,
+                };
                 let Some(text) = enc.query(&g) else {
-                    match unqueried(&enc, &g) {
-                        Unqueried::Unreachable => w.unreachable += 1,
-                        Unqueried::BeyondBound => w.beyond_bound += 1,
-                        Unqueried::BeyondLacked => w.beyond_lacked += 1,
-                    }
+                    erased.class = match unqueried(&enc, &g) {
+                        Unqueried::Unreachable => {
+                            w.unreachable += 1;
+                            Class::Unreachable
+                        }
+                        Unqueried::BeyondBound => {
+                            w.beyond_bound += 1;
+                            Class::BeyondBound
+                        }
+                        Unqueried::BeyondLacked => {
+                            w.beyond_lacked += 1;
+                            Class::BeyondLacked
+                        }
+                    };
+                    w.export.checks.push(erased);
                     continue;
                 };
                 let base = format!("{}-{}-{}", cf.syntax.name, span.line, kind.name());
@@ -314,6 +339,8 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
                 let place = format!("{}:{}:{}", shown, span.line, span.col);
                 fs::write(&path, format!("; source: {}\n{}", place, text))
                     .map_err(|e| format!("cannot write `{}`: {}", path.display(), e))?;
+                erased.class = Class::Query(path.display().to_string());
+                w.export.checks.push(erased);
                 w.queries += 1;
             }
         }
@@ -321,98 +348,394 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
     Ok(w)
 }
 
-/// The counts of the CI job, recorded in [`BASELINE`], which each run is held to exactly: the
-/// queries it writes and the checks cut off by the bound, which depend on the corpus and the
-/// encoding alone, must equal the record in either direction, so that a rise is recorded and a fall
-/// cannot hide inside an old margin; the undecided answers, which depend on the runner's speed, may
-/// differ from it by at most [`UNDECIDED_SLACK`] either way. A change that moves a count records the
-/// new count in the same pull request, and says why.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Baseline {
-    pub queries: usize,
-    pub beyond_bound: usize,
-    pub undecided: usize,
+/// What the encoding made of a check Tier 1 erased.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// A query, at its path.
+    Query(String),
+    Unreachable,
+    BeyondBound,
+    BeyondLacked,
 }
 
-/// Where the baseline is kept, from the repository's root.
-pub const BASELINE: &str = "compiler/mente-cli/tests/smt-baseline.txt";
-
-/// How many undecided answers more or fewer than the record a run may give.
-pub const UNDECIDED_SLACK: usize = 5;
-
-impl Baseline {
-    /// The baseline a file records: its fields `queries`, `beyond-bound` and `undecided`, each
-    /// once, as decimal numbers; `#` lines are comments.
-    pub fn parse(text: &str) -> Result<Baseline, String> {
-        let mut fields: HashMap<&str, usize> = HashMap::new();
-        for line in text.lines().map(str::trim) {
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let (name, value) = line
-                .split_once(':')
-                .ok_or_else(|| format!("`{}` is no `name: count` line", line))?;
-            let name = name.trim();
-            if !["queries", "beyond-bound", "undecided"].contains(&name) {
-                return Err(format!("`{}` is no field of the baseline", name));
-            }
-            let value = value.trim();
-            let n = value
-                .parse()
-                .ok()
-                .filter(|_| value.bytes().all(|b| b.is_ascii_digit()))
-                .ok_or_else(|| format!("`{}: {}` is no decimal count", name, value))?;
-            if fields.insert(name, n).is_some() {
-                return Err(format!("`{}` is given twice", name));
-            }
+impl Class {
+    fn text(&self) -> String {
+        match self {
+            Class::Query(path) => format!("query {}", path),
+            Class::Unreachable => "unreachable".to_string(),
+            Class::BeyondBound => "beyond-bound".to_string(),
+            Class::BeyondLacked => "beyond-lacked".to_string(),
         }
-        let field = |name: &str| {
-            fields
-                .get(name)
-                .copied()
-                .ok_or_else(|| format!("the baseline has no `{}`", name))
+    }
+
+    /// The class, its query's path aside, as two runs are compared.
+    fn kind(&self) -> &'static str {
+        match self {
+            Class::Query(_) => "a query",
+            Class::Unreachable => "unreachable",
+            Class::BeyondBound => "cut off by the bound",
+            Class::BeyondLacked => "cut off by a construct the encoding lacks",
+        }
+    }
+
+    /// How much of the check is verified: a query, which the solver answers, more than the
+    /// encoding's own finding that no input reaches the check, more than nothing, past a cut.
+    fn rank(&self) -> u8 {
+        match self {
+            Class::Query(_) => 2,
+            Class::Unreachable => 1,
+            Class::BeyondBound | Class::BeyondLacked => 0,
+        }
+    }
+
+    fn read(text: &str) -> Option<Class> {
+        Some(match text {
+            "unreachable" => Class::Unreachable,
+            "beyond-bound" => Class::BeyondBound,
+            "beyond-lacked" => Class::BeyondLacked,
+            _ => Class::Query(text.strip_prefix("query ")?.to_string()),
+        })
+    }
+}
+
+/// A check Tier 1 erased, as the comparison with the base reads it: its program's file, the hash
+/// of that file's text, its function, its obligation, its trap, and what the encoding made of it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Erased {
+    pub file: String,
+    pub hash: String,
+    pub function: String,
+    pub obligation: String,
+    pub trap: String,
+    pub class: Class,
+}
+
+impl Erased {
+    /// The check as a line of `--keys`: `check`, then its fields, each after a tab.
+    pub fn line(&self) -> String {
+        [
+            "check",
+            &self.file,
+            &self.hash,
+            &self.function,
+            &self.obligation,
+            &self.trap,
+            &self.class.text(),
+        ]
+        .join("\t")
+    }
+
+    fn read(fields: &[&str]) -> Result<Erased, String> {
+        let [file, hash, function, obligation, trap, class] = fields else {
+            return Err(format!("`{}` is no check of six fields", fields.join(" ")));
         };
-        Ok(Baseline {
-            queries: field("queries")?,
-            beyond_bound: field("beyond-bound")?,
-            undecided: field("undecided")?,
+        Ok(Erased {
+            file: file.to_string(),
+            hash: hash.to_string(),
+            function: function.to_string(),
+            obligation: obligation.to_string(),
+            trap: trap.to_string(),
+            class: Class::read(class).ok_or_else(|| format!("`{}` is no class", class))?,
         })
     }
 
-    /// Why an export differs from the baseline, if it does: its queries or its checks cut off by
-    /// the bound, in either direction.
-    pub fn export_problems(&self, w: &Written) -> Vec<String> {
-        let mut out = Vec::new();
-        for (what, now, recorded, field) in [
-            ("queries were written", w.queries, self.queries, "queries"),
-            (
-                "checks Tier 1 erased are cut off by the bound",
-                w.beyond_bound,
-                self.beyond_bound,
-                "beyond-bound",
-            ),
-        ] {
-            if now != recorded {
-                out.push(format!(
-                    "{} {} where {} records {}: if the change means this, record `{}: {}` there in this pull request and say why; otherwise the encoding or the corpus lost or gained what it should not",
-                    now, what, BASELINE, recorded, field, now
-                ));
-            }
+    /// What tells it from the other checks of its program.
+    fn key(&self) -> (&str, &str, &str) {
+        (&self.function, &self.obligation, &self.trap)
+    }
+}
+
+/// What an export wrote of each program: the hash of each file it read, one that does not check
+/// included, and each check Tier 1 erased.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Export {
+    pub files: BTreeMap<String, String>,
+    pub checks: Vec<Erased>,
+}
+
+impl Export {
+    /// The export as `--keys` writes it: a line `file`, its path and its hash for each file, then
+    /// a line for each check ([`Erased::line`]), each field after a tab.
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        for (file, hash) in &self.files {
+            out.push_str(&["file", file, hash].join("\t"));
+            out.push('\n');
+        }
+        for e in &self.checks {
+            out.push_str(&e.line());
+            out.push('\n');
         }
         out
     }
 
-    /// Why a count of undecided answers differs from the baseline by more than
-    /// [`UNDECIDED_SLACK`], if it does.
-    pub fn undecided_problem(&self, undecided: usize) -> Option<String> {
-        let low = self.undecided.saturating_sub(UNDECIDED_SLACK);
-        let high = self.undecided + UNDECIDED_SLACK;
-        (undecided < low || undecided > high).then(|| {
-            format!(
-                "{} answers are undecided, outside {} to {}, the {} {} records and {} either way: if the change means this, record `undecided: {}` there in this pull request and say why",
-                undecided, low, high, self.undecided, BASELINE, UNDECIDED_SLACK, undecided
-            )
-        })
+    pub fn read(text: &str) -> Result<Export, String> {
+        let mut export = Export::default();
+        for line in text.lines().filter(|l| !l.is_empty()) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields.split_first() {
+                Some((&"file", [file, hash])) => {
+                    export.files.insert(file.to_string(), hash.to_string());
+                }
+                Some((&"check", rest)) => export.checks.push(Erased::read(rest)?),
+                _ => return Err(format!("`{}` is neither a file nor a check", line)),
+            }
+        }
+        Ok(export)
+    }
+
+    fn of(&self, file: &str) -> Vec<&Erased> {
+        self.checks.iter().filter(|e| e.file == file).collect()
+    }
+}
+
+/// The hash of a program's text that tells whether two trees hold it unchanged: 64-bit FNV-1a.
+pub fn text_hash(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{:016x}", h)
+}
+
+/// How many undecided answers more than the base's, over the checks both runs query, a run may
+/// give, since a timeout depends on the runner.
+pub const UNDECIDED_SLACK: usize = 5;
+
+/// What the comparison of a run with its base found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Comparison {
+    /// Checks of programs both trees hold unchanged that the run checks less of than its base
+    /// ([`Class::rank`]): a check both erase that fell, and a check Tier 1 erases in the run alone
+    /// that the encoding cuts off. Each fails the run, since only the encoder or the checker can
+    /// have changed them.
+    pub dropped: Vec<String>,
+    /// Programs both trees hold unchanged that one export did not read, the run's or the base's,
+    /// which fails the run: a floor derived from the trees, so that an export that lost its
+    /// programs cannot pass as a comparison of fewer.
+    pub lost: Vec<String>,
+    /// The undecided answers over the checks both runs query: the base's and the run's.
+    pub undecided: (usize, usize),
+    /// Checks of programs both hold unchanged that the run checks no less of, but otherwise: one
+    /// that rose, and one Tier 1 erases in one run alone that the other checks no less of.
+    pub moved: Vec<String>,
+    /// Programs added, changed or deleted, with their counts.
+    pub programs: Vec<String>,
+}
+
+impl Comparison {
+    pub fn passes(&self) -> bool {
+        self.dropped.is_empty()
+            && self.lost.is_empty()
+            && self.undecided.1 <= self.undecided.0 + UNDECIDED_SLACK
+    }
+}
+
+/// Whether the answer to the query at `path` decides nothing.
+fn undecided(answers: &HashMap<String, String>, path: &str) -> bool {
+    answers.get(path).is_some_and(|a| {
+        matches!(
+            a.split_whitespace().next(),
+            Some("unknown" | "timeout") | None
+        )
+    })
+}
+
+/// The answers of a file of answers, by their queries' paths.
+pub fn answers_of(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(a, p)| (p.to_string(), a.to_string()))
+        .collect()
+}
+
+/// The counts of one program's checks, as a summary lists them.
+fn counts(checks: &[&Erased]) -> String {
+    let n = |c: &dyn Fn(&Class) -> bool| checks.iter().filter(|e| c(&e.class)).count();
+    format!(
+        "{} queries, {} unreachable, {} cut off by the bound, {} by a construct the encoding lacks",
+        n(&|c| matches!(c, Class::Query(_))),
+        n(&|c| *c == Class::Unreachable),
+        n(&|c| *c == Class::BeyondBound),
+        n(&|c| *c == Class::BeyondLacked)
+    )
+}
+
+/// Compares a run with its base, check by check over the programs both hold unchanged, a program
+/// being unchanged when its file has one hash in both. `here` tells whether a file of the base
+/// lies unchanged in the run's tree, its text hashing to the hash given, and `there` whether a
+/// file of the run lies unchanged in the base's.
+pub fn compare(
+    base: &Export,
+    base_answers: &HashMap<String, String>,
+    head: &Export,
+    head_answers: &HashMap<String, String>,
+    here: &dyn Fn(&str, &str) -> bool,
+    there: &dyn Fn(&str, &str) -> bool,
+) -> Comparison {
+    let mut c = Comparison::default();
+    for (file, hash) in &base.files {
+        let base_checks = base.of(file);
+        match head.files.get(file) {
+            Some(head_hash) if head_hash == hash => {
+                let head_checks = head.of(file);
+                for be in &base_checks {
+                    let Some(he) = head_checks.iter().find(|he| he.key() == be.key()) else {
+                        c.moved.push(format!(
+                            "{}: `{}`'s obligation `{}` is erased by Tier 1 on the base alone",
+                            file, be.function, be.obligation
+                        ));
+                        continue;
+                    };
+                    let line = format!(
+                        "{}: `{}`'s obligation `{}` is {} on the base and {} here",
+                        file,
+                        be.function,
+                        be.obligation,
+                        be.class.kind(),
+                        he.class.kind()
+                    );
+                    if he.class.rank() < be.class.rank() {
+                        c.dropped.push(line);
+                    } else if he.class.kind() != be.class.kind() {
+                        c.moved.push(line);
+                    } else if let (Class::Query(bp), Class::Query(hp)) = (&be.class, &he.class) {
+                        c.undecided.0 += usize::from(undecided(base_answers, bp));
+                        c.undecided.1 += usize::from(undecided(head_answers, hp));
+                    }
+                }
+                for he in head_checks
+                    .iter()
+                    .filter(|he| !base_checks.iter().any(|be| be.key() == he.key()))
+                {
+                    let line = format!(
+                        "{}: `{}`'s obligation `{}` is erased by Tier 1 here alone, and {}",
+                        file,
+                        he.function,
+                        he.obligation,
+                        he.class.kind()
+                    );
+                    if he.class.rank() == 0 {
+                        c.dropped.push(line);
+                    } else {
+                        c.moved.push(line);
+                    }
+                }
+            }
+            Some(_) => c.programs.push(format!(
+                "changed: {}: {} on the base; {} here",
+                file,
+                counts(&base_checks),
+                counts(&head.of(file))
+            )),
+            None if here(file, hash) => c.lost.push(format!(
+                "{}: both trees hold it unchanged, but this export did not read it; the base's gave {}",
+                file,
+                counts(&base_checks)
+            )),
+            None => c.programs.push(format!(
+                "deleted: {}: {} on the base",
+                file,
+                counts(&base_checks)
+            )),
+        }
+    }
+    for (file, hash) in head
+        .files
+        .iter()
+        .filter(|(f, _)| !base.files.contains_key(*f))
+    {
+        if there(file, hash) {
+            c.lost.push(format!(
+                "{}: both trees hold it unchanged, but the base's export did not read it; this one gave {}",
+                file,
+                counts(&head.of(file))
+            ));
+        } else {
+            c.programs
+                .push(format!("added: {}: {}", file, counts(&head.of(file))));
+        }
+    }
+    c
+}
+
+/// Whether the file at `path`, below `tree`, hashes to `hash`; a path that is absolute names a
+/// file outside both trees, which both exports read.
+fn unchanged_in(tree: &Path, path: &str, hash: &str) -> bool {
+    fs::read_to_string(tree.join(path)).is_ok_and(|t| text_hash(&t) == hash)
+}
+
+/// The file whose presence in a tree tells that its commit has the independent encoding, and so
+/// that its export can be compared with.
+pub const ENCODING_FILE: &str = "compiler/mente-smt/src/lib.rs";
+
+/// `mn smt --compare --base-tree <dir> --base <keys> <answers> --head <keys> <answers>`, run in
+/// the run's own tree: compares a run of the independent cross-check with its base's
+/// ([`compare`]), the base's commit checked out at `<dir>`, and prints what it finds. A base
+/// without the encoding ([`ENCODING_FILE`]) has no export, and every program is new to the
+/// comparison. Exits 1 when the run checks less of a check of a program both trees hold
+/// unchanged, when either export did not read such a program, or when the undecided answers over
+/// the checks both query rose past [`UNDECIDED_SLACK`], and 2 when a file cannot be read.
+pub fn cmd_compare(args: &[String]) {
+    let read = |file: &str| match fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("error: cannot read `{}`: {}", file, e);
+            std::process::exit(2);
+        }
+    };
+    let export = |file: &str| match Export::read(&read(file)) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error: `{}`: {}", file, e);
+            std::process::exit(2);
+        }
+    };
+    let (tree, base, head) = match args {
+        [t, tree, b, bk, ba, h, hk, ha] if t == "--base-tree" && b == "--base" && h == "--head" => {
+            (Path::new(tree), (bk, ba), (hk, ha))
+        }
+        _ => {
+            eprintln!("Usage: mn smt --compare --base-tree <dir> --base <keys> <answers> --head <keys> <answers>");
+            std::process::exit(2);
+        }
+    };
+    let encodes = tree.join(ENCODING_FILE).is_file();
+    if !encodes {
+        println!(
+            "The base at `{}` has no independent encoding, so every program is new to the comparison.",
+            tree.display()
+        );
+    }
+    let c = compare(
+        &export(base.0),
+        &answers_of(&read(base.1)),
+        &export(head.0),
+        &answers_of(&read(head.1)),
+        &|path, hash| unchanged_in(Path::new(""), path, hash),
+        &|path, hash| encodes && unchanged_in(tree, path, hash),
+    );
+    for (prefix, lines) in [
+        ("dropped", &c.dropped),
+        ("lost", &c.lost),
+        ("moved", &c.moved),
+        ("program", &c.programs),
+    ] {
+        for l in lines {
+            println!("{}: {}", prefix, l);
+        }
+    }
+    println!(
+        "Of the programs both trees hold unchanged, {} checks are checked less than on the base, {} programs were not read, and {} checks moved otherwise; {} programs were added, changed or deleted; undecided over the checks both query: {} on the base, {} here.",
+        c.dropped.len(),
+        c.lost.len(),
+        c.moved.len(),
+        c.programs.len(),
+        c.undecided.0,
+        c.undecided.1
+    );
+    if !c.passes() {
+        std::process::exit(1);
     }
 }
 
@@ -649,22 +972,19 @@ pub struct Confirmed {
     /// Answers that are none: a solver's error, an empty answer, an answer to no query or a
     /// second answer to one, and a query with no answer.
     pub errors: Vec<String>,
-    /// The undecided answers past the baseline's cap.
-    pub over: Option<String>,
     /// How many queries of each fragment were answered, and how many of them undecided.
     pub fragments: BTreeMap<&'static str, (usize, usize)>,
 }
 
 impl Confirmed {
     /// Whether the job passes: no bug it did not expect, no defect of the encoding, every bug it
-    /// expects confirmed, every query answered once by the solver without an error, and no more
-    /// undecided answers than the baseline allows.
+    /// expects confirmed, and every query answered once by the solver without an error. How many
+    /// answers are undecided, the comparison with the base holds ([`compare`]).
     pub fn passes(&self) -> bool {
         self.confirmed.is_empty()
             && self.unconfirmed.is_empty()
             && self.missing.is_empty()
             && self.errors.is_empty()
-            && self.over.is_none()
     }
 }
 
@@ -674,13 +994,12 @@ fn is(e: &Bug, found: &Bug) -> bool {
     Path::new(&e.0) == Path::new(&found.0) && e.1 == found.1 && e.2 == found.2
 }
 
-/// What `confirm` holds the answers to: the known bugs, the queries that were asked, which each
-/// must have one answer, and the baseline of undecided answers.
+/// What `confirm` holds the answers to: the known bugs, and the queries that were asked, which
+/// each must have one answer.
 #[derive(Clone, Debug, Default)]
 pub struct Gate {
     pub expect: Vec<Bug>,
     pub queries: Option<Vec<String>>,
-    pub baseline: Option<Baseline>,
 }
 
 /// Reads the answers, one a line, a solver's whole answer on one line, a tab, then the query's
@@ -746,45 +1065,29 @@ pub fn confirm(answers: &str, gate: &Gate) -> Confirmed {
             ));
         }
     }
-    c.over = gate
-        .baseline
-        .and_then(|b| b.undecided_problem(c.undecided.len()));
     c
 }
 
-/// The baseline at `path`, or an exit with why it cannot be read.
-fn baseline_at(path: &str) -> Baseline {
-    match fs::read_to_string(path)
-        .map_err(|e| e.to_string())
-        .and_then(|t| Baseline::parse(&t))
-    {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("error: the baseline `{}`: {}", path, e);
-            std::process::exit(2);
-        }
-    }
-}
-
-/// `mn smt --independent <file.mn | dir>... --out <dir> [--baseline <file>]`: writes the
-/// independent queries and prints a summary; exits 1 when an obligation of Tier 1 has no site,
-/// or when the counts fall outside the baseline, and 2 when a file cannot be read or written.
+/// `mn smt --independent <file.mn | dir>... --out <dir> [--keys <file>]`: writes the independent
+/// queries and prints a summary, and with `--keys` what it made of each check Tier 1 erased, for
+/// the comparison with the base ([`Export`]); exits 1 when an obligation of Tier 1 has no site,
+/// and 2 when a file cannot be read or written.
 pub fn cmd_independent(args: &[String]) {
     let mut out = None;
-    let mut baseline = None;
+    let mut keys = None;
     let mut inputs = Vec::new();
     let mut words = args.iter();
     while let Some(word) = words.next() {
         if word == "--out" {
             out = words.next().map(PathBuf::from);
-        } else if word == "--baseline" {
-            baseline = Some(baseline_at(words.next().map_or("", String::as_str)));
+        } else if word == "--keys" {
+            keys = words.next().map(PathBuf::from);
         } else {
             inputs.push(PathBuf::from(word));
         }
     }
     let (Some(out), false) = (out, inputs.is_empty()) else {
-        eprintln!("Usage: mn smt --independent <file.mn | dir>... --out <dir> [--baseline <file>]");
+        eprintln!("Usage: mn smt --independent <file.mn | dir>... --out <dir> [--keys <file>]");
         std::process::exit(2);
     };
     let files: Vec<PathBuf> = inputs
@@ -806,11 +1109,13 @@ pub fn cmd_independent(args: &[String]) {
                 w.unchecked,
                 w.unmatched
             );
-            let problems = baseline.map_or_else(Vec::new, |b| b.export_problems(&w));
-            for p in &problems {
-                println!("baseline: {}", p);
+            if let Some(keys) = keys {
+                if let Err(e) = fs::write(&keys, w.export.text()) {
+                    eprintln!("error: cannot write `{}`: {}", keys.display(), e);
+                    std::process::exit(2);
+                }
             }
-            if w.unmatched > 0 || !problems.is_empty() {
+            if w.unmatched > 0 {
                 std::process::exit(1);
             }
         }
@@ -821,12 +1126,11 @@ pub fn cmd_independent(args: &[String]) {
     }
 }
 
-/// `mn smt --confirm <answers> [--queries <list>] [--baseline <file>] [--expect <file.mn>]...`:
+/// `mn smt --confirm <answers> [--queries <list>] [--expect <file.mn>]...`:
 /// confirms each `sat` answer on the reference interpreter and prints what it finds, and how many
 /// queries of each fragment were answered and undecided; exits 1 when a bug no `--expect` file
 /// names is confirmed, when a model is not confirmed, when an expected bug is not, when an
-/// answer is an error or a query of the list has none, or when the undecided answers pass the
-/// baseline, and 2 when a file cannot be read.
+/// answer is an error or a query of the list has none, and 2 when a file cannot be read.
 pub fn cmd_confirm(args: &[String]) {
     let mut answers = None;
     let mut gate = Gate::default();
@@ -841,24 +1145,21 @@ pub fn cmd_confirm(args: &[String]) {
     let mut usage = false;
     while let Some(word) = words.next() {
         match word.as_str() {
-            "--expect" | "--queries" | "--baseline" => {
+            "--expect" | "--queries" => {
                 let Some(file) = words.next() else {
                     usage = true;
                     break;
                 };
                 match word.as_str() {
                     "--expect" => gate.expect.extend(expected(file, &read(file))),
-                    "--queries" => {
-                        gate.queries = Some(read(file).lines().map(str::to_string).collect())
-                    }
-                    _ => gate.baseline = Some(baseline_at(file)),
+                    _ => gate.queries = Some(read(file).lines().map(str::to_string).collect()),
                 }
             }
             _ => answers = Some(word.clone()),
         }
     }
     let (Some(answers), false) = (answers, usage) else {
-        eprintln!("Usage: mn smt --confirm <answers> [--queries <list>] [--baseline <file>] [--expect <file.mn>]...");
+        eprintln!("Usage: mn smt --confirm <answers> [--queries <list>] [--expect <file.mn>]...");
         std::process::exit(2);
     };
     let c = confirm(&read(&answers), &gate);
@@ -879,9 +1180,6 @@ pub fn cmd_confirm(args: &[String]) {
             "fragment: {} queries {}, {} of them undecided",
             n, fragment, undecided
         );
-    }
-    if let Some(over) = &c.over {
-        println!("baseline: {}", over);
     }
     println!(
         "{} unsat, {} undecided, {} confirmed soundness bugs of Tier 1, {} known, {} not confirmed, {} known bugs missing, {} errors.",
@@ -1430,13 +1728,11 @@ mod tests {
         assert!(unmatched(&cf.obligations, &enc).is_empty());
     }
 
-    /// The share of the corpus's inputs cut off past the bounds when it was recorded: inputs cut
-    /// off, of the inputs admitted.
-    const CORPUS_CUT: (usize, usize) = (611, 13220);
-
     /// The encoding of every function of the conformance programs, the examples and the kernels
     /// agrees with the reference interpreter on every input it admits and does not cut off, its
-    /// values included; no larger a share of the inputs is cut off than was recorded.
+    /// values included. How many of the corpus's checks are cut off is held by the CI job's
+    /// comparison with its base, program by program, since every pull request may add programs
+    /// to the corpus and a recorded share would be edited by each.
     #[test]
     fn test_each_query_of_the_corpus_holds_exactly_of_the_inputs_whose_run_traps_there() {
         let mut runs = Runs::default();
@@ -1465,14 +1761,6 @@ mod tests {
                 .join("\n")
         );
         assert!(runs.compared > 5000, "only {} runs compared", runs.compared);
-        assert!(
-            runs.cut_within(CORPUS_CUT),
-            "{} of {} inputs are cut off past the bounds, more than the {} of {} recorded",
-            runs.cut,
-            runs.cut + runs.compared,
-            CORPUS_CUT.0,
-            CORPUS_CUT.1
-        );
     }
 
     /// A fresh scratch directory for one test.
@@ -1486,8 +1774,9 @@ mod tests {
     /// The known soundness bugs of `tests/smt-known` are written as queries, the model of each,
     /// a failing input, satisfies its query and traps on the interpreter where the query says,
     /// and `confirm` reports each as known, by its obligation; without the file's `smt:` lines
-    /// each fails the job, and so does a bug known by another obligation, a solver's error, an
-    /// answer missing or given twice, and undecided answers past the baseline.
+    /// each fails the job, and so does a bug known by another obligation, a solver's error, and an
+    /// answer missing or given twice. The export names each check Tier 1 erased once, with what
+    /// the encoding made of it.
     #[test]
     fn test_the_known_soundness_bugs_are_confirmed_on_the_interpreter() {
         let file =
@@ -1496,6 +1785,38 @@ mod tests {
         let w = independent(std::slice::from_ref(&file), &out).unwrap();
         assert_eq!((w.files, w.unchecked, w.unencoded), (1, 0, 0));
         let shown = file.display().to_string();
+        let source = fs::read_to_string(&file).unwrap();
+        assert_eq!(
+            w.export.files.get(&shown),
+            Some(&text_hash(&source)),
+            "{:?}",
+            w.export.files
+        );
+        let n = |c: &dyn Fn(&Class) -> bool| w.export.checks.iter().filter(|e| c(&e.class)).count();
+        assert_eq!(
+            (
+                n(&|c| matches!(c, Class::Query(_))),
+                n(&|c| *c == Class::Unreachable),
+                n(&|c| *c == Class::BeyondBound),
+                n(&|c| *c == Class::BeyondLacked),
+            ),
+            (w.queries, w.unreachable, w.beyond_bound, w.beyond_lacked)
+        );
+        for e in &w.export.checks {
+            assert_eq!(
+                (e.file.as_str(), &e.hash),
+                (shown.as_str(), &text_hash(&source))
+            );
+            if let Class::Query(path) = &e.class {
+                let h = mente_smt::header(&fs::read_to_string(path).unwrap()).unwrap();
+                assert_eq!((&h.function, &h.obligation), (&e.function, &e.obligation));
+                assert_eq!(
+                    format!("{} at {}:{}", h.trap_kind, h.trap_line, h.trap_col),
+                    e.trap
+                );
+            }
+        }
+        assert_eq!(Export::read(&w.export.text()), Ok(w.export.clone()));
         let expect = expected(&shown, &fs::read_to_string(&file).unwrap());
         assert_eq!(expect.len(), 4, "{:?}", expect);
         let model = |function: &str| match function {
@@ -1530,7 +1851,6 @@ mod tests {
         let gate = Gate {
             expect: expect.clone(),
             queries: Some(listed.clone()),
-            baseline: None,
         };
         let c = confirm(&answers, &gate);
         assert!(c.passes() && c.known.len() == 4, "{:#?}", c);
@@ -1574,7 +1894,7 @@ mod tests {
             c
         );
         // A model that does not satisfy its query is a defect, and a known bug not confirmed
-        // fails too; a timeout decides nothing, but past the baseline it fails.
+        // fails too; a timeout decides nothing, which the comparison with the base counts.
         let c = confirm(&format!("{}timeout\tsomewhere.smt2\n", wrong), &gate);
         assert_eq!(
             (c.unconfirmed.len(), c.missing.len(), c.undecided.len()),
@@ -1588,23 +1908,6 @@ mod tests {
             c
         );
         assert!(!c.passes());
-        let tight = Gate {
-            baseline: Some(Baseline {
-                queries: 1,
-                beyond_bound: 0,
-                undecided: 0,
-            }),
-            ..Gate::default()
-        };
-        let many: String = (0..=UNDECIDED_SLACK)
-            .map(|k| line("unknown", &format!("q{}.smt2", k)))
-            .collect();
-        let c = confirm(&many, &tight);
-        assert!(c.over.is_some() && !c.passes(), "{:#?}", c);
-        let fewer: String = (0..UNDECIDED_SLACK)
-            .map(|k| line("timeout", &format!("q{}.smt2", k)))
-            .collect();
-        assert!(confirm(&fewer, &tight).passes());
         // A solver's error, an empty answer, an answer twice, and a query of the list with no
         // answer or an answer to none, each fails the job.
         let first = &listed[0];
@@ -1705,94 +2008,213 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The CI job holds its counts to the baseline it records: the queries it writes and the
-    /// checks cut off by the bound exactly, in either direction, each difference asking for the
-    /// record to be updated in the same pull request; the undecided answers within a few either
-    /// way; and the baseline is read strictly.
+    /// A run is held to its base check by check over the programs both trees hold unchanged: a
+    /// check it checks less of fails it, and so does such a program either export did not read,
+    /// and undecided answers past the slack; a check checked more, a check Tier 1 erases in one run
+    /// alone that is still checked, and programs added, changed or deleted are listed. The keys
+    /// are written and read back strictly.
     #[test]
-    fn test_the_job_holds_its_counts_to_the_recorded_baseline() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let b = Baseline::parse(&fs::read_to_string(root.join(BASELINE)).unwrap()).unwrap();
-        assert!(b.queries >= 1000, "{:?}", b);
-        let workflow = fs::read_to_string(root.join(".github/workflows/smt.yml")).unwrap();
-        assert_eq!(
-            workflow
-                .matches(&format!("--baseline {}", BASELINE))
-                .count(),
-            2,
-            "smt.yml gives the baseline to the export and to the confirmation"
-        );
-        let at = |queries: usize, beyond_bound: usize| Written {
-            queries,
-            beyond_bound,
-            ..Written::default()
+    fn test_a_run_is_held_to_its_base_on_the_programs_both_hold_unchanged() {
+        let check = |file: &str, function: &str, obligation: &str, class: Class| Erased {
+            file: file.to_string(),
+            hash: format!("h-{}", file),
+            function: function.to_string(),
+            obligation: obligation.to_string(),
+            trap: format!("trap of {}", obligation),
+            class,
         };
-        // The counts that depend on the corpus and the encoding alone are held exactly, either
-        // way; the undecided answers within the slack either way.
-        assert!(b.export_problems(&at(b.queries, b.beyond_bound)).is_empty());
-        for (w, says) in [
-            (at(b.queries + 1, b.beyond_bound), "queries were written"),
-            (at(b.queries - 1, b.beyond_bound), "queries were written"),
-            (at(b.queries, b.beyond_bound + 1), "cut off by the bound"),
-            (at(b.queries, b.beyond_bound - 1), "cut off by the bound"),
-        ] {
-            let found = b.export_problems(&w);
-            assert!(
-                found.len() == 1
-                    && found[0].contains(says)
-                    && found[0].contains("in this pull request and say why"),
-                "{:?}",
-                found
-            );
-        }
-        let ten = Baseline { undecided: 10, ..b };
-        for (undecided, holds) in [(4, false), (5, true), (10, true), (15, true), (16, false)] {
-            assert_eq!(
-                ten.undecided_problem(undecided).is_none(),
-                holds,
-                "{}",
-                undecided
-            );
-        }
-        assert_eq!(b.undecided_problem(b.undecided + UNDECIDED_SLACK), None);
-        assert!(b
-            .undecided_problem(b.undecided + UNDECIDED_SLACK + 1)
-            .is_some());
-        let ok = "# a comment\nqueries: 10\nbeyond-bound: 2\nundecided: 0\n";
-        assert_eq!(
-            Baseline::parse(ok),
-            Ok(Baseline {
-                queries: 10,
-                beyond_bound: 2,
-                undecided: 0
-            })
+        let q = |path: &str| Class::Query(path.to_string());
+        let files = |names: &[(&str, &str)]| -> BTreeMap<String, String> {
+            names
+                .iter()
+                .map(|(f, h)| (f.to_string(), h.to_string()))
+                .collect()
+        };
+        let base = Export {
+            files: files(&[
+                ("a.mn", "h-a.mn"),
+                ("b.mn", "h-b.mn"),
+                ("c.mn", "h-c.mn"),
+                ("d.mn", "h-d.mn"),
+            ]),
+            checks: vec![
+                check("a.mn", "f", "divisor at 3:9", q("base/f-3.smt2")),
+                check("a.mn", "f", "range at 4:1 into `u8`", Class::BeyondBound),
+                check("a.mn", "g", "index at 5:2", Class::Unreachable),
+                check("a.mn", "g", "shift at 6:3", q("base/g-6.smt2")),
+                check("b.mn", "f", "divisor at 1:1", q("base/b.smt2")),
+                check("c.mn", "f", "divisor at 1:1", Class::BeyondLacked),
+                check("d.mn", "f", "divisor at 1:1", q("base/d.smt2")),
+            ],
+        };
+        let head = Export {
+            files: files(&[("a.mn", "h-a.mn"), ("b.mn", "h-b2"), ("e.mn", "h-e.mn")]),
+            checks: vec![
+                check("a.mn", "f", "divisor at 3:9", q("head/f-3.smt2")),
+                check("a.mn", "f", "range at 4:1 into `u8`", q("head/f-4.smt2")),
+                check("a.mn", "g", "index at 5:2", Class::Unreachable),
+                check("a.mn", "h", "range at 7:4 into `i8`", q("head/h-7.smt2")),
+                check("b.mn", "f", "divisor at 1:1", Class::BeyondBound),
+                check("e.mn", "f", "divisor at 1:1", q("head/e.smt2")),
+            ],
+        };
+        let answers = |lines: &[(&str, &str)]| -> HashMap<String, String> {
+            answers_of(
+                &lines
+                    .iter()
+                    .map(|(a, p)| format!("{}\t{}\n", a, p))
+                    .collect::<String>(),
+            )
+        };
+        let base_answers = answers(&[("unsat", "base/f-3.smt2"), ("unsat", "base/g-6.smt2")]);
+        let head_answers = answers(&[
+            ("timeout", "head/f-3.smt2"),
+            ("unsat", "head/f-4.smt2"),
+            ("unknown", "head/h-7.smt2"),
+            ("timeout", "head/e.smt2"),
+        ]);
+        let d_here = |file: &str, _: &str| file == "d.mn";
+        let nowhere = |_: &str, _: &str| false;
+        let c = compare(
+            &base,
+            &base_answers,
+            &head,
+            &head_answers,
+            &d_here,
+            &nowhere,
         );
-        for (text, says) in [
-            (
-                "queries: 10\nbeyond-bound: 2\n",
-                "the baseline has no `undecided`",
-            ),
-            (
-                "queries: 10\nqueries: 11\nbeyond-bound: 2\nundecided: 0\n",
-                "`queries` is given twice",
-            ),
-            (
-                "queries: -1\nbeyond-bound: 2\nundecided: 0\n",
-                "`queries: -1` is no decimal count",
-            ),
-            (
-                "queries: 10\nbeyond-bound: 2\nundecided: 0\nunreached: 3\n",
-                "`unreached` is no field of the baseline",
-            ),
-            ("queries 10\n", "`queries 10` is no `name: count` line"),
+        assert_eq!(c.dropped, Vec::<String>::new());
+        assert_eq!(c.lost.len(), 1, "{:#?}", c);
+        assert!(c.lost[0].starts_with("d.mn: both trees hold it unchanged"));
+        assert!(!c.passes());
+        // Only the query both runs ask counts its undecided answers.
+        assert_eq!(c.undecided, (0, 1));
+        let moved = c.moved.join("\n");
+        for part in [
+            "`f`'s obligation `range at 4:1 into `u8`` is cut off by the bound on the base and a query here",
+            "`g`'s obligation `shift at 6:3` is erased by Tier 1 on the base alone",
+            "`h`'s obligation `range at 7:4 into `i8`` is erased by Tier 1 here alone, and a query",
         ] {
-            assert_eq!(Baseline::parse(text), Err(says.to_string()), "{}", text);
+            assert!(moved.contains(part), "{} not in:\n{}", part, moved);
+        }
+        assert_eq!(c.moved.len(), 3, "{:#?}", c);
+        let programs = c.programs.join("\n");
+        for part in [
+            "changed: b.mn: 1 queries, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks on the base; 0 queries, 0 unreachable, 1 cut off by the bound",
+            "deleted: c.mn: 0 queries, 0 unreachable, 0 cut off by the bound, 1 by a construct",
+            "added: e.mn: 1 queries",
+        ] {
+            assert!(programs.contains(part), "{} not in:\n{}", part, programs);
+        }
+        assert_eq!(c.programs.len(), 3, "{:#?}", c);
+        let all = compare(
+            &base,
+            &base_answers,
+            &head,
+            &head_answers,
+            &nowhere,
+            &nowhere,
+        );
+        assert!(all.passes(), "{:#?}", all);
+        // A program the base's tree holds unchanged that its export did not read fails too.
+        let e_there = |file: &str, _: &str| file == "e.mn";
+        let c = compare(
+            &base,
+            &base_answers,
+            &head,
+            &head_answers,
+            &nowhere,
+            &e_there,
+        );
+        assert!(!c.passes(), "{:#?}", c);
+        assert_eq!(
+            c.lost,
+            ["e.mn: both trees hold it unchanged, but the base's export did not read it; this one gave 1 queries, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks"]
+        );
+        // Each check checked less than on the base fails the run.
+        for (k, class, was) in [
+            (
+                0,
+                Class::BeyondBound,
+                "a query on the base and cut off by the bound here",
+            ),
+            (
+                0,
+                Class::Unreachable,
+                "a query on the base and unreachable here",
+            ),
+            (
+                2,
+                Class::BeyondLacked,
+                "unreachable on the base and cut off by a construct the encoding lacks here",
+            ),
+            (
+                3,
+                Class::BeyondBound,
+                "erased by Tier 1 here alone, and cut off by the bound",
+            ),
+        ] {
+            let mut less = head.clone();
+            less.checks[k].class = class;
+            let c = compare(
+                &base,
+                &base_answers,
+                &less,
+                &head_answers,
+                &nowhere,
+                &nowhere,
+            );
+            assert!(
+                !c.passes() && c.dropped.len() == 1 && c.dropped[0].contains(was),
+                "{}: {:#?}",
+                was,
+                c
+            );
+        }
+        // Cut off at one place or at another checks as little.
+        let mut cut = base.clone();
+        cut.checks[1].class = Class::BeyondLacked;
+        let mut other = head.clone();
+        other.checks[1].class = Class::BeyondBound;
+        let c = compare(
+            &cut,
+            &base_answers,
+            &other,
+            &head_answers,
+            &nowhere,
+            &nowhere,
+        );
+        assert!(c.passes(), "{:#?}", c);
+        assert!(c.moved.iter().any(|m| m.contains(
+            "cut off by a construct the encoding lacks on the base and cut off by the bound here"
+        )));
+        // The undecided answers over the checks both query may rise by the slack, not past it.
+        for (base_n, head_n, holds) in [(10, 15, true), (10, 16, false), (0, 5, true), (3, 0, true)]
+        {
+            let c = Comparison {
+                undecided: (base_n, head_n),
+                ..Comparison::default()
+            };
+            assert_eq!(c.passes(), holds, "{} {}", base_n, head_n);
+        }
+        // The keys are written and read back, and read strictly.
+        assert_eq!(Export::read(&base.text()), Ok(base.clone()));
+        for (text, says) in [
+            ("check\ta.mn\th\tf", "`a.mn h f` is no check of six fields"),
+            ("check\ta.mn\th\tf\to\tt\tqueried", "`queried` is no class"),
+            ("file\ta.mn", "`file\ta.mn` is neither a file nor a check"),
+            (
+                "files\ta.mn\th",
+                "`files\ta.mn\th` is neither a file nor a check",
+            ),
+        ] {
+            assert_eq!(Export::read(text), Err(says.to_string()), "{}", text);
         }
     }
 
     /// The checks `tests/smt-known` names as lying past the bounds are erased by Tier 1, fail on
     /// some input, and have no query, the encoding naming them cut off by the bound: the known
-    /// limit of K, which the job counts against its baseline.
+    /// limit of K, which the comparison with the base holds to the base's.
     #[test]
     fn test_a_check_past_the_bound_is_named_cut_off_not_unreachable() {
         let file =

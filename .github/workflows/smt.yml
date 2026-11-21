@@ -11,7 +11,8 @@
 #
 # The independent cross-check closes that gap: `mn smt --independent` encodes each check Tier 1
 # erases from the program itself (compiler/mente-smt, which depends on the syntax tree alone), and
-# `mn smt --confirm` runs each model Z3 finds on the reference interpreter.
+# `mn smt --confirm` runs each model Z3 finds on the reference interpreter. `mn smt --compare` holds
+# the run to its base's, check by check over the programs both trees hold unchanged.
 #
 # Z3 is installed here from its release, pinned and checksummed; it is never a build dependency.
 # Solving runs on GitHub Actions only, never on a laptop.
@@ -170,8 +171,8 @@ jobs:
         # never from Tier 1's facts, unrolling each loop and each recursion up to 3 times
         # (docs/design-review.md, smt-independent-encoding). The known soundness bugs of
         # compiler/mente-cli/tests/smt-known are exported with the rest, and must be confirmed.
-        # The export fails on an obligation of Tier 1 with no site, and on a count of queries or of
-        # checks cut off by the bound that differs from the baseline's, in either direction.
+        # The export fails on an obligation of Tier 1 with no site, and writes what it made of each
+        # check Tier 1 erased, for the comparison with the base.
         run: |
           set -euo pipefail
           mapfile -t pass < <(for f in conformance/*/*.mn; do
@@ -180,7 +181,7 @@ jobs:
           mapfile -t agents < <(find benchmark/probe benchmark/prelim -name '*.mn' | sort)
           start=$(date +%s%N)
           ./target/release/mn smt --independent examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels \
-            compiler/mente-cli/tests/smt-known --out "$RUNNER_TEMP/independent" --baseline compiler/mente-cli/tests/smt-baseline.txt | tee "$RUNNER_TEMP/independent-export.txt"
+            compiler/mente-cli/tests/smt-known --out "$RUNNER_TEMP/independent" --keys "$RUNNER_TEMP/independent-keys.txt" | tee "$RUNNER_TEMP/independent-export.txt"
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           printf 'INDEPENDENT_EXPORT_SECONDS=%d.%03d\n' $((ms / 1000)) $((ms % 1000)) >> "$GITHUB_ENV"
       - name: Ask Z3 for each independent query, and run each model on the reference interpreter
@@ -192,8 +193,8 @@ jobs:
         # are integer arithmetic, linear and nonlinear (a product of two variables, a division or a
         # remainder by one), over arrays, with conversions to bit-vectors for the bit operations; no
         # logic is set, and Z3 chooses. A timeout or `unknown`, which the nonlinear and bit-vector
-        # queries can give, decides nothing: a count past the baseline's margin fails the job, and so do
-        # a solver's error and a query with no answer. The answers are counted by fragment.
+        # queries can give, decides nothing here, and the comparison with the base counts them; a
+        # solver's error and a query with no answer fail the job. The answers are counted by fragment.
         run: |
           set -euo pipefail
           find "$RUNNER_TEMP/independent" -name '*.smt2' | sort > "$RUNNER_TEMP/independent-queries.txt"
@@ -213,8 +214,7 @@ jobs:
           seconds=$(printf '%d.%03d' $((ms / 1000)) $((ms % 1000)))
           status=0
           ./target/release/mn smt --confirm "$RUNNER_TEMP/independent-answers.txt" --queries "$RUNNER_TEMP/independent-queries.txt" \
-            --baseline compiler/mente-cli/tests/smt-baseline.txt --expect compiler/mente-cli/tests/smt-known/loop-candidate-facts.mn \
-            > "$RUNNER_TEMP/confirm.txt" || status=$?
+            --expect compiler/mente-cli/tests/smt-known/loop-candidate-facts.mn > "$RUNNER_TEMP/confirm.txt" || status=$?
           cat "$RUNNER_TEMP/confirm.txt"
           count() { grep -c "^$1: " "$RUNNER_TEMP/confirm.txt" || true; }
           {
@@ -234,11 +234,110 @@ jobs:
             echo "| Export, seconds | $INDEPENDENT_EXPORT_SECONDS |"
             echo "| Z3 ${Z3_VERSION} on every query, seconds, $(nproc) at once | $seconds |"
             echo
-            grep -E '^(Wrote |fragment: |baseline: )' "$RUNNER_TEMP/independent-export.txt" "$RUNNER_TEMP/confirm.txt" \
+            grep -E '^(Wrote |fragment: )' "$RUNNER_TEMP/independent-export.txt" "$RUNNER_TEMP/confirm.txt" \
               | sed -E 's/^[^:]*:/- /' || true
           } | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$status" -ne 0 ]; then
-            echo "::error::the independent cross-check found a soundness bug of Tier 1, a defect of the encoding, a known bug no longer confirmed, a solver's error or a count past its baseline; the lines above name each"
+            echo "::error::the independent cross-check found a soundness bug of Tier 1, a defect of the encoding, a known bug no longer confirmed or a solver's error; the lines above name each"
+          fi
+          exit "$status"
+      - name: Hold the independent cross-check to its base's, over the programs both trees hold unchanged
+        if: steps.watch.outputs.run != 'false'
+        # The base is a commit the checkout already holds, all history being fetched: a pull
+        # request's merge commit's first parent, the commit it was merged onto; a merge group's base
+        # commit; the commit before a push to main. Its compiler, built apart in a target directory
+        # of its own, exports the same corpus from its own tree, with the construct programs this
+        # change wrote, and Z3 answers each of its queries whose text is not this change's; the rest
+        # take this change's answers. `mn smt --compare` then holds this change to the base check by
+        # check, over the programs both trees hold unchanged, where only the encoder or the checker
+        # can have changed anything: a check checked less (a query now unreachable or cut off, an
+        # unreachable check now cut off, a check Tier 1 erases here alone and the encoding cuts off)
+        # fails the job, and so do such a program either export did not read, and undecided answers
+        # past the base's by more than 5. Checks checked more, checks erased by Tier 1 in one run
+        # alone, and programs added, changed or deleted are listed. A base without the encoding has
+        # no export, and every program is new to the comparison.
+        env:
+          GROUP_BASE: ${{ github.event.merge_group.base_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base="HEAD^1" ;;
+            merge_group) base="$GROUP_BASE" ;;
+            push) base="$PUSH_BEFORE" ;;
+            *) echo "::error::a $GITHUB_EVENT_NAME event names no base"; exit 1 ;;
+          esac
+          if [ -z "$base" ]; then echo "::error::the $GITHUB_EVENT_NAME event names no base"; exit 1; fi
+          git worktree add ../base "$base"
+          for f in base-keys base-answers base-queries base-ask base-export; do : > "$RUNNER_TEMP/$f.txt"; done
+          start=$(date +%s%N)
+          if [ -f ../base/compiler/mente-smt/src/lib.rs ]; then
+            (cd ../base && rustup toolchain install && CARGO_TARGET_DIR="$RUNNER_TEMP/target-base" cargo build --release --locked --bin mn)
+            built=$(date +%s%N)
+            mapfile -t pass < <(cd ../base && for f in conformance/*/*.mn; do
+              if [ "$(head -n 1 "$f")" = "// expect: pass" ]; then echo "$f"; fi
+            done)
+            mapfile -t agents < <(cd ../base && find benchmark/probe benchmark/prelim -name '*.mn' | sort)
+            # An obligation of the base's with no site is the base's to fix: its export still
+            # writes its keys, and exits 1. Only a file it cannot read or write fails here.
+            base_status=0
+            (cd ../base && "$RUNNER_TEMP/target-base/release/mn" smt --independent examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels \
+              compiler/mente-cli/tests/smt-known --out "$RUNNER_TEMP/base-independent" --keys "$RUNNER_TEMP/base-keys.txt") \
+              > "$RUNNER_TEMP/base-export.txt" || base_status=$?
+            if [ "$base_status" -gt 1 ]; then
+              cat "$RUNNER_TEMP/base-export.txt"
+              echo "::error::the base's export could not read or write a file"
+              exit 1
+            fi
+            # A query whose text is this change's takes this change's answer; Z3 is asked the rest.
+            find "$RUNNER_TEMP/base-independent" -name '*.smt2' | sort > "$RUNNER_TEMP/base-queries.txt"
+            declare -A answer_of
+            while IFS=$'\t' read -r answer path; do answer_of["$path"]=$answer; done < "$RUNNER_TEMP/independent-answers.txt"
+            while IFS= read -r q; do
+              mine="$RUNNER_TEMP/independent/${q#"$RUNNER_TEMP/base-independent/"}"
+              if [ -n "${answer_of[$mine]+set}" ] && cmp -s "$q" "$mine"; then
+                printf '%s\t%s\n' "${answer_of[$mine]}" "$q" >> "$RUNNER_TEMP/base-answers.txt"
+              else
+                echo "$q" >> "$RUNNER_TEMP/base-ask.txt"
+              fi
+            done < "$RUNNER_TEMP/base-queries.txt"
+            # The function is called by name through xargs and bash -c, which shellcheck does not see.
+            # shellcheck disable=SC2329
+            check() {
+              answer=$(z3 -T:10 "$1" 2>&1 | tr '\n' ' ' | sed 's/ *$//')
+              printf '%s\t%s\n' "$answer" "$1"
+            }
+            export -f check
+            # shellcheck disable=SC2016
+            xargs -a "$RUNNER_TEMP/base-ask.txt" -d '\n' -P "$(nproc)" -n 1 --no-run-if-empty bash -c 'check "$1"' _ \
+              >> "$RUNNER_TEMP/base-answers.txt"
+          else
+            built=$start
+          fi
+          now=$(date +%s%N)
+          seconds() { printf '%d.%03d' $(($1 / 1000000000)) $(($1 / 1000000 % 1000)); }
+          status=0
+          ./target/release/mn smt --compare --base-tree ../base --base "$RUNNER_TEMP/base-keys.txt" "$RUNNER_TEMP/base-answers.txt" \
+            --head "$RUNNER_TEMP/independent-keys.txt" "$RUNNER_TEMP/independent-answers.txt" > "$RUNNER_TEMP/compare.txt" || status=$?
+          cat "$RUNNER_TEMP/compare.txt"
+          count() { grep -c "^$1: " "$RUNNER_TEMP/compare.txt" || true; }
+          {
+            echo "### The independent cross-check against its base"
+            echo
+            echo "| | |"
+            echo "| :--- | ---: |"
+            echo "| Checks of unchanged programs checked less than on the base | $(count dropped) |"
+            echo "| Unchanged programs an export did not read | $(count lost) |"
+            echo "| Checks of unchanged programs checked more, or erased by Tier 1 in one run alone | $(count moved) |"
+            echo "| Programs added, changed or deleted | $(count program) |"
+            echo "| Base queries Z3 was asked, of those written | $(wc -l < "$RUNNER_TEMP/base-ask.txt") of $(wc -l < "$RUNNER_TEMP/base-queries.txt") |"
+            echo "| The base's build, seconds | $(seconds $((built - start))) |"
+            echo "| The base's export and Z3 on its queries, seconds | $(seconds $((now - built))) |"
+            echo
+            grep -E '^(dropped: |lost: |Of the programs |The base at )' "$RUNNER_TEMP/compare.txt" | head -n 40 | sed 's/^/- /' || true
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::this change checks less than its base on programs both trees hold unchanged, an export did not read such a program, or the undecided answers rose past the base's; the lines above name each"
           fi
           exit "$status"
       - name: Keep the queries of a failed run
@@ -254,5 +353,10 @@ jobs:
             ${{ runner.temp }}/independent-answers.txt
             ${{ runner.temp }}/independent-export.txt
             ${{ runner.temp }}/confirm.txt
+            ${{ runner.temp }}/independent-keys.txt
+            ${{ runner.temp }}/base-keys.txt
+            ${{ runner.temp }}/base-answers.txt
+            ${{ runner.temp }}/base-export.txt
+            ${{ runner.temp }}/compare.txt
           if-no-files-found: ignore
           retention-days: 14
