@@ -912,6 +912,21 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f(x: u8) -> bool = x < 1 << 8\n",
         "module m\npub fn f(x: u8) -> bool = x < 1 << 7\n",
     ),
+    emitted(
+        "E0235",
+        FailureClass::Type,
+        "spec/refinement-and-fixed-point.md",
+        "A refinement bound below `i128`",
+        "A refinement's literal bounds are kept exactly, as Tier 1, the lowering and native \
+         code keep them, within `i128` and `u128`, so a bound lies between `i128`'s least \
+         value and `u128`'s greatest. No literal lies above `u128`, so only a negative one \
+         can lie beyond. As a lower bound it bounds nothing the type does not, since every \
+         value of every integer type lies above it: write the type's least value, `0` for a \
+         `u8`, which the fix does. As an upper bound it leaves the refinement no value: write \
+         the bound the values should stay below.",
+        "module m\npub fn f(y: u8[-170141183460469231731687303715884105729..=3]) -> u8 = y\n",
+        "module m\npub fn f(y: u8[0..=3]) -> u8 = y\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,

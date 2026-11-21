@@ -944,6 +944,9 @@ fn check_type(
             refinement: Some(r),
             ..
         } => {
+            if let Some(d) = crate::types::bound_beyond_128_bits(tree, t) {
+                errors.push(d);
+            }
             for b in [&r.lo, &r.hi] {
                 let (Bound::Name(n) | Bound::Len(n)) = b else {
                     continue;
