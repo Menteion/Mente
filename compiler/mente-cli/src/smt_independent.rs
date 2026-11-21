@@ -217,6 +217,9 @@ pub struct Written {
     /// Checks Tier 1 erased that no input reaches, a path being cut off at a construct the
     /// encoding lacks before the check.
     pub beyond_lacked: usize,
+    /// Checks Tier 1 erased that have no site: within a construct the encoding lacks, or in a
+    /// function it does not encode.
+    pub no_site: usize,
     /// Places of constructs the encoding lacks.
     pub unencoded: usize,
     /// Files whose module does not check.
@@ -249,6 +252,17 @@ fn below(out: &Path, file: &Path) -> PathBuf {
 /// the obligation's place; prints each construct the encoding lacks, each obligation with no
 /// site and each file that does not check, and counts each check with no query by why.
 pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
+    independent_with(files, out, &mente_smt::encode)
+}
+
+/// [`independent`], with the encoder given, so that a test can take sites away from it. Every
+/// check Tier 1 erased is exported, whether or not the encoding has a site for it, so that a
+/// check is missing from an export only where Tier 1 did not erase it.
+fn independent_with(
+    files: &[PathBuf],
+    out: &Path,
+    encode: &dyn for<'m> Fn(&'m Module<'m>, usize) -> Encoding,
+) -> Result<Written, String> {
     let mut w = Written {
         files: files.len(),
         ..Written::default()
@@ -258,8 +272,15 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
         let src =
             fs::read_to_string(file).map_err(|e| format!("cannot read `{}`: {}", shown, e))?;
         let hash = text_hash(&src);
-        w.export.files.insert(shown.clone(), hash.clone());
-        let Ok(checked) = mente_sema::check_program(&src) else {
+        let checked = mente_sema::check_program(&src);
+        w.export.files.insert(
+            shown.clone(),
+            Program {
+                hash: hash.clone(),
+                checks: checked.is_ok(),
+            },
+        );
+        let Ok(checked) = checked else {
             println!(
                 "unchecked: {}: the module does not check, so it has no queries",
                 shown
@@ -276,7 +297,7 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
             };
             w.functions += 1;
             let keys = erased(&cf.obligations);
-            let mut enc = mente_smt::encode(&module, i);
+            let mut enc = encode(&module, i);
             for o in unmatched(&cf.obligations, &enc) {
                 println!(
                     "unmatched: {}:{}:{}: the {} obligation of `{}` Tier 1 records has no site in the encoding, a defect of the encoding",
@@ -295,22 +316,14 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
                 );
                 w.unencoded += 1;
             }
+            // What the encoding made of each trap of each erased check, in Tier 1's order.
+            let mut classes: Vec<(Key, Vec<Class>)> =
+                keys.iter().map(|k| (*k, Vec::new())).collect();
             for g in groups(&enc, |k| keys.contains(k)) {
                 let site = &enc.sites[g[0]];
-                let (kind, span) = (site.kind, site.span);
-                let mut erased = Erased {
-                    file: shown.clone(),
-                    hash: hash.clone(),
-                    function: cf.syntax.name.clone(),
-                    obligation: site.obligation(),
-                    trap: format!(
-                        "{} at {}:{}",
-                        site.trap.kind, site.trap.span.line, site.trap.span.col
-                    ),
-                    class: Class::Unreachable,
-                };
-                let Some(text) = enc.query(&g) else {
-                    erased.class = match unqueried(&enc, &g) {
+                let (key, kind, span) = (site.key(), site.kind, site.span);
+                let class = match enc.query(&g) {
+                    None => match unqueried(&enc, &g) {
                         Unqueried::Unreachable => {
                             w.unreachable += 1;
                             Class::Unreachable
@@ -323,32 +336,47 @@ pub fn independent(files: &[PathBuf], out: &Path) -> Result<Written, String> {
                             w.beyond_lacked += 1;
                             Class::BeyondLacked
                         }
-                    };
-                    w.export.checks.push(erased);
-                    continue;
+                    },
+                    Some(text) => {
+                        let base = format!("{}-{}-{}", cf.syntax.name, span.line, kind.name());
+                        let n = seen.entry(base.clone()).or_insert(0);
+                        *n += 1;
+                        let path = match *n {
+                            1 => dir.join(format!("{}.smt2", base)),
+                            n => dir.join(format!("{}-{}.smt2", base, n)),
+                        };
+                        fs::create_dir_all(&dir)
+                            .map_err(|e| format!("cannot create `{}`: {}", dir.display(), e))?;
+                        let place = format!("{}:{}:{}", shown, span.line, span.col);
+                        fs::write(&path, format!("; source: {}\n{}", place, text))
+                            .map_err(|e| format!("cannot write `{}`: {}", path.display(), e))?;
+                        w.queries += 1;
+                        Class::Query(path.display().to_string())
+                    }
                 };
-                let base = format!("{}-{}-{}", cf.syntax.name, span.line, kind.name());
-                let n = seen.entry(base.clone()).or_insert(0);
-                *n += 1;
-                let path = match *n {
-                    1 => dir.join(format!("{}.smt2", base)),
-                    n => dir.join(format!("{}-{}.smt2", base, n)),
-                };
-                fs::create_dir_all(&dir)
-                    .map_err(|e| format!("cannot create `{}`: {}", dir.display(), e))?;
-                let place = format!("{}:{}:{}", shown, span.line, span.col);
-                fs::write(&path, format!("; source: {}\n{}", place, text))
-                    .map_err(|e| format!("cannot write `{}`: {}", path.display(), e))?;
-                erased.class = Class::Query(path.display().to_string());
-                w.export.checks.push(erased);
-                w.queries += 1;
+                if let Some(entry) = classes.iter_mut().find(|(k, _)| *k == key) {
+                    entry.1.push(class);
+                }
+            }
+            for (key, mut found) in classes {
+                if found.is_empty() {
+                    w.no_site += 1;
+                    found.push(Class::NoSite);
+                }
+                w.export.checks.push(Erased {
+                    file: shown.clone(),
+                    hash: hash.clone(),
+                    function: cf.syntax.name.clone(),
+                    obligation: mente_smt::obligation_text(key),
+                    classes: found,
+                });
             }
         }
     }
     Ok(w)
 }
 
-/// What the encoding made of a check Tier 1 erased.
+/// What the encoding made of one trap of a check Tier 1 erased.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Class {
     /// A query, at its path.
@@ -356,6 +384,9 @@ pub enum Class {
     Unreachable,
     BeyondBound,
     BeyondLacked,
+    /// No site at all: the check lies within a construct the encoding lacks, or in a function
+    /// it does not encode.
+    NoSite,
 }
 
 impl Class {
@@ -365,6 +396,7 @@ impl Class {
             Class::Unreachable => "unreachable".to_string(),
             Class::BeyondBound => "beyond-bound".to_string(),
             Class::BeyondLacked => "beyond-lacked".to_string(),
+            Class::NoSite => "no-site".to_string(),
         }
     }
 
@@ -375,16 +407,18 @@ impl Class {
             Class::Unreachable => "unreachable",
             Class::BeyondBound => "cut off by the bound",
             Class::BeyondLacked => "cut off by a construct the encoding lacks",
+            Class::NoSite => "without a site in the encoding",
         }
     }
 
     /// How much of the check is verified: a query, which the solver answers, more than the
-    /// encoding's own finding that no input reaches the check, more than nothing, past a cut.
+    /// encoding's own finding that no input reaches the check, more than nothing, past a cut or
+    /// with no site.
     fn rank(&self) -> u8 {
         match self {
             Class::Query(_) => 2,
             Class::Unreachable => 1,
-            Class::BeyondBound | Class::BeyondLacked => 0,
+            Class::BeyondBound | Class::BeyondLacked | Class::NoSite => 0,
         }
     }
 
@@ -393,73 +427,121 @@ impl Class {
             "unreachable" => Class::Unreachable,
             "beyond-bound" => Class::BeyondBound,
             "beyond-lacked" => Class::BeyondLacked,
+            "no-site" => Class::NoSite,
             _ => Class::Query(text.strip_prefix("query ")?.to_string()),
         })
     }
 }
 
 /// A check Tier 1 erased, as the comparison with the base reads it: its program's file, the hash
-/// of that file's text, its function, its obligation, its trap, and what the encoding made of it.
+/// of that file's text, its function, its obligation, and what the encoding made of each trap
+/// the check raises, in the order the encoding meets them. A check with no site has one class,
+/// [`Class::NoSite`]. Two runs tell their checks apart by function and obligation alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Erased {
     pub file: String,
     pub hash: String,
     pub function: String,
     pub obligation: String,
-    pub trap: String,
-    pub class: Class,
+    pub classes: Vec<Class>,
 }
 
 impl Erased {
-    /// The check as a line of `--keys`: `check`, then its fields, each after a tab.
+    /// The check as a line of `--keys`: `check`, then its fields and each class, each after a
+    /// tab.
     pub fn line(&self) -> String {
-        [
-            "check",
-            &self.file,
-            &self.hash,
-            &self.function,
-            &self.obligation,
-            &self.trap,
-            &self.class.text(),
-        ]
-        .join("\t")
+        let mut fields = vec![
+            "check".to_string(),
+            self.file.clone(),
+            self.hash.clone(),
+            self.function.clone(),
+            self.obligation.clone(),
+        ];
+        fields.extend(self.classes.iter().map(Class::text));
+        fields.join("\t")
     }
 
     fn read(fields: &[&str]) -> Result<Erased, String> {
-        let [file, hash, function, obligation, trap, class] = fields else {
-            return Err(format!("`{}` is no check of six fields", fields.join(" ")));
+        let [file, hash, function, obligation, classes @ ..] = fields else {
+            return Err(format!(
+                "`{}` is no check: a file, a hash, a function, an obligation and its classes",
+                fields.join(" ")
+            ));
         };
+        if classes.is_empty() {
+            return Err(format!("`{}` is a check with no class", fields.join(" ")));
+        }
         Ok(Erased {
             file: file.to_string(),
             hash: hash.to_string(),
             function: function.to_string(),
             obligation: obligation.to_string(),
-            trap: trap.to_string(),
-            class: Class::read(class).ok_or_else(|| format!("`{}` is no class", class))?,
+            classes: classes
+                .iter()
+                .map(|c| Class::read(c).ok_or_else(|| format!("`{}` is no class", c)))
+                .collect::<Result<_, _>>()?,
         })
     }
 
-    /// What tells it from the other checks of its program.
-    fn key(&self) -> (&str, &str, &str) {
-        (&self.function, &self.obligation, &self.trap)
+    /// What tells it from the other checks of its program: its function and its obligation.
+    fn key(&self) -> (&str, &str) {
+        (&self.function, &self.obligation)
+    }
+
+    /// How much of the check is verified: as much as its least verified trap ([`Class::rank`]).
+    fn rank(&self) -> u8 {
+        self.classes.iter().map(Class::rank).min().unwrap_or(0)
+    }
+
+    /// The paths of its queries.
+    fn queries(&self) -> Vec<&str> {
+        self.classes
+            .iter()
+            .filter_map(|c| match c {
+                Class::Query(path) => Some(path.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Its classes, their queries' paths aside, as a summary writes them.
+    fn kinds(&self) -> String {
+        let kinds: Vec<&str> = self.classes.iter().map(Class::kind).collect();
+        kinds.join(", ")
+    }
+
+    /// Whether this run's check is verified less than the base's `base`: its least verified
+    /// trap lower, or, where some trap goes unqueried, fewer of its traps queried.
+    fn less_than(&self, base: &Erased) -> bool {
+        self.rank() < base.rank()
+            || (self.rank() < 2 && self.queries().len() < base.queries().len())
     }
 }
 
-/// What an export wrote of each program: the hash of each file it read, one that does not check
-/// included, and each check Tier 1 erased.
+/// A file an export read: the hash of its text, and whether its module checks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Program {
+    pub hash: String,
+    pub checks: bool,
+}
+
+/// What an export wrote of each program: each file it read, one that does not check included,
+/// and each check Tier 1 erased in them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Export {
-    pub files: BTreeMap<String, String>,
+    pub files: BTreeMap<String, Program>,
     pub checks: Vec<Erased>,
 }
 
 impl Export {
-    /// The export as `--keys` writes it: a line `file`, its path and its hash for each file, then
-    /// a line for each check ([`Erased::line`]), each field after a tab.
+    /// The export as `--keys` writes it: for each file a line `file`, its path, its hash and
+    /// `checked` or `unchecked`, then a line for each check ([`Erased::line`]), each field after
+    /// a tab.
     pub fn text(&self) -> String {
         let mut out = String::new();
-        for (file, hash) in &self.files {
-            out.push_str(&["file", file, hash].join("\t"));
+        for (file, p) in &self.files {
+            let checks = if p.checks { "checked" } else { "unchecked" };
+            out.push_str(&["file", file, &p.hash, checks].join("\t"));
             out.push('\n');
         }
         for e in &self.checks {
@@ -474,8 +556,12 @@ impl Export {
         for line in text.lines().filter(|l| !l.is_empty()) {
             let fields: Vec<&str> = line.split('\t').collect();
             match fields.split_first() {
-                Some((&"file", [file, hash])) => {
-                    export.files.insert(file.to_string(), hash.to_string());
+                Some((&"file", [file, hash, checks @ ("checked" | "unchecked")])) => {
+                    let program = Program {
+                        hash: hash.to_string(),
+                        checks: *checks == "checked",
+                    };
+                    export.files.insert(file.to_string(), program);
                 }
                 Some((&"check", rest)) => export.checks.push(Erased::read(rest)?),
                 _ => return Err(format!("`{}` is neither a file nor a check", line)),
@@ -486,6 +572,15 @@ impl Export {
 
     fn of(&self, file: &str) -> Vec<&Erased> {
         self.checks.iter().filter(|e| e.file == file).collect()
+    }
+
+    /// The files it read, by the hash of their text, each hash's files in order.
+    fn by_hash(&self) -> BTreeMap<&str, Vec<&str>> {
+        let mut out: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (file, p) in &self.files {
+            out.entry(p.hash.as_str()).or_default().push(file.as_str());
+        }
+        out
     }
 }
 
@@ -502,32 +597,117 @@ pub fn text_hash(text: &str) -> String {
 /// give, since a timeout depends on the runner.
 pub const UNDECIDED_SLACK: usize = 5;
 
+/// The share of a run's queries that may be undecided, over all of them: at most one in
+/// `UNDECIDED_SHARE`, so that the slack above cannot accumulate from one pull request to the
+/// next, nor hide in new programs.
+pub const UNDECIDED_SHARE: usize = 200;
+
+/// The trailer of a commit message that lets one check be verified less than on the base:
+/// `Smt-Drop: <file> <function> <obligation>: <reason>`, the file and the obligation exactly as
+/// the comparison names them. It holds for the commits between the base and the run, and so
+/// expires with its pull request.
+pub const WAIVER_TRAILER: &str = "Smt-Drop";
+
+/// A check a commit lets the run verify less than its base does, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Waiver {
+    pub file: String,
+    pub function: String,
+    pub obligation: String,
+    pub reason: String,
+}
+
+impl Waiver {
+    /// Reads a trailer's value, `<file> <function> <obligation>: <reason>`: the file and the
+    /// function are words, the obligation runs to the first `: `, and the reason is not empty.
+    fn read(value: &str) -> Result<Waiver, String> {
+        let bad = || {
+            format!(
+                "`{}: {}` is no waiver: write `{}: <file> <function> <obligation>: <reason>`",
+                WAIVER_TRAILER, value, WAIVER_TRAILER
+            )
+        };
+        let mut words = value.trim().splitn(3, ' ');
+        let (Some(file), Some(function), Some(rest)) = (words.next(), words.next(), words.next())
+        else {
+            return Err(bad());
+        };
+        let (obligation, reason) = rest.split_once(": ").ok_or_else(bad)?;
+        if file.is_empty()
+            || function.is_empty()
+            || obligation.is_empty()
+            || reason.trim().is_empty()
+        {
+            return Err(bad());
+        }
+        Ok(Waiver {
+            file: file.to_string(),
+            function: function.to_string(),
+            obligation: obligation.to_string(),
+            reason: reason.trim().to_string(),
+        })
+    }
+
+    fn text(&self) -> String {
+        format!(
+            "{}: {} {} {}: {}",
+            WAIVER_TRAILER, self.file, self.function, self.obligation, self.reason
+        )
+    }
+}
+
+/// The waivers of the trailers' values, one a line, as `git log --format=%(trailers:...)` prints
+/// them, blank lines aside; and each line that is no waiver.
+pub fn waivers_of(text: &str) -> (Vec<Waiver>, Vec<String>) {
+    let mut waivers = Vec::new();
+    let mut bad = Vec::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        match Waiver::read(line) {
+            Ok(w) => waivers.push(w),
+            Err(e) => bad.push(e),
+        }
+    }
+    (waivers, bad)
+}
+
 /// What the comparison of a run with its base found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Comparison {
-    /// Checks of programs both trees hold unchanged that the run checks less of than its base
-    /// ([`Class::rank`]): a check both erase that fell, and a check Tier 1 erases in the run alone
-    /// that the encoding cuts off. Each fails the run, since only the encoder or the checker can
-    /// have changed them.
+    /// Checks of programs both trees hold unchanged that the run verifies less than its base
+    /// ([`Erased::less_than`]), no waiver naming them: a check both erase that fell, and a check
+    /// Tier 1 erases in the run alone that the encoding cuts off or has no site for. Each fails
+    /// the run, since only the encoder or the checker can have changed them.
     pub dropped: Vec<String>,
+    /// The checks a waiver let through, each with its reason.
+    pub waived: Vec<String>,
+    /// Waivers no dropped check used, and trailers that are no waiver; each fails the run.
+    pub unused: Vec<String>,
     /// Programs both trees hold unchanged that one export did not read, the run's or the base's,
     /// which fails the run: a floor derived from the trees, so that an export that lost its
     /// programs cannot pass as a comparison of fewer.
     pub lost: Vec<String>,
+    /// Programs both trees hold unchanged whose module the base checks and the run does not,
+    /// which fails it.
+    pub unchecked: Vec<String>,
     /// The undecided answers over the checks both runs query: the base's and the run's.
     pub undecided: (usize, usize),
-    /// Checks of programs both hold unchanged that the run checks no less of, but otherwise: one
-    /// that rose, and one Tier 1 erases in one run alone that the other checks no less of.
+    /// The run's undecided answers over all its queries, and its queries.
+    pub total: (usize, usize),
+    /// Checks of programs both hold unchanged that the run verifies no less, but otherwise: one
+    /// whose classes changed, and one Tier 1 erases in one run alone that is still verified.
     pub moved: Vec<String>,
-    /// Programs added, changed or deleted, with their counts.
+    /// Programs added, changed, renamed or deleted, with their counts.
     pub programs: Vec<String>,
 }
 
 impl Comparison {
     pub fn passes(&self) -> bool {
         self.dropped.is_empty()
+            && self.unused.is_empty()
             && self.lost.is_empty()
+            && self.unchecked.is_empty()
             && self.undecided.1 <= self.undecided.0 + UNDECIDED_SLACK
+            && self.total.0 * UNDECIDED_SHARE <= self.total.1
     }
 }
 
@@ -549,22 +729,26 @@ pub fn answers_of(text: &str) -> HashMap<String, String> {
         .collect()
 }
 
-/// The counts of one program's checks, as a summary lists them.
+/// The counts of one program's checks, as a summary lists them, by their least verified trap.
 fn counts(checks: &[&Erased]) -> String {
-    let n = |c: &dyn Fn(&Class) -> bool| checks.iter().filter(|e| c(&e.class)).count();
+    let n = |c: &dyn Fn(&Class) -> bool| checks.iter().filter(|e| e.classes.iter().any(c)).count();
     format!(
-        "{} queries, {} unreachable, {} cut off by the bound, {} by a construct the encoding lacks",
+        "{} checks: {} with a query, {} unreachable, {} cut off by the bound, {} by a construct the encoding lacks, {} without a site",
+        checks.len(),
         n(&|c| matches!(c, Class::Query(_))),
         n(&|c| *c == Class::Unreachable),
         n(&|c| *c == Class::BeyondBound),
-        n(&|c| *c == Class::BeyondLacked)
+        n(&|c| *c == Class::BeyondLacked),
+        n(&|c| *c == Class::NoSite)
     )
 }
 
-/// Compares a run with its base, check by check over the programs both hold unchanged, a program
-/// being unchanged when its file has one hash in both. `here` tells whether a file of the base
-/// lies unchanged in the run's tree, its text hashing to the hash given, and `there` whether a
-/// file of the run lies unchanged in the base's.
+/// Compares a run with its base, check by check over the programs both hold unchanged: a
+/// program is unchanged when one hash of its text is in both, whatever its path. `here` tells
+/// whether a file of the base lies unchanged in the run's tree, its text hashing to the hash
+/// given, and `there` whether a file of the run lies unchanged in the base's. A check the run
+/// verifies less is let through by a waiver that names it by the run's path, its function and
+/// its obligation exactly.
 pub fn compare(
     base: &Export,
     base_answers: &HashMap<String, String>,
@@ -572,80 +756,121 @@ pub fn compare(
     head_answers: &HashMap<String, String>,
     here: &dyn Fn(&str, &str) -> bool,
     there: &dyn Fn(&str, &str) -> bool,
+    waivers: &[Waiver],
 ) -> Comparison {
     let mut c = Comparison::default();
-    for (file, hash) in &base.files {
-        let base_checks = base.of(file);
-        match head.files.get(file) {
-            Some(head_hash) if head_hash == hash => {
-                let head_checks = head.of(file);
-                for be in &base_checks {
-                    let Some(he) = head_checks.iter().find(|he| he.key() == be.key()) else {
-                        c.moved.push(format!(
-                            "{}: `{}`'s obligation `{}` is erased by Tier 1 on the base alone",
-                            file, be.function, be.obligation
-                        ));
-                        continue;
-                    };
-                    let line = format!(
-                        "{}: `{}`'s obligation `{}` is {} on the base and {} here",
-                        file,
-                        be.function,
-                        be.obligation,
-                        be.class.kind(),
-                        he.class.kind()
-                    );
-                    if he.class.rank() < be.class.rank() {
-                        c.dropped.push(line);
-                    } else if he.class.kind() != be.class.kind() {
-                        c.moved.push(line);
-                    } else if let (Class::Query(bp), Class::Query(hp)) = (&be.class, &he.class) {
-                        c.undecided.0 += usize::from(undecided(base_answers, bp));
-                        c.undecided.1 += usize::from(undecided(head_answers, hp));
-                    }
-                }
-                for he in head_checks
-                    .iter()
-                    .filter(|he| !base_checks.iter().any(|be| be.key() == he.key()))
-                {
-                    let line = format!(
-                        "{}: `{}`'s obligation `{}` is erased by Tier 1 here alone, and {}",
-                        file,
-                        he.function,
-                        he.obligation,
-                        he.class.kind()
-                    );
-                    if he.class.rank() == 0 {
-                        c.dropped.push(line);
-                    } else {
-                        c.moved.push(line);
-                    }
-                }
+    let mut used = vec![false; waivers.len()];
+    let mut less = |c: &mut Comparison, file: &str, e: &Erased, line: String| match waivers
+        .iter()
+        .position(|w| w.file == file && w.function == e.function && w.obligation == e.obligation)
+    {
+        Some(k) => {
+            used[k] = true;
+            c.waived.push(format!("{}; {}", line, waivers[k].reason));
+        }
+        None => c.dropped.push(line),
+    };
+    let (base_hashes, head_hashes) = (base.by_hash(), head.by_hash());
+    for (hash, base_files) in &base_hashes {
+        let Some(head_files) = head_hashes.get(hash) else {
+            continue;
+        };
+        let (bf, hf) = (base_files[0], head_files[0]);
+        if bf != hf {
+            c.programs.push(format!("renamed: {} to {}", bf, hf));
+        }
+        if base.files[bf].checks && !head.files[hf].checks {
+            c.unchecked.push(format!(
+                "{}: the base's checker accepts its module and this run's does not",
+                hf
+            ));
+            continue;
+        }
+        let (base_checks, head_checks) = (base.of(bf), head.of(hf));
+        for be in &base_checks {
+            let Some(he) = head_checks.iter().find(|he| he.key() == be.key()) else {
+                c.moved.push(format!(
+                    "{}: `{}`'s obligation `{}` is erased by Tier 1 on the base alone",
+                    hf, be.function, be.obligation
+                ));
+                continue;
+            };
+            let line = format!(
+                "{}: `{}`'s obligation `{}` is {} on the base and {} here",
+                hf,
+                be.function,
+                be.obligation,
+                be.kinds(),
+                he.kinds()
+            );
+            if he.less_than(be) {
+                less(&mut c, hf, he, line);
+            } else if he.kinds() != be.kinds() {
+                c.moved.push(line);
             }
-            Some(_) => c.programs.push(format!(
-                "changed: {}: {} on the base; {} here",
-                file,
-                counts(&base_checks),
-                counts(&head.of(file))
-            )),
-            None if here(file, hash) => c.lost.push(format!(
-                "{}: both trees hold it unchanged, but this export did not read it; the base's gave {}",
-                file,
-                counts(&base_checks)
-            )),
-            None => c.programs.push(format!(
-                "deleted: {}: {} on the base",
-                file,
-                counts(&base_checks)
-            )),
+            if !be.queries().is_empty() && !he.queries().is_empty() {
+                c.undecided.0 += be
+                    .queries()
+                    .iter()
+                    .filter(|p| undecided(base_answers, p))
+                    .count();
+                c.undecided.1 += he
+                    .queries()
+                    .iter()
+                    .filter(|p| undecided(head_answers, p))
+                    .count();
+            }
+        }
+        for he in head_checks
+            .iter()
+            .filter(|he| !base_checks.iter().any(|be| be.key() == he.key()))
+        {
+            let line = format!(
+                "{}: `{}`'s obligation `{}` is erased by Tier 1 here alone, and {}",
+                hf,
+                he.function,
+                he.obligation,
+                he.kinds()
+            );
+            if he.rank() == 0 {
+                less(&mut c, hf, he, line);
+            } else {
+                c.moved.push(line);
+            }
         }
     }
-    for (file, hash) in head
+    for (file, p) in base
         .files
         .iter()
-        .filter(|(f, _)| !base.files.contains_key(*f))
+        .filter(|(_, p)| !head_hashes.contains_key(p.hash.as_str()))
     {
-        if there(file, hash) {
+        if head.files.contains_key(file) {
+            c.programs.push(format!(
+                "changed: {}: {} on the base; {} here",
+                file,
+                counts(&base.of(file)),
+                counts(&head.of(file))
+            ));
+        } else if here(file, &p.hash) {
+            c.lost.push(format!(
+                "{}: both trees hold it unchanged, but this export did not read it; the base's gave {}",
+                file,
+                counts(&base.of(file))
+            ));
+        } else {
+            c.programs.push(format!(
+                "deleted: {}: {} on the base",
+                file,
+                counts(&base.of(file))
+            ));
+        }
+    }
+    for (file, p) in head
+        .files
+        .iter()
+        .filter(|(f, p)| !base_hashes.contains_key(p.hash.as_str()) && !base.files.contains_key(*f))
+    {
+        if there(file, &p.hash) {
             c.lost.push(format!(
                 "{}: both trees hold it unchanged, but the base's export did not read it; this one gave {}",
                 file,
@@ -656,6 +881,22 @@ pub fn compare(
                 .push(format!("added: {}: {}", file, counts(&head.of(file))));
         }
     }
+    for (w, used) in waivers.iter().zip(used) {
+        if !used {
+            c.unused.push(format!(
+                "{}: no check of a program both trees hold unchanged that this run verifies less is named so",
+                w.text()
+            ));
+        }
+    }
+    let queries: Vec<&str> = head.checks.iter().flat_map(|e| e.queries()).collect();
+    c.total = (
+        queries
+            .iter()
+            .filter(|p| undecided(head_answers, p))
+            .count(),
+        queries.len(),
+    );
     c
 }
 
@@ -665,17 +906,66 @@ fn unchanged_in(tree: &Path, path: &str, hash: &str) -> bool {
     fs::read_to_string(tree.join(path)).is_ok_and(|t| text_hash(&t) == hash)
 }
 
-/// The file whose presence in a tree tells that its commit has the independent encoding, and so
-/// that its export can be compared with.
-pub const ENCODING_FILE: &str = "compiler/mente-smt/src/lib.rs";
+/// The package the independent encoding is: a commit whose workspace holds it has an export to
+/// compare with.
+pub const ENCODING_PACKAGE: &str = "mente-smt";
 
-/// `mn smt --compare --base-tree <dir> --base <keys> <answers> --head <keys> <answers>`, run in
-/// the run's own tree: compares a run of the independent cross-check with its base's
-/// ([`compare`]), the base's commit checked out at `<dir>`, and prints what it finds. A base
-/// without the encoding ([`ENCODING_FILE`]) has no export, and every program is new to the
-/// comparison. Exits 1 when the run checks less of a check of a program both trees hold
-/// unchanged, when either export did not read such a program, or when the undecided answers over
-/// the checks both query rose past [`UNDECIDED_SLACK`], and 2 when a file cannot be read.
+/// Whether the workspace at `tree` holds [`ENCODING_PACKAGE`]: one of the members its
+/// `Cargo.toml` lists names that package, wherever it lies.
+pub fn encodes(tree: &Path) -> Result<bool, String> {
+    let manifest = tree.join("Cargo.toml");
+    let root = fs::read_to_string(&manifest)
+        .map_err(|e| format!("cannot read `{}`: {}", manifest.display(), e))?;
+    let Some(start) = root.find("members = [") else {
+        return Err(format!("`{}` lists no members", manifest.display()));
+    };
+    let list = &root[start + "members = [".len()..];
+    let list = &list[..list.find(']').unwrap_or(list.len())];
+    let wanted = format!("name = \"{}\"", ENCODING_PACKAGE);
+    for member in list.split('"').skip(1).step_by(2) {
+        let text = fs::read_to_string(tree.join(member).join("Cargo.toml")).unwrap_or_default();
+        let package = text
+            .lines()
+            .skip_while(|l| l.trim() != "[package]")
+            .skip(1)
+            .take_while(|l| !l.trim_start().starts_with('['));
+        if package.into_iter().any(|l| l.trim() == wanted) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// `mn smt --encodes <dir>`: exits 0 when the workspace at `<dir>` holds the independent
+/// encoding ([`encodes`]), 1 when it does not, and 2 when its manifest cannot be read.
+pub fn cmd_encodes(args: &[String]) {
+    let [tree] = args else {
+        eprintln!("Usage: mn smt --encodes <dir>");
+        std::process::exit(2);
+    };
+    match encodes(Path::new(tree)) {
+        Ok(true) => println!("`{}` holds {}.", tree, ENCODING_PACKAGE),
+        Ok(false) => {
+            println!("`{}` does not hold {}.", tree, ENCODING_PACKAGE);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
+    }
+}
+
+/// `mn smt --compare --base-tree <dir> --base <keys> <answers> --head <keys> <answers> --waivers
+/// <file>`, run in the run's own tree: compares a run of the independent cross-check with its
+/// base's ([`compare`]), the base's commit checked out at `<dir>`, under the waivers of
+/// `<file>` ([`waivers_of`]), and prints what it finds. A base whose workspace lacks the
+/// encoding ([`encodes`]) has no export, and every program is new to the comparison. Exits 1
+/// when the run verifies less of a check of a program both trees hold unchanged and no waiver
+/// names it, when a waiver is unused or no waiver, when either export did not read such a
+/// program, when the run no longer checks one, or when its undecided answers pass the base's by
+/// more than [`UNDECIDED_SLACK`] or one in [`UNDECIDED_SHARE`] of its queries; and 2 when a
+/// file cannot be read.
 pub fn cmd_compare(args: &[String]) {
     let read = |file: &str| match fs::read_to_string(file) {
         Ok(text) => text,
@@ -691,33 +981,48 @@ pub fn cmd_compare(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let (tree, base, head) = match args {
-        [t, tree, b, bk, ba, h, hk, ha] if t == "--base-tree" && b == "--base" && h == "--head" => {
-            (Path::new(tree), (bk, ba), (hk, ha))
+    let (tree, base, head, waivers) = match args {
+        [t, tree, b, bk, ba, h, hk, ha, w, waivers]
+            if t == "--base-tree" && b == "--base" && h == "--head" && w == "--waivers" =>
+        {
+            (Path::new(tree), (bk, ba), (hk, ha), waivers)
         }
         _ => {
-            eprintln!("Usage: mn smt --compare --base-tree <dir> --base <keys> <answers> --head <keys> <answers>");
+            eprintln!("Usage: mn smt --compare --base-tree <dir> --base <keys> <answers> --head <keys> <answers> --waivers <file>");
             std::process::exit(2);
         }
     };
-    let encodes = tree.join(ENCODING_FILE).is_file();
+    let encodes = match encodes(tree) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(2);
+        }
+    };
     if !encodes {
         println!(
-            "The base at `{}` has no independent encoding, so every program is new to the comparison.",
-            tree.display()
+            "The base at `{}` does not hold {}, so every program is new to the comparison.",
+            tree.display(),
+            ENCODING_PACKAGE
         );
     }
-    let c = compare(
+    let (waivers, bad) = waivers_of(&read(waivers));
+    let mut c = compare(
         &export(base.0),
         &answers_of(&read(base.1)),
         &export(head.0),
         &answers_of(&read(head.1)),
         &|path, hash| unchanged_in(Path::new(""), path, hash),
         &|path, hash| encodes && unchanged_in(tree, path, hash),
+        &waivers,
     );
+    c.unused.extend(bad);
     for (prefix, lines) in [
         ("dropped", &c.dropped),
+        ("waived", &c.waived),
+        ("unused", &c.unused),
         ("lost", &c.lost),
+        ("unchecked", &c.unchecked),
         ("moved", &c.moved),
         ("program", &c.programs),
     ] {
@@ -726,13 +1031,18 @@ pub fn cmd_compare(args: &[String]) {
         }
     }
     println!(
-        "Of the programs both trees hold unchanged, {} checks are checked less than on the base, {} programs were not read, and {} checks moved otherwise; {} programs were added, changed or deleted; undecided over the checks both query: {} on the base, {} here.",
+        "Of the programs both trees hold unchanged, {} checks are verified less than on the base and {} more waived, {} programs were not read and {} no longer check, and {} checks moved otherwise; {} waivers are unused or malformed; {} programs were added, changed, renamed or deleted. Undecided: {} on the base and {} here over the checks both query, {} of this run's {} queries.",
         c.dropped.len(),
+        c.waived.len(),
         c.lost.len(),
+        c.unchecked.len(),
         c.moved.len(),
+        c.unused.len(),
         c.programs.len(),
         c.undecided.0,
-        c.undecided.1
+        c.undecided.1,
+        c.total.0,
+        c.total.1
     );
     if !c.passes() {
         std::process::exit(1);
@@ -1097,7 +1407,7 @@ pub fn cmd_independent(args: &[String]) {
     match independent(&files, &out) {
         Ok(w) => {
             println!(
-                "Wrote {} independent queries for {} functions of {} files to `{}`. Of the checks Tier 1 erased that no input reaches, {} are unreachable, {} lie past the bounds and {} past a construct the encoding lacks. {} places hold a construct the encoding lacks, {} files do not check, {} obligations have no site.",
+                "Wrote {} independent queries for {} functions of {} files to `{}`. Of the checks Tier 1 erased that no input reaches, {} are unreachable, {} lie past the bounds and {} past a construct the encoding lacks; {} have no site, lying within such a construct. {} places hold a construct the encoding lacks, {} files do not check, {} obligations have no site where they should.",
                 w.queries,
                 w.functions,
                 w.files,
@@ -1105,6 +1415,7 @@ pub fn cmd_independent(args: &[String]) {
                 w.unreachable,
                 w.beyond_bound,
                 w.beyond_lacked,
+                w.no_site,
                 w.unencoded,
                 w.unchecked,
                 w.unmatched
@@ -1788,32 +2099,65 @@ mod tests {
         let source = fs::read_to_string(&file).unwrap();
         assert_eq!(
             w.export.files.get(&shown),
-            Some(&text_hash(&source)),
+            Some(&Program {
+                hash: text_hash(&source),
+                checks: true
+            }),
             "{:?}",
             w.export.files
         );
-        let n = |c: &dyn Fn(&Class) -> bool| w.export.checks.iter().filter(|e| c(&e.class)).count();
+        // Every check Tier 1 erased is exported once, with a class for each of its traps.
+        let checked = mente_sema::check_program(&source).unwrap();
+        let erased_keys: Vec<(String, String)> = checked
+            .functions
+            .iter()
+            .flatten()
+            .flat_map(|cf| {
+                erased(&cf.obligations)
+                    .into_iter()
+                    .map(|k| (cf.syntax.name.clone(), mente_smt::obligation_text(k)))
+            })
+            .collect();
+        let exported: Vec<(String, String)> = w
+            .export
+            .checks
+            .iter()
+            .map(|e| (e.function.clone(), e.obligation.clone()))
+            .collect();
+        assert_eq!(exported, erased_keys);
+        let n = |c: &dyn Fn(&Class) -> bool| {
+            w.export
+                .checks
+                .iter()
+                .flat_map(|e| &e.classes)
+                .filter(|k| c(k))
+                .count()
+        };
         assert_eq!(
             (
                 n(&|c| matches!(c, Class::Query(_))),
                 n(&|c| *c == Class::Unreachable),
                 n(&|c| *c == Class::BeyondBound),
                 n(&|c| *c == Class::BeyondLacked),
+                n(&|c| *c == Class::NoSite),
             ),
-            (w.queries, w.unreachable, w.beyond_bound, w.beyond_lacked)
+            (
+                w.queries,
+                w.unreachable,
+                w.beyond_bound,
+                w.beyond_lacked,
+                w.no_site
+            )
         );
         for e in &w.export.checks {
             assert_eq!(
                 (e.file.as_str(), &e.hash),
                 (shown.as_str(), &text_hash(&source))
             );
-            if let Class::Query(path) = &e.class {
+            assert!(!e.classes.is_empty());
+            for path in e.queries() {
                 let h = mente_smt::header(&fs::read_to_string(path).unwrap()).unwrap();
                 assert_eq!((&h.function, &h.obligation), (&e.function, &e.obligation));
-                assert_eq!(
-                    format!("{} at {}:{}", h.trap_kind, h.trap_line, h.trap_col),
-                    e.trap
-                );
             }
         }
         assert_eq!(Export::read(&w.export.text()), Ok(w.export.clone()));
@@ -2008,208 +2352,521 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A run is held to its base check by check over the programs both trees hold unchanged: a
-    /// check it checks less of fails it, and so does such a program either export did not read,
-    /// and undecided answers past the slack; a check checked more, a check Tier 1 erases in one run
-    /// alone that is still checked, and programs added, changed or deleted are listed. The keys
-    /// are written and read back strictly.
-    #[test]
-    fn test_a_run_is_held_to_its_base_on_the_programs_both_hold_unchanged() {
-        let check = |file: &str, function: &str, obligation: &str, class: Class| Erased {
+    /// A check of the comparison's tests: its file, the hash of the file, its function, its
+    /// obligation and its classes.
+    fn check(file: &str, function: &str, obligation: &str, classes: &[Class]) -> Erased {
+        Erased {
             file: file.to_string(),
             hash: format!("h-{}", file),
             function: function.to_string(),
             obligation: obligation.to_string(),
-            trap: format!("trap of {}", obligation),
-            class,
-        };
-        let q = |path: &str| Class::Query(path.to_string());
-        let files = |names: &[(&str, &str)]| -> BTreeMap<String, String> {
-            names
+            classes: classes.to_vec(),
+        }
+    }
+
+    fn q(path: &str) -> Class {
+        Class::Query(path.to_string())
+    }
+
+    /// The files of an export of the comparison's tests: each path, its text's hash, and whether
+    /// its module checks.
+    fn programs(files: &[(&str, &str, bool)]) -> BTreeMap<String, Program> {
+        files
+            .iter()
+            .map(|(f, h, checks)| {
+                (
+                    f.to_string(),
+                    Program {
+                        hash: h.to_string(),
+                        checks: *checks,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn answers(lines: &[(&str, &str)]) -> HashMap<String, String> {
+        answers_of(
+            &lines
                 .iter()
-                .map(|(f, h)| (f.to_string(), h.to_string()))
-                .collect()
-        };
+                .map(|(a, p)| format!("{}\t{}\n", a, p))
+                .collect::<String>(),
+        )
+    }
+
+    /// A base, and a run of it that lists one of each thing the comparison lists, and holds a
+    /// program the base checks and the run does not.
+    fn base_and_run() -> (Export, Export) {
         let base = Export {
-            files: files(&[
-                ("a.mn", "h-a.mn"),
-                ("b.mn", "h-b.mn"),
-                ("c.mn", "h-c.mn"),
-                ("d.mn", "h-d.mn"),
+            files: programs(&[
+                ("a.mn", "h-a.mn", true),
+                ("b.mn", "h-b.mn", true),
+                ("c.mn", "h-c.mn", true),
+                ("d.mn", "h-d.mn", true),
+                ("r.mn", "h-r.mn", true),
+                ("u.mn", "h-u.mn", true),
             ]),
             checks: vec![
-                check("a.mn", "f", "divisor at 3:9", q("base/f-3.smt2")),
-                check("a.mn", "f", "range at 4:1 into `u8`", Class::BeyondBound),
-                check("a.mn", "g", "index at 5:2", Class::Unreachable),
-                check("a.mn", "g", "shift at 6:3", q("base/g-6.smt2")),
-                check("b.mn", "f", "divisor at 1:1", q("base/b.smt2")),
-                check("c.mn", "f", "divisor at 1:1", Class::BeyondLacked),
-                check("d.mn", "f", "divisor at 1:1", q("base/d.smt2")),
+                check("a.mn", "f", "divisor at 3:9", &[q("base/f-3.smt2")]),
+                check("a.mn", "f", "range at 4:1 into `u8`", &[Class::BeyondBound]),
+                check("a.mn", "g", "index at 5:2", &[Class::Unreachable]),
+                check("a.mn", "g", "shift at 6:3", &[q("base/g-6.smt2")]),
+                check(
+                    "a.mn",
+                    "k",
+                    "range at 8:2 into `i8`",
+                    &[q("base/k-8.smt2"), Class::BeyondBound],
+                ),
+                check("b.mn", "f", "divisor at 1:1", &[q("base/b.smt2")]),
+                check("c.mn", "f", "divisor at 1:1", &[Class::BeyondLacked]),
+                check("d.mn", "f", "divisor at 1:1", &[q("base/d.smt2")]),
+                check("r.mn", "f", "divisor at 2:2", &[q("base/r.smt2")]),
+                check("u.mn", "f", "divisor at 1:1", &[q("base/u.smt2")]),
             ],
         };
-        let head = Export {
-            files: files(&[("a.mn", "h-a.mn"), ("b.mn", "h-b2"), ("e.mn", "h-e.mn")]),
+        let mut run = Export {
+            files: programs(&[
+                ("a.mn", "h-a.mn", true),
+                ("b.mn", "h-b2", true),
+                ("e.mn", "h-e.mn", true),
+                ("s.mn", "h-r.mn", true),
+                ("u.mn", "h-u.mn", false),
+            ]),
             checks: vec![
-                check("a.mn", "f", "divisor at 3:9", q("head/f-3.smt2")),
-                check("a.mn", "f", "range at 4:1 into `u8`", q("head/f-4.smt2")),
-                check("a.mn", "g", "index at 5:2", Class::Unreachable),
-                check("a.mn", "h", "range at 7:4 into `i8`", q("head/h-7.smt2")),
-                check("b.mn", "f", "divisor at 1:1", Class::BeyondBound),
-                check("e.mn", "f", "divisor at 1:1", q("head/e.smt2")),
+                check("a.mn", "f", "divisor at 3:9", &[q("head/f-3.smt2")]),
+                check("a.mn", "f", "range at 4:1 into `u8`", &[q("head/f-4.smt2")]),
+                check("a.mn", "g", "index at 5:2", &[Class::Unreachable]),
+                check("a.mn", "h", "range at 7:4 into `i8`", &[q("head/h-7.smt2")]),
+                check(
+                    "a.mn",
+                    "k",
+                    "range at 8:2 into `i8`",
+                    &[q("head/k-8.smt2"), Class::BeyondBound],
+                ),
+                check("b.mn", "f", "divisor at 1:1", &[Class::BeyondBound]),
+                check("e.mn", "f", "divisor at 1:1", &[q("head/e.smt2")]),
+                check("s.mn", "f", "divisor at 2:2", &[q("head/s.smt2")]),
             ],
         };
-        let answers = |lines: &[(&str, &str)]| -> HashMap<String, String> {
-            answers_of(
-                &lines
-                    .iter()
-                    .map(|(a, p)| format!("{}\t{}\n", a, p))
-                    .collect::<String>(),
-            )
-        };
-        let base_answers = answers(&[("unsat", "base/f-3.smt2"), ("unsat", "base/g-6.smt2")]);
-        let head_answers = answers(&[
+        for e in &mut run.checks {
+            if e.file == "s.mn" {
+                e.hash = "h-r.mn".to_string();
+            }
+            if e.file == "b.mn" {
+                e.hash = "h-b2".to_string();
+            }
+        }
+        (base, run)
+    }
+
+    /// The run of [`base_and_run`] with nothing left to fail it: the module the base checks
+    /// checked again.
+    fn passing_run() -> Export {
+        let (_, mut run) = base_and_run();
+        run.files.get_mut("u.mn").unwrap().checks = true;
+        run.checks
+            .push(check("u.mn", "f", "divisor at 1:1", &[q("head/u.smt2")]));
+        run
+    }
+
+    /// A run is held to its base check by check over the programs both trees hold unchanged,
+    /// matched by their text whatever their paths, and each check by its function and obligation:
+    /// such a program either export did not read fails the run, and so does one the run no longer
+    /// checks; a check verified more, a check Tier 1 erases in one run alone that is still
+    /// verified, and programs added, changed, renamed or deleted are listed. Undecided answers
+    /// count over the queries both runs ask, and over all of the run's. The keys are written and
+    /// read back strictly.
+    #[test]
+    fn test_a_run_is_held_to_its_base_on_the_programs_both_hold_unchanged() {
+        let (base, run) = base_and_run();
+        let base_answers = answers(&[("unsat", "base/f-3.smt2"), ("unsat", "base/k-8.smt2")]);
+        let run_answers = answers(&[
             ("timeout", "head/f-3.smt2"),
             ("unsat", "head/f-4.smt2"),
-            ("unknown", "head/h-7.smt2"),
-            ("timeout", "head/e.smt2"),
+            ("unsat", "head/k-8.smt2"),
+            ("unknown", "head/e.smt2"),
         ]);
         let d_here = |file: &str, _: &str| file == "d.mn";
         let nowhere = |_: &str, _: &str| false;
         let c = compare(
             &base,
             &base_answers,
-            &head,
-            &head_answers,
+            &run,
+            &run_answers,
             &d_here,
             &nowhere,
+            &[],
         );
         assert_eq!(c.dropped, Vec::<String>::new());
-        assert_eq!(c.lost.len(), 1, "{:#?}", c);
-        assert!(c.lost[0].starts_with("d.mn: both trees hold it unchanged"));
+        assert_eq!(
+            c.lost,
+            ["d.mn: both trees hold it unchanged, but this export did not read it; the base's gave 1 checks: 1 with a query, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks, 0 without a site"]
+        );
+        assert_eq!(
+            c.unchecked,
+            ["u.mn: the base's checker accepts its module and this run's does not"]
+        );
         assert!(!c.passes());
-        // Only the query both runs ask counts its undecided answers.
-        assert_eq!(c.undecided, (0, 1));
+        // Only the query both runs ask counts toward the base's undecided answers; every query
+        // of the run counts toward its share.
+        assert_eq!((c.undecided, c.total), ((0, 1), (2, 6)));
         let moved = c.moved.join("\n");
         for part in [
-            "`f`'s obligation `range at 4:1 into `u8`` is cut off by the bound on the base and a query here",
-            "`g`'s obligation `shift at 6:3` is erased by Tier 1 on the base alone",
-            "`h`'s obligation `range at 7:4 into `i8`` is erased by Tier 1 here alone, and a query",
+            "a.mn: `f`'s obligation `range at 4:1 into `u8`` is cut off by the bound on the base and a query here",
+            "a.mn: `g`'s obligation `shift at 6:3` is erased by Tier 1 on the base alone",
+            "a.mn: `h`'s obligation `range at 7:4 into `i8`` is erased by Tier 1 here alone, and a query",
         ] {
             assert!(moved.contains(part), "{} not in:\n{}", part, moved);
         }
         assert_eq!(c.moved.len(), 3, "{:#?}", c);
-        let programs = c.programs.join("\n");
+        let listed = c.programs.join("\n");
         for part in [
-            "changed: b.mn: 1 queries, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks on the base; 0 queries, 0 unreachable, 1 cut off by the bound",
-            "deleted: c.mn: 0 queries, 0 unreachable, 0 cut off by the bound, 1 by a construct",
-            "added: e.mn: 1 queries",
+            "renamed: r.mn to s.mn",
+            "changed: b.mn: 1 checks: 1 with a query, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks, 0 without a site on the base; 1 checks: 0 with a query, 0 unreachable, 1 cut off by the bound",
+            "deleted: c.mn: 1 checks: 0 with a query, 0 unreachable, 0 cut off by the bound, 1 by a construct",
+            "added: e.mn: 1 checks: 1 with a query",
         ] {
-            assert!(programs.contains(part), "{} not in:\n{}", part, programs);
+            assert!(listed.contains(part), "{} not in:\n{}", part, listed);
         }
-        assert_eq!(c.programs.len(), 3, "{:#?}", c);
-        let all = compare(
-            &base,
-            &base_answers,
-            &head,
-            &head_answers,
-            &nowhere,
-            &nowhere,
-        );
+        assert_eq!(c.programs.len(), 4, "{:#?}", c);
+        // With every program read and checked, and no undecided answer, the run passes.
+        let quiet = answers(&[]);
+        let run = passing_run();
+        let all = compare(&base, &quiet, &run, &quiet, &nowhere, &nowhere, &[]);
         assert!(all.passes(), "{:#?}", all);
         // A program the base's tree holds unchanged that its export did not read fails too.
         let e_there = |file: &str, _: &str| file == "e.mn";
-        let c = compare(
-            &base,
-            &base_answers,
-            &head,
-            &head_answers,
-            &nowhere,
-            &e_there,
-        );
-        assert!(!c.passes(), "{:#?}", c);
-        assert_eq!(
-            c.lost,
-            ["e.mn: both trees hold it unchanged, but the base's export did not read it; this one gave 1 queries, 0 unreachable, 0 cut off by the bound, 0 by a construct the encoding lacks"]
-        );
-        // Each check checked less than on the base fails the run.
-        for (k, class, was) in [
-            (
-                0,
-                Class::BeyondBound,
-                "a query on the base and cut off by the bound here",
-            ),
-            (
-                0,
-                Class::Unreachable,
-                "a query on the base and unreachable here",
-            ),
-            (
-                2,
-                Class::BeyondLacked,
-                "unreachable on the base and cut off by a construct the encoding lacks here",
-            ),
-            (
-                3,
-                Class::BeyondBound,
-                "erased by Tier 1 here alone, and cut off by the bound",
-            ),
+        let c = compare(&base, &quiet, &run, &quiet, &nowhere, &e_there, &[]);
+        assert!(!c.passes() && c.lost.len() == 1, "{:#?}", c);
+        assert!(c.lost[0].starts_with(
+            "e.mn: both trees hold it unchanged, but the base's export did not read it; this one gave 1 checks"
+        ));
+        // Undecided answers may rise by the slack over the queries both ask, and be at most one
+        // in UNDECIDED_SHARE of the run's.
+        for (undecided, total, holds) in [
+            ((10, 15), (15, 3000), true),
+            ((10, 16), (16, 3200), false),
+            ((0, 5), (5, 1000), true),
+            ((3, 0), (0, 0), true),
+            ((0, 0), (1, 200), true),
+            ((0, 0), (2, 399), false),
+            ((0, 0), (2, 400), true),
+            ((0, 0), (1, 0), false),
         ] {
-            let mut less = head.clone();
-            less.checks[k].class = class;
-            let c = compare(
-                &base,
-                &base_answers,
-                &less,
-                &head_answers,
-                &nowhere,
-                &nowhere,
-            );
-            assert!(
-                !c.passes() && c.dropped.len() == 1 && c.dropped[0].contains(was),
-                "{}: {:#?}",
-                was,
-                c
-            );
-        }
-        // Cut off at one place or at another checks as little.
-        let mut cut = base.clone();
-        cut.checks[1].class = Class::BeyondLacked;
-        let mut other = head.clone();
-        other.checks[1].class = Class::BeyondBound;
-        let c = compare(
-            &cut,
-            &base_answers,
-            &other,
-            &head_answers,
-            &nowhere,
-            &nowhere,
-        );
-        assert!(c.passes(), "{:#?}", c);
-        assert!(c.moved.iter().any(|m| m.contains(
-            "cut off by a construct the encoding lacks on the base and cut off by the bound here"
-        )));
-        // The undecided answers over the checks both query may rise by the slack, not past it.
-        for (base_n, head_n, holds) in [(10, 15, true), (10, 16, false), (0, 5, true), (3, 0, true)]
-        {
             let c = Comparison {
-                undecided: (base_n, head_n),
+                undecided,
+                total,
                 ..Comparison::default()
             };
-            assert_eq!(c.passes(), holds, "{} {}", base_n, head_n);
+            assert_eq!(c.passes(), holds, "{:?} {:?}", undecided, total);
         }
         // The keys are written and read back, and read strictly.
         assert_eq!(Export::read(&base.text()), Ok(base.clone()));
+        assert_eq!(Export::read(&run.text()), Ok(run.clone()));
         for (text, says) in [
-            ("check\ta.mn\th\tf", "`a.mn h f` is no check of six fields"),
-            ("check\ta.mn\th\tf\to\tt\tqueried", "`queried` is no class"),
-            ("file\ta.mn", "`file\ta.mn` is neither a file nor a check"),
             (
-                "files\ta.mn\th",
-                "`files\ta.mn\th` is neither a file nor a check",
+                "check\ta.mn\th\tf",
+                "`a.mn h f` is no check: a file, a hash, a function, an obligation and its classes",
+            ),
+            (
+                "check\ta.mn\th\tf\to",
+                "`a.mn h f o` is a check with no class",
+            ),
+            (
+                "check\ta.mn\th\tf\to\tunreachable\tqueried",
+                "`queried` is no class",
+            ),
+            (
+                "file\ta.mn\th",
+                "`file\ta.mn\th` is neither a file nor a check",
+            ),
+            (
+                "file\ta.mn\th\tmaybe",
+                "`file\ta.mn\th\tmaybe` is neither a file nor a check",
             ),
         ] {
             assert_eq!(Export::read(text), Err(says.to_string()), "{}", text);
         }
+    }
+
+    /// A check the run verifies less than its base fails it: its least verified trap lower, or,
+    /// where a trap goes unqueried, fewer traps queried; and so does a check Tier 1 erases in the
+    /// run alone that the encoding cuts off or has no site for. Two runs tell a check by its
+    /// function and obligation, so a query that becomes unreachable is one check verified less,
+    /// not two that moved.
+    #[test]
+    fn test_a_check_verified_less_than_on_the_base_fails_the_run() {
+        let (base, _) = base_and_run();
+        let quiet = answers(&[]);
+        let nowhere = |_: &str, _: &str| false;
+        let at = |run: &Export, function: &str, obligation: &str| {
+            run.checks
+                .iter()
+                .position(|e| {
+                    e.file == "a.mn" && e.function == function && e.obligation == obligation
+                })
+                .unwrap()
+        };
+        for (function, obligation, classes, says) in [
+            (
+                "f",
+                "divisor at 3:9",
+                vec![Class::BeyondBound],
+                "`f`'s obligation `divisor at 3:9` is a query on the base and cut off by the bound here",
+            ),
+            (
+                "f",
+                "divisor at 3:9",
+                vec![Class::Unreachable],
+                "`f`'s obligation `divisor at 3:9` is a query on the base and unreachable here",
+            ),
+            (
+                "g",
+                "index at 5:2",
+                vec![Class::NoSite],
+                "`g`'s obligation `index at 5:2` is unreachable on the base and without a site in the encoding here",
+            ),
+            (
+                "h",
+                "range at 7:4 into `i8`",
+                vec![Class::BeyondBound],
+                "`h`'s obligation `range at 7:4 into `i8`` is erased by Tier 1 here alone, and cut off by the bound",
+            ),
+            (
+                "h",
+                "range at 7:4 into `i8`",
+                vec![Class::NoSite],
+                "`h`'s obligation `range at 7:4 into `i8`` is erased by Tier 1 here alone, and without a site in the encoding",
+            ),
+            (
+                "k",
+                "range at 8:2 into `i8`",
+                vec![Class::BeyondBound],
+                "`k`'s obligation `range at 8:2 into `i8`` is a query, cut off by the bound on the base and cut off by the bound here",
+            ),
+            (
+                "k",
+                "range at 8:2 into `i8`",
+                vec![Class::BeyondBound, Class::BeyondBound],
+                "is a query, cut off by the bound on the base and cut off by the bound, cut off by the bound here",
+            ),
+        ] {
+            let mut run = passing_run();
+            let k = at(&run, function, obligation);
+            run.checks[k].classes = classes;
+            let c = compare(&base, &quiet, &run, &quiet, &nowhere, &nowhere, &[]);
+            assert!(
+                !c.passes() && c.dropped.len() == 1 && c.dropped[0].contains(says),
+                "{}: {:#?}",
+                says,
+                c
+            );
+            assert!(c.moved.iter().all(|m| !m.contains(obligation)), "{:#?}", c);
+        }
+        // Every trap queried where one was not: verified more, though with fewer traps.
+        let mut run = passing_run();
+        let k = at(&run, "k", "range at 8:2 into `i8`");
+        run.checks[k].classes = vec![q("head/k-8.smt2")];
+        let c = compare(&base, &quiet, &run, &quiet, &nowhere, &nowhere, &[]);
+        assert!(c.passes(), "{:#?}", c);
+        // Cut off at one place or at another, or with no site, verifies as little.
+        let mut cut = base.clone();
+        cut.checks[1].classes = vec![Class::BeyondLacked];
+        let mut run = passing_run();
+        run.checks[1].classes = vec![Class::NoSite];
+        let c = compare(&cut, &quiet, &run, &quiet, &nowhere, &nowhere, &[]);
+        assert!(c.passes(), "{:#?}", c);
+        assert!(c.moved.iter().any(|m| m.contains(
+            "cut off by a construct the encoding lacks on the base and without a site in the encoding here"
+        )));
+    }
+
+    /// A trailer `Smt-Drop: <file> <function> <obligation>: <reason>` lets exactly the check it
+    /// names be verified less, and the summary says why; a waiver that names no such check, or a
+    /// trailer that is no waiver, fails the run.
+    #[test]
+    fn test_a_waiver_lets_exactly_the_check_it_names_through() {
+        let (base, _) = base_and_run();
+        let quiet = answers(&[]);
+        let nowhere = |_: &str, _: &str| false;
+        let mut run = passing_run();
+        run.checks[0].classes = vec![Class::BeyondBound];
+        let (waivers, bad) = waivers_of(
+            "a.mn f divisor at 3:9: a deeper loop now\n\nb.mn f divisor at 1:1: changed anyway\n",
+        );
+        assert!(bad.is_empty(), "{:?}", bad);
+        let c = compare(
+            &base,
+            &quiet,
+            &run,
+            &quiet,
+            &nowhere,
+            &nowhere,
+            &waivers[..1],
+        );
+        assert!(c.passes(), "{:#?}", c);
+        assert_eq!(
+            c.waived,
+            ["a.mn: `f`'s obligation `divisor at 3:9` is a query on the base and cut off by the bound here; a deeper loop now"]
+        );
+        // A waiver of another file, function or obligation lets nothing through, and is unused.
+        for (other, waiver) in [
+            ("file", "b.mn f divisor at 3:9: elsewhere"),
+            ("function", "a.mn g divisor at 3:9: elsewhere"),
+            ("obligation", "a.mn f divisor at 3:8: elsewhere"),
+        ] {
+            let (waivers, _) = waivers_of(waiver);
+            let c = compare(&base, &quiet, &run, &quiet, &nowhere, &nowhere, &waivers);
+            assert!(
+                !c.passes() && c.dropped.len() == 1 && c.unused.len() == 1,
+                "{}: {:#?}",
+                other,
+                c
+            );
+            assert!(
+                c.unused[0].starts_with(&format!("Smt-Drop: {}", waiver)),
+                "{:#?}",
+                c
+            );
+        }
+        // A waiver nothing needs fails the run.
+        let c = compare(
+            &base,
+            &quiet,
+            &passing_run(),
+            &quiet,
+            &nowhere,
+            &nowhere,
+            &waivers,
+        );
+        assert!(!c.passes() && c.unused.len() == 2, "{:#?}", c);
+        // The obligation runs to the first `: `, and each part must be there.
+        assert_eq!(
+            Waiver::read("a.mn f range at 4:19 into `u8`: why not"),
+            Ok(Waiver {
+                file: "a.mn".to_string(),
+                function: "f".to_string(),
+                obligation: "range at 4:19 into `u8`".to_string(),
+                reason: "why not".to_string(),
+            })
+        );
+        let (none, bad) = waivers_of("a.mn f\na.mn f divisor at 3:9\na.mn f divisor at 3:9:  \n");
+        assert!(none.is_empty(), "{:?}", none);
+        assert_eq!(bad.len(), 3, "{:?}", bad);
+        assert!(bad[0]
+            .contains("is no waiver: write `Smt-Drop: <file> <function> <obligation>: <reason>`"));
+        // The job reads the trailers of the commits since the base by this key.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let workflow = fs::read_to_string(root.join(".github/workflows/smt.yml")).unwrap();
+        assert!(workflow.contains(&format!(
+            "git log --format='%(trailers:key={},valueonly,unfold)' \"$base..HEAD\" > \"$RUNNER_TEMP/waivers.txt\"",
+            WAIVER_TRAILER
+        )));
+    }
+
+    /// The review's reproduction: an encoder that loses the sites of every function with an
+    /// array parameter, which before this was a check gone from the export and passed as Tier 1's
+    /// change. Every check Tier 1 erases is still exported, with no site, and each one the base
+    /// verified fails the comparison.
+    #[test]
+    fn test_a_check_that_loses_its_site_is_verified_less_not_moved() {
+        let dir = scratch("lost-site");
+        let file = dir.join("m.mn");
+        fs::write(
+            &file,
+            "module m\npub fn first(a: [4]u8, i: u8[0..=3]) -> u8 = a[i]\npub fn half(x: u8) -> u8 = x / 2\n",
+        )
+        .unwrap();
+        let files = std::slice::from_ref(&file);
+        let base = independent(files, &dir.join("base")).unwrap();
+        let lose = |m: &Module, i: usize| {
+            let mut enc = mente_smt::encode(m, i);
+            if let Some(Some(f)) = m.functions.get(i) {
+                if f.syntax.name == "first" {
+                    enc.sites.clear();
+                    enc.unencoded = vec![(f.syntax.name_span, WHOLE[1])];
+                }
+            }
+            enc
+        };
+        let run = independent_with(files, &dir.join("run"), &lose).unwrap();
+        // The export does not fail: a function the encoding lacks a parameter of has no site by
+        // design. Its checks are still there, with no site.
+        assert_eq!(run.unmatched, 0);
+        let first: Vec<&Erased> = base
+            .export
+            .checks
+            .iter()
+            .filter(|e| e.function == "first")
+            .collect();
+        assert!(
+            first.iter().any(|e| !e.queries().is_empty()),
+            "{:#?}",
+            base.export
+        );
+        assert_eq!(run.export.checks.len(), base.export.checks.len());
+        assert!(run
+            .export
+            .checks
+            .iter()
+            .filter(|e| e.function == "first")
+            .all(|e| e.classes == [Class::NoSite]));
+        let quiet = answers(&[]);
+        let nowhere = |_: &str, _: &str| false;
+        let c = compare(
+            &base.export,
+            &quiet,
+            &run.export,
+            &quiet,
+            &nowhere,
+            &nowhere,
+            &[],
+        );
+        assert!(!c.passes(), "{:#?}", c);
+        assert_eq!(c.dropped.len(), first.len(), "{:#?}", c);
+        assert!(c.dropped.iter().all(|d| d.contains("`first`'s obligation")
+            && d.ends_with("without a site in the encoding here")));
+        assert!(c.moved.is_empty(), "{:#?}", c);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A tree has the encoding when its workspace's manifest lists a member whose package is
+    /// mente-smt, wherever it lies: moved, it is still found, and a crate of that path the
+    /// workspace does not list is not.
+    #[test]
+    fn test_the_base_has_the_encoding_when_its_workspace_holds_the_package() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert_eq!(encodes(&root), Ok(true));
+        let dir = scratch("encodes");
+        let package = |at: &Path, name: &str| {
+            fs::create_dir_all(at).unwrap();
+            fs::write(
+                at.join("Cargo.toml"),
+                format!(
+                    "[package]\nname = \"{}\"\nversion = \"0.1.0\"\n\n[dependencies]\n",
+                    name
+                ),
+            )
+            .unwrap();
+        };
+        let workspace = |members: &str| {
+            fs::write(
+                dir.join("Cargo.toml"),
+                format!("[workspace]\nresolver = \"2\"\nmembers = [\n{}]\n", members),
+            )
+            .unwrap();
+        };
+        package(&dir.join("tools/smt"), "mente-smt");
+        package(&dir.join("compiler/mente-smt"), "mente-other");
+        package(&dir.join("compiler/mente-syntax"), "mente-syntax");
+        workspace("    \"compiler/mente-syntax\",\n    \"tools/smt\",\n");
+        assert_eq!(encodes(&dir), Ok(true));
+        workspace("    \"compiler/mente-syntax\",\n    \"compiler/mente-smt\",\n");
+        assert_eq!(encodes(&dir), Ok(false));
+        fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+        assert!(encodes(&dir).unwrap_err().ends_with("lists no members"));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(encodes(&dir).unwrap_err().starts_with("cannot read `"));
     }
 
     /// The checks `tests/smt-known` names as lying past the bounds are erased by Tier 1, fail on
