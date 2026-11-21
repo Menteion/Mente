@@ -961,6 +961,86 @@ mod tests {
         assert_same(compared, &differences, 2000);
     }
 
+    /// Native code's slots take at most each function's frame as the checker counts it, in the
+    /// agent programs of the benchmark, one in three, each built for one target in turn. The conformance suite is
+    /// held to the same by mente-codegen's test, and the generated programs by the generator's,
+    /// on top of every build, which refuses a function whose slots take more: native code once
+    /// gave every slot bytes of its own, two hundred branches of a 4 KiB array 1.6 MB for a frame
+    /// of 8,265 (`spec/mir-and-codegen.md`, item 5).
+    #[test]
+    fn test_native_slots_take_at_most_the_frame_in_the_agent_programs() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut sources: Vec<(String, String)> = Vec::new();
+        for dir in [
+            "probe/m1",
+            "prelim/m1",
+            "prelim/m1-non-core",
+            "prelim/m1-harder/run-1",
+            "prelim/m1-harder/run-2",
+        ] {
+            for entry in fs::read_dir(root.join("benchmark").join(dir))
+                .unwrap()
+                .flatten()
+            {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "mn") {
+                    sources.push((
+                        path.display().to_string(),
+                        fs::read_to_string(&path).unwrap(),
+                    ));
+                }
+            }
+        }
+        sources.sort();
+        // One program in three, as many of them solve one task alike; every one is built
+        // natively in CI, where its build holds it to its frames
+        // (`native_matches_the_reference_interpreter_on_every_hidden_test`).
+        let modules: Vec<(String, CheckedModule)> = sources
+            .into_iter()
+            .step_by(3)
+            .filter_map(|(name, src)| {
+                Some((name, mente_sema::check_program_without_proofs(&src).ok()?))
+            })
+            .collect();
+        let targets = [
+            mente_codegen::Target::X86_64Linux,
+            mente_codegen::Target::Aarch64Linux,
+            mente_codegen::Target::X86_64Windows,
+        ];
+        let (mut compared, mut over) = (0, Vec::new());
+        for (k, (name, module)) in modules.iter().enumerate() {
+            let Ok(lowered) = lower::lower(module) else {
+                continue;
+            };
+            // A program that makes no slot has none but a function's 32 bytes of scratch, under
+            // any frame's 64, which every build holds anyway.
+            let slots = lowered.module.functions.iter().any(|f| {
+                f.ops
+                    .iter()
+                    .any(|op| matches!(op, mente_mir::cfg::Op::Slot { .. }))
+            });
+            if !slots {
+                continue;
+            }
+            let target = targets[k % 3];
+            match native::frames_and_slots(&lowered, target) {
+                Err(e) => over.push(format!("{name} {target:?}: {e}")),
+                Ok(frames) => {
+                    for (f, frame, bytes) in frames {
+                        compared += 1;
+                        if u128::from(bytes) > frame {
+                            over.push(format!(
+                                "{name} {target:?} {f}: {bytes} bytes, frame {frame}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 50, "{compared} functions compared");
+        assert!(over.is_empty(), "{}", over.join("\n"));
+    }
+
     /// Each construct, as native code: one executable a program, every call in a process of its
     /// own, printing what the reference interpreter prints.
     #[test]

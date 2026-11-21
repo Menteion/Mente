@@ -29539,6 +29539,336 @@ block0(v0: effect):
 t0: stack-overflow @79:8 ["the call stack ran out"]
 t1: unreachable @79:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/slots_of_branches_share_the_stack.mn ==
+mente-dump 3 mir
+f0: fn f(u8, effect) -> u8 frame 786505 {
+block0(v0: u8, v1: effect):
+  v2: i64 = int 7 @10:11
+  v3: i64 = cast v0 @10:11
+  v4: bool = eq v3, v2 @10:11
+  branch v4, block1(v1), block2(v1)
+block1(v5: effect):
+  v8: addr = slot 393216 @11:27
+  v13: u64 = int 0 @11:27
+  jump block4(v13, v5)
+block2(v6: effect):
+  jump block3(v6)
+block3(v7: effect):
+  v23: i64 = int 7 @14:11
+  v24: i64 = cast v0 @14:11
+  v25: bool = eq v24, v23 @14:11
+  branch v25, block7(v7), block8(v7)
+block4(v9: u64, v10: effect):
+  v14: u64 = int 393216 @11:27
+  v15: bool = lt v9, v14 @11:27
+  branch v15, block5(v10), block6(v10)
+block5(v11: effect):
+  v16: u64 = assume within 0..=393215 v9, v11 @11:27
+  v17: addr = elem 1 v8, v16 @11:27
+  v18: unit = store v17, v0, v16 @11:27
+  v19: u64 = int 1 @11:27
+  v20: u64 = add v9, v19, v18 @11:27
+  jump block4(v20, v18)
+block6(v12: effect):
+  v21: addr = slot 393216 @11:27
+  v22: unit = copy 393216 v21, v8, v12 @11:27
+  jump block3(v22)
+block7(v26: effect):
+  v29: addr = slot 393216 @15:27
+  v34: u64 = int 0 @15:27
+  jump block10(v34, v26)
+block8(v27: effect):
+  jump block9(v27)
+block9(v28: effect):
+  v44: i64 = int 7 @18:11
+  v45: i64 = cast v0 @18:11
+  v46: bool = eq v45, v44 @18:11
+  branch v46, block13(v28), block14(v28)
+block10(v30: u64, v31: effect):
+  v35: u64 = int 393216 @15:27
+  v36: bool = lt v30, v35 @15:27
+  branch v36, block11(v31), block12(v31)
+block11(v32: effect):
+  v37: u64 = assume within 0..=393215 v30, v32 @15:27
+  v38: addr = elem 1 v29, v37 @15:27
+  v39: unit = store v38, v0, v37 @15:27
+  v40: u64 = int 1 @15:27
+  v41: u64 = add v30, v40, v39 @15:27
+  jump block10(v41, v39)
+block12(v33: effect):
+  v42: addr = slot 393216 @15:27
+  v43: unit = copy 393216 v42, v29, v33 @15:27
+  jump block9(v43)
+block13(v47: effect):
+  v50: addr = slot 393216 @19:27
+  v55: u64 = int 0 @19:27
+  jump block16(v55, v47)
+block14(v48: effect):
+  jump block15(v48)
+block15(v49: effect):
+  v65: i64 = int 7 @22:11
+  v66: i64 = cast v0 @22:11
+  v67: bool = eq v66, v65 @22:11
+  branch v67, block19(v49), block20(v49)
+block16(v51: u64, v52: effect):
+  v56: u64 = int 393216 @19:27
+  v57: bool = lt v51, v56 @19:27
+  branch v57, block17(v52), block18(v52)
+block17(v53: effect):
+  v58: u64 = assume within 0..=393215 v51, v53 @19:27
+  v59: addr = elem 1 v50, v58 @19:27
+  v60: unit = store v59, v0, v58 @19:27
+  v61: u64 = int 1 @19:27
+  v62: u64 = add v51, v61, v60 @19:27
+  jump block16(v62, v60)
+block18(v54: effect):
+  v63: addr = slot 393216 @19:27
+  v64: unit = copy 393216 v63, v50, v54 @19:27
+  jump block15(v64)
+block19(v68: effect):
+  v71: addr = slot 393216 @23:27
+  v76: u64 = int 0 @23:27
+  jump block22(v76, v68)
+block20(v69: effect):
+  jump block21(v69)
+block21(v70: effect):
+  v86: i64 = int 7 @26:11
+  v87: i64 = cast v0 @26:11
+  v88: bool = eq v87, v86 @26:11
+  branch v88, block25(v70), block26(v70)
+block22(v72: u64, v73: effect):
+  v77: u64 = int 393216 @23:27
+  v78: bool = lt v72, v77 @23:27
+  branch v78, block23(v73), block24(v73)
+block23(v74: effect):
+  v79: u64 = assume within 0..=393215 v72, v74 @23:27
+  v80: addr = elem 1 v71, v79 @23:27
+  v81: unit = store v80, v0, v79 @23:27
+  v82: u64 = int 1 @23:27
+  v83: u64 = add v72, v82, v81 @23:27
+  jump block22(v83, v81)
+block24(v75: effect):
+  v84: addr = slot 393216 @23:27
+  v85: unit = copy 393216 v84, v71, v75 @23:27
+  jump block21(v85)
+block25(v89: effect):
+  v92: addr = slot 393216 @27:27
+  v97: u64 = int 0 @27:27
+  jump block28(v97, v89)
+block26(v90: effect):
+  jump block27(v90)
+block27(v91: effect):
+  v107: i64 = int 7 @30:11
+  v108: i64 = cast v0 @30:11
+  v109: bool = eq v108, v107 @30:11
+  branch v109, block31(v91), block32(v91)
+block28(v93: u64, v94: effect):
+  v98: u64 = int 393216 @27:27
+  v99: bool = lt v93, v98 @27:27
+  branch v99, block29(v94), block30(v94)
+block29(v95: effect):
+  v100: u64 = assume within 0..=393215 v93, v95 @27:27
+  v101: addr = elem 1 v92, v100 @27:27
+  v102: unit = store v101, v0, v100 @27:27
+  v103: u64 = int 1 @27:27
+  v104: u64 = add v93, v103, v102 @27:27
+  jump block28(v104, v102)
+block30(v96: effect):
+  v105: addr = slot 393216 @27:27
+  v106: unit = copy 393216 v105, v92, v96 @27:27
+  jump block27(v106)
+block31(v110: effect):
+  v113: addr = slot 393216 @31:27
+  v118: u64 = int 0 @31:27
+  jump block34(v118, v110)
+block32(v111: effect):
+  jump block33(v111)
+block33(v112: effect):
+  v128: i64 = int 7 @34:11
+  v129: i64 = cast v0 @34:11
+  v130: bool = eq v129, v128 @34:11
+  branch v130, block37(v112), block38(v112)
+block34(v114: u64, v115: effect):
+  v119: u64 = int 393216 @31:27
+  v120: bool = lt v114, v119 @31:27
+  branch v120, block35(v115), block36(v115)
+block35(v116: effect):
+  v121: u64 = assume within 0..=393215 v114, v116 @31:27
+  v122: addr = elem 1 v113, v121 @31:27
+  v123: unit = store v122, v0, v121 @31:27
+  v124: u64 = int 1 @31:27
+  v125: u64 = add v114, v124, v123 @31:27
+  jump block34(v125, v123)
+block36(v117: effect):
+  v126: addr = slot 393216 @31:27
+  v127: unit = copy 393216 v126, v113, v117 @31:27
+  jump block33(v127)
+block37(v131: effect):
+  v134: addr = slot 393216 @35:27
+  v139: u64 = int 0 @35:27
+  jump block40(v139, v131)
+block38(v132: effect):
+  jump block39(v132)
+block39(v133: effect):
+  v149: i64 = int 7 @38:11
+  v150: i64 = cast v0 @38:11
+  v151: bool = eq v150, v149 @38:11
+  branch v151, block43(v133), block44(v133)
+block40(v135: u64, v136: effect):
+  v140: u64 = int 393216 @35:27
+  v141: bool = lt v135, v140 @35:27
+  branch v141, block41(v136), block42(v136)
+block41(v137: effect):
+  v142: u64 = assume within 0..=393215 v135, v137 @35:27
+  v143: addr = elem 1 v134, v142 @35:27
+  v144: unit = store v143, v0, v142 @35:27
+  v145: u64 = int 1 @35:27
+  v146: u64 = add v135, v145, v144 @35:27
+  jump block40(v146, v144)
+block42(v138: effect):
+  v147: addr = slot 393216 @35:27
+  v148: unit = copy 393216 v147, v134, v138 @35:27
+  jump block39(v148)
+block43(v152: effect):
+  v155: addr = slot 393216 @39:27
+  v160: u64 = int 0 @39:27
+  jump block46(v160, v152)
+block44(v153: effect):
+  jump block45(v153)
+block45(v154: effect):
+  v170: i64 = int 7 @42:11
+  v171: i64 = cast v0 @42:11
+  v172: bool = eq v171, v170 @42:11
+  branch v172, block49(v154), block50(v154)
+block46(v156: u64, v157: effect):
+  v161: u64 = int 393216 @39:27
+  v162: bool = lt v156, v161 @39:27
+  branch v162, block47(v157), block48(v157)
+block47(v158: effect):
+  v163: u64 = assume within 0..=393215 v156, v158 @39:27
+  v164: addr = elem 1 v155, v163 @39:27
+  v165: unit = store v164, v0, v163 @39:27
+  v166: u64 = int 1 @39:27
+  v167: u64 = add v156, v166, v165 @39:27
+  jump block46(v167, v165)
+block48(v159: effect):
+  v168: addr = slot 393216 @39:27
+  v169: unit = copy 393216 v168, v155, v159 @39:27
+  jump block45(v169)
+block49(v173: effect):
+  v176: addr = slot 393216 @43:27
+  v181: u64 = int 0 @43:27
+  jump block52(v181, v173)
+block50(v174: effect):
+  jump block51(v174)
+block51(v175: effect):
+  v191: i64 = int 7 @46:11
+  v192: i64 = cast v0 @46:11
+  v193: bool = eq v192, v191 @46:11
+  branch v193, block55(v175), block56(v175)
+block52(v177: u64, v178: effect):
+  v182: u64 = int 393216 @43:27
+  v183: bool = lt v177, v182 @43:27
+  branch v183, block53(v178), block54(v178)
+block53(v179: effect):
+  v184: u64 = assume within 0..=393215 v177, v179 @43:27
+  v185: addr = elem 1 v176, v184 @43:27
+  v186: unit = store v185, v0, v184 @43:27
+  v187: u64 = int 1 @43:27
+  v188: u64 = add v177, v187, v186 @43:27
+  jump block52(v188, v186)
+block54(v180: effect):
+  v189: addr = slot 393216 @43:27
+  v190: unit = copy 393216 v189, v176, v180 @43:27
+  jump block51(v190)
+block55(v194: effect):
+  v197: addr = slot 393216 @47:27
+  v202: u64 = int 0 @47:27
+  jump block58(v202, v194)
+block56(v195: effect):
+  jump block57(v195)
+block57(v196: effect):
+  v212: i64 = int 7 @50:11
+  v213: i64 = cast v0 @50:11
+  v214: bool = eq v213, v212 @50:11
+  branch v214, block61(v196), block62(v196)
+block58(v198: u64, v199: effect):
+  v203: u64 = int 393216 @47:27
+  v204: bool = lt v198, v203 @47:27
+  branch v204, block59(v199), block60(v199)
+block59(v200: effect):
+  v205: u64 = assume within 0..=393215 v198, v200 @47:27
+  v206: addr = elem 1 v197, v205 @47:27
+  v207: unit = store v206, v0, v205 @47:27
+  v208: u64 = int 1 @47:27
+  v209: u64 = add v198, v208, v207 @47:27
+  jump block58(v209, v207)
+block60(v201: effect):
+  v210: addr = slot 393216 @47:27
+  v211: unit = copy 393216 v210, v197, v201 @47:27
+  jump block57(v211)
+block61(v215: effect):
+  v218: addr = slot 393216 @51:28
+  v223: u64 = int 0 @51:28
+  jump block64(v223, v215)
+block62(v216: effect):
+  jump block63(v216)
+block63(v217: effect):
+  v233: i64 = int 7 @54:11
+  v234: i64 = cast v0 @54:11
+  v235: bool = eq v234, v233 @54:11
+  branch v235, block67(v217), block68(v217)
+block64(v219: u64, v220: effect):
+  v224: u64 = int 393216 @51:28
+  v225: bool = lt v219, v224 @51:28
+  branch v225, block65(v220), block66(v220)
+block65(v221: effect):
+  v226: u64 = assume within 0..=393215 v219, v221 @51:28
+  v227: addr = elem 1 v218, v226 @51:28
+  v228: unit = store v227, v0, v226 @51:28
+  v229: u64 = int 1 @51:28
+  v230: u64 = add v219, v229, v228 @51:28
+  jump block64(v230, v228)
+block66(v222: effect):
+  v231: addr = slot 393216 @51:28
+  v232: unit = copy 393216 v231, v218, v222 @51:28
+  jump block63(v232)
+block67(v236: effect):
+  v239: addr = slot 393216 @55:28
+  v244: u64 = int 0 @55:28
+  jump block70(v244, v236)
+block68(v237: effect):
+  jump block69(v237)
+block69(v238: effect):
+  return v0 after v238
+block70(v240: u64, v241: effect):
+  v245: u64 = int 393216 @55:28
+  v246: bool = lt v240, v245 @55:28
+  branch v246, block71(v241), block72(v241)
+block71(v242: effect):
+  v247: u64 = assume within 0..=393215 v240, v242 @55:28
+  v248: addr = elem 1 v239, v247 @55:28
+  v249: unit = store v248, v0, v247 @55:28
+  v250: u64 = int 1 @55:28
+  v251: u64 = add v240, v250, v249 @55:28
+  jump block70(v251, v249)
+block72(v243: effect):
+  v252: addr = slot 393216 @55:28
+  v253: unit = copy 393216 v252, v239, v243 @55:28
+  jump block69(v253)
+block73(v254: effect):
+  trap t0 after v254
+t0: unreachable @58:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn enter f(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f0 t0 v0, v1 @9:8
+  v3: u8 = call f0 v0, v2 @9:8
+  return v3 after v3
+t0: stack-overflow @9:8 ["the call stack ran out"]
+t1: unreachable @9:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/struct_beyond_4_gib.mn == (exit 2)
 == conformance/core-calculus/struct_built_by_position.mn == (exit 2)
 == conformance/core-calculus/struct_built_out_of_order.mn == (exit 2)
