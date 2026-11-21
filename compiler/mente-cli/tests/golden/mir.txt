@@ -29791,6 +29791,7 @@ mente-dump 3 mir
 == conformance/morphic-layouts/float_in_a_bitstruct.mn == (exit 2)
 == conformance/morphic-layouts/gap_between_bit_fields.mn == (exit 2)
 == conformance/morphic-layouts/gap_between_fields.mn == (exit 2)
+== conformance/morphic-layouts/layout_numbers_near_usize.mn == (exit 2)
 == conformance/morphic-layouts/layout_sized_by_a_bitstruct.mn ==
 mente-dump 3 mir
 == conformance/morphic-layouts/misaligned_field.mn == (exit 2)
