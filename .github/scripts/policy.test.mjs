@@ -34,7 +34,7 @@ import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
 import { ALARM_AUTHOR, ALARM_LABEL, ALARM_OWNER, NIGHTLIES, alarmMarker, detailsBody, errorLines, failingJobs, failureBody, keepAlarm, keepRunning, lastRealRun, verdict as alarmVerdict } from "./lib/nightly-alarm.mjs";
-import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
+import { SANDBOX_PROGRAM, deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
@@ -45,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 71;
+const FLOOR = 72;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1290,13 +1290,16 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "02a8f1312275c5146ddf7950f9d933dab304c5b4470de0ffef792240ffa522d1"],
+  [".github/scripts/test-sandbox.sh", "3fbed2813c5c784d19b8208a269ffd365ba977e4c65a1e1ab8ae39752f5e2053"],
+  // The sandbox's one program, cargo's runner and the namespace's first process, which
+  // test-sandbox.sh builds at setup and every command runs through.
+  [".github/scripts/test-sandbox.rs", "d3339f7df2ca14e3ffd3d9d08909199d1dc670bf697cfcd09a2744a2d5eacd87"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "fd45c1f6931dfd9116be0784dfd215a3f93abe0f410e581c2f57ecfed8d9b6dd"],
+  [".github/scripts/policy-run.test.mjs", "4a063502dbf7ecc735f0f95252093bde207ec5f3f43e6131708e127c7013eb9a"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -1308,7 +1311,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/build-time-code.mjs", "874280f8818d786a0c6f0bca3a60ced4ae397c0f13169a1244303d4a436487ec"],
   [".github/scripts/lib/build-time-code.mjs", "99b866cb2014b1a97c770819e4707fa06ef203da6bb7e2efc7c6cc3b65517b6a"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "20e30ecfcbb91626c8f3ed22f6709d52afc7ca34cf7dd5c6433728a09108babb"],
+  [".github/scripts/lib/mutants-floor.mjs", "503a25da9fa9813cea1783709f0ff6d8dc53dc57eebb24b79028b39a190519b5"],
   [".github/scripts/watch.mjs", "55168acde1c9d16a823db62389483640e24e745dfd39ad6e984cf88c3200a7d3"],
   [".github/scripts/lib/watch.mjs", "895bedf2e57eb8dd3fc327a33d34e2adedf2770df18de599fae304a6819fe502"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -1738,6 +1741,39 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
   assert.match(`  trap 'kill "$decoy" "$listener" 2> /dev/null || true' EXIT`, lateExitTrap);
   assert.doesNotMatch('  trap "kill $decoy $listener 2> /dev/null || true" EXIT', lateExitTrap);
   assert.doesNotMatch("  trap 'signal=15' TERM", lateExitTrap);
+});
+
+check("the sandbox's script, its one program and the floor name the one sandbox: its home, root, user and program", () => {
+  // test-sandbox.sh sets the sandbox up and names cargo's runner; test-sandbox.rs is that runner and
+  // the namespace's first process; the floor reads nextest's line that names it. A value that
+  // differed between them would point cargo at no program, the program at a root or a user setup
+  // did not make, or the floor at a runner that no longer runs.
+  const sh = read(".github/scripts/test-sandbox.sh").replace(/\r\n/g, "\n");
+  const rs = read(".github/scripts/test-sandbox.rs").replace(/\r\n/g, "\n");
+  const shell = (name) => {
+    const m = new RegExp(`^${name}=(\\S+)$`, "m").exec(sh);
+    assert.ok(m, `test-sandbox.sh sets no ${name}`);
+    return m[1].replace(/^\$home(?=\/)/, home);
+  };
+  const rust = (name) => {
+    const m = new RegExp(`^const ${name}: [^=]+ = "?([^";]+)"?;$`, "m").exec(rs);
+    assert.ok(m, `test-sandbox.rs has no constant ${name}`);
+    return m[1];
+  };
+  const home = /^home=(\/\S+)$/m.exec(sh)?.[1];
+  assert.ok(home, "test-sandbox.sh sets no home of the sandbox");
+  assert.equal(rust("HOME"), home, "the program's home of the sandbox is not the script's");
+  assert.equal(rust("ROOT"), shell("root"), "the program's root of the sandbox is not the script's");
+  assert.equal(rust("UID"), shell("uid"), "the program runs the command as another user than the script's");
+  assert.equal(rust("GID"), shell("gid"), "the program runs the command in another group than the script's");
+  assert.equal(rust("PROGRAM"), shell("program"), "the program starts another program as the namespace's first process than the one setup installs");
+  assert.equal(SANDBOX_PROGRAM, shell("program"), "the floor reads nextest's line for another runner than the sandbox's program");
+  // cargo's runner, as `env` names it on both Linux targets, is that program's `run`; the wrapper
+  // starts that program's `inner` through sudo and unshare.
+  for (const triple of ["X86_64_UNKNOWN_LINUX_GNU", "AARCH64_UNKNOWN_LINUX_GNU"]) {
+    assert.ok(sh.includes(`  printf "export CARGO_TARGET_${triple}_RUNNER='%s run'\\n" "$program"\n`), `test-sandbox.sh env does not name the program's run as cargo's runner for ${triple}`);
+  }
+  assert.ok(rs.includes('"--kill-child=SIGKILL", "--", PROGRAM, "inner",'), "the program's wrapper does not start the program's own inner in the namespace");
 });
 
 /// Every required job that runs on a Linux runner is in exactly one of three lists, each with its
@@ -4961,9 +4997,10 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const build = (status) => ({ phase: "Build", duration: 2.8, process_status: status });
   const test = (status) => ({ phase: "Test", duration: 0.15, process_status: status });
   const FAILED = "\x1b[1;31m        FAIL\x1b[0m [   0.004s] mente-syntax tests::x\n";
-  // nextest's own line, in each mutant's log, that it hands the test executables to the sandbox
-  // (the form of the logs of pull requests 139 and 140, coloured as nextest writes it).
-  const SANDBOXED = "\x1b[1minfo\x1b[0m: using target runner `\x1b[1m/usr/bin/bash /opt/mente-test-sandbox/test-sandbox.sh run\x1b[0m` defined by environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`\n";
+  // nextest's own line, in each mutant's log, that it hands the test executables to the sandbox's
+  // program (the form of the logs of pull requests 139 and 140, coloured as nextest writes it, with
+  // the runner of pull request 179).
+  const SANDBOXED = "\x1b[1minfo\x1b[0m: using target runner `\x1b[1m/opt/mente-test-sandbox/test-sandbox run\x1b[0m` defined by environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`\n";
   const real = [
     outcome("caught", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${SANDBOXED}${FAILED}*** result: Failure(100)\n`),
     outcome("timeout", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}        TIMEOUT [  40.104s] mente-cli::bin/mn x\n`),
@@ -4982,6 +5019,10 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     outcome("caught, no test failed", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}error: no tests to run\n`),
     outcome("caught, by tests that ran outside the sandbox", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${FAILED}*** result: Failure(100)\n`),
     outcome("caught, by tests another runner took", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`env\` defined by \`--config\`\n${FAILED}`),
+    // A runner named like the sandbox's, by another path, and the shell's wrapper the program
+    // replaced: neither is the program setup installed.
+    outcome("caught, by a runner of the program's name elsewhere", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`/tmp/opt/mente-test-sandbox/test-sandbox run\` defined by x\n${FAILED}`),
+    outcome("caught, by the shell's old wrapper", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`/usr/bin/bash /opt/mente-test-sandbox/test-sandbox.sh run\` defined by x\n${FAILED}`),
     outcome("caught, the runner's line printed by a test", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `    Starting 3 tests across 1 binary\n${SANDBOXED}${FAILED}`),
     outcome("caught, the runner's line after the failure", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${FAILED}${SANDBOXED}`),
     outcome("unviable, built", "Unviable", [build("Success")], diagnostic("E0277", [span(12, 9, 27)]), DIFF),
