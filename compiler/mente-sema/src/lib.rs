@@ -1133,6 +1133,32 @@ pub fn verify_function_contracts(f: &FnDecl) -> Result<(), Diagnostic> {
 mod tests {
     use super::*;
 
+    /// A reference type, `&T` or `&mut T`, is no type of Mente (CLAUDE.md, invariant 2), wherever a
+    /// type stands, as `mn check` reads a module: a parameter's, a result's, a field's, a
+    /// binding's and an array's element. Mente passes a value by its parameter's mode, `mut`, `own`
+    /// or `in`.
+    #[test]
+    fn test_references_in_types_are_refused() {
+        for src in [
+            "module m\npub fn f(x: &u8) -> u8 = 1\n",
+            "module m\npub fn f(x: &mut u8) -> u8 = 1\n",
+            "module m\npub fn f(x: u8) -> &u8 = x\n",
+            "module m\npub struct S {\n  a: &u8\n}\n",
+            "module m\npub fn f(x: u8) -> u8 {\n  val y: &u8 = x\n  y\n}\n",
+            "module m\npub fn f(x: [2]&u8) -> u8 = 1\n",
+        ] {
+            let errors = check_source(src).err().unwrap_or_default();
+            assert!(
+                errors
+                    .iter()
+                    .any(|d| d.code == "E0116" && d.message == "expected a type, found `&`"),
+                "{}: {:?}",
+                src,
+                errors
+            );
+        }
+    }
+
     #[test]
     fn test_typed_functions_dump_with_their_diagnostics() {
         assert_eq!(
