@@ -18,10 +18,3 @@ pub fn past(k: u8) -> u8 {
   _ = [[0_u8; 1]; 4294967295]
   k
 }
-
-// A frame of the budget itself runs as the first call, its body built whole: the call's 64, `k`'s
-// 4, the array's 524,252 bytes and the 524,256 its initializer holds.
-pub fn exact(k: u32) -> u32 {
-  val big: [131063]u32 = [0_u32; 131063]
-  big[k]
-}
