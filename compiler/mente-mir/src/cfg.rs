@@ -494,7 +494,8 @@ pub enum Op {
     /// or a fact a type gives, which costs nothing at run time (the Ghost Contract `Assume` of
     /// Engineering Guardrail #2). The MIR interpreter reports broken MIR where it does not hold.
     Assume(FactId),
-    /// A new stack slot of `bytes`, aligned to 16, its address the value.
+    /// A new stack slot of `bytes`, its address the value, at the alignment its size implies,
+    /// the largest power of two up to 16 that divides it.
     Slot {
         bytes: u32,
     },
@@ -1014,6 +1015,10 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
     let entry_tys: Vec<Ty> = entry.params.iter().map(|p| f.ty(*p)).collect();
     if entry_tys != f.params {
         return Err("the entry block's parameters are not the function's".into());
+    }
+    // No function returns an address: a slot's address never outlives the call that made it.
+    if f.result == Some(Ty::Addr) {
+        return Err("the function returns an address, which would outlive its slot".into());
     }
     let defined = |v: NodeId| (v.0 as usize) < n;
     let jump = |(b, args): &(BlockId, Vec<NodeId>)| -> Result<(), String> {
@@ -3566,6 +3571,185 @@ mod tests {
         })
         .unwrap_err()
         .contains("does not exist"));
+    }
+
+    /// MIR keeps an address only in a value, never in memory: the verifier refuses a store of an
+    /// address and a load that gives one, beside the store and the load of an integer it admits.
+    /// Native code lays the slots never alive together over the same bytes by what this holds,
+    /// that a slot is reached only through the values derived from its own
+    /// (`spec/mir-and-codegen.md`, "Slots never alive together share bytes").
+    #[test]
+    fn test_no_address_is_stored_in_memory_or_loaded_from_it() {
+        let u8t = Ty::Int(U8);
+        let function = |stored: Ty, loaded: Ty| {
+            let mut b = Builder::new("f", &[u8t], Some(u8t));
+            let x = b.params(BlockId(0))[0];
+            let s = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            let value = if stored == Ty::Addr { s } else { x };
+            b.inst(Op::Store, Ty::Unit, &[s, value]);
+            b.inst(Op::Load, loaded, &[s]);
+            b.ret(Some(x));
+            Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+            }
+        };
+        verify(&function(u8t, u8t)).unwrap();
+        let stored = verify(&function(Ty::Addr, u8t)).unwrap_err();
+        assert!(stored.contains("Store"), "{stored}");
+        let loaded = verify(&function(u8t, Ty::Addr)).unwrap_err();
+        assert!(loaded.contains("Load"), "{loaded}");
+    }
+
+    /// No operation but those of addresses takes an address or gives one, whatever its kind: a
+    /// slot and an element give one; an element, a load, a store and a copy take one where they
+    /// reach memory; a count takes the arguments of its call as they were evaluated, an address
+    /// among them; a call passes one only to a parameter that is one; and no function returns
+    /// one, so no address outlives its slot. Each kind of operation is tried with an address in
+    /// each place that is not one of those, and in its result, and refused. Native code lays the
+    /// slots never alive together over the same bytes by what this holds, that a slot is reached
+    /// only through the values derived from its own (`spec/mir-and-codegen.md`, "Slots never
+    /// alive together share bytes"); a `cast` or a `guard` that took an address would break it.
+    #[test]
+    fn test_only_the_operations_of_addresses_take_or_give_one() {
+        let (u, i, a, b) = (Ty::Int(U8), Ty::Int(I64), Ty::Addr, Ty::Bool);
+        // Which operand of an operation may be an address, and whether its result may be one. The
+        // matches name every operation, so that a new one is placed here before it builds.
+        let takes = |op: &Op, k: usize| match op {
+            Op::Elem { .. } | Op::Load | Op::Store => k == 0,
+            Op::Copy { .. } | Op::Enter { .. } => true,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
+            | Op::Slot { .. }
+            | Op::Call(_) => false,
+        };
+        let gives = |op: &Op| match op {
+            Op::Slot { .. } | Op::Elem { .. } => true,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. }
+            | Op::Call(_)
+            | Op::Enter { .. } => false,
+        };
+        let check = |f: Function| {
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+            })
+        };
+        let add = |trap| Op::Arith {
+            op: ArithOp::Add,
+            trap,
+        };
+        let x: &[&str] = &["", "x"];
+        // Each kind built by `one`: the operation, its result, its parameters (one an operand),
+        // and its trap sites. Each well formed as it stands.
+        type Sample<'a> = (Op, Ty, Vec<Ty>, Vec<&'a [&'a str]>);
+        let samples: Vec<Sample> = vec![
+            (Op::Int(1), i, vec![], vec![]),
+            (Op::Bool(true), b, vec![], vec![]),
+            (add(None), i, vec![i, i], vec![]),
+            (add(Some(TrapId(0))), i, vec![i, i], vec![x]),
+            (Op::Neg { trap: None }, i, vec![i], vec![]),
+            (Op::Bits(BitOp::And), u, vec![u, u], vec![]),
+            (Op::Not, u, vec![u], vec![]),
+            (Op::Shl { trap: TrapId(0) }, u, vec![u, u], vec![x]),
+            (Op::Shr, u, vec![u, u], vec![]),
+            (Op::Cmp(CmpOp::Eq), b, vec![u, u], vec![]),
+            (Op::Cast, i, vec![u], vec![]),
+            (Op::Check { trap: TrapId(0) }, Ty::Unit, vec![b, u], vec![x]),
+            (Op::Slot { bytes: 1 }, a, vec![], vec![]),
+            (Op::Elem { stride: 1 }, a, vec![a, u], vec![]),
+            (Op::Load, u, vec![a], vec![]),
+            (Op::Store, Ty::Unit, vec![a, u], vec![]),
+            (Op::Copy { bytes: 1 }, Ty::Unit, vec![a, a], vec![]),
+        ];
+        for (op, ty, params, traps) in &samples {
+            let args: Vec<usize> = (0..params.len()).collect();
+            assert_eq!(
+                check(one(op.clone(), *ty, params, &args, traps)),
+                Ok(()),
+                "{op:?}"
+            );
+            for k in (0..params.len()).filter(|k| !takes(op, *k)) {
+                let mut wrong = params.clone();
+                wrong[k] = a;
+                assert!(
+                    check(one(op.clone(), *ty, &wrong, &args, traps)).is_err(),
+                    "{op:?} takes an address as its operand {k}"
+                );
+            }
+            if !gives(op) {
+                assert!(
+                    check(one(op.clone(), a, params, &args, traps)).is_err(),
+                    "{op:?} gives an address"
+                );
+            }
+        }
+        // A guard and an assumption yield the integer they take.
+        for guarded in [u, a] {
+            let mut f = Builder::new("g", &[b, guarded], None);
+            let [c, v] = f.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let site = f.trap_site("narrowing", &["x does not fit"]);
+            let fact = f.fact_site(Fact::Within(Num::ZERO, Num::from_i128(3)));
+            f.inst(Op::Guard { trap: site, fact }, guarded, &[c, v]);
+            let w = f.assume(v, Fact::Within(Num::ZERO, Num::from_i128(3)));
+            let _ = w;
+            f.ret(None);
+            assert_eq!(check(f.finish()).is_ok(), guarded == u, "{guarded}");
+        }
+        // A count takes what it counts, an address among them; a call passes an address only to a
+        // parameter that is one.
+        let callee = |param: Ty| {
+            let mut g = Builder::new("callee", &[param], None);
+            g.ret(None);
+            g.finish()
+        };
+        for (param, arg, ok) in [(a, a, true), (u, a, false), (a, u, false)] {
+            let mut f = Builder::new("caller", &[arg], None);
+            let p = f.params(BlockId(0))[0];
+            call(&mut f, 0, Ty::Unit, &[p]);
+            f.ret(None);
+            let verified = verify(&Module {
+                functions: vec![callee(param), f.finish()],
+                budget: BUDGET,
+            });
+            assert_eq!(verified.is_ok(), ok, "{param} given {arg}: {verified:?}");
+        }
+        // No function returns an address, so a call never gives one.
+        let mut f = Builder::new("leak", &[], Some(a));
+        let s = f.inst(Op::Slot { bytes: 1 }, a, &[]);
+        f.ret(Some(s));
+        let leaked = check(f.finish()).unwrap_err();
+        assert!(leaked.contains("returns an address"), "{leaked}");
     }
 
     /// A slot read before it is written holds the memory's fill, 0 unless another is asked
