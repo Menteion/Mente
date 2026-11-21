@@ -268,12 +268,29 @@ pub struct Site {
     pub trap: Trap,
     /// The path reaches the check and the check fails.
     pub fails: T,
+    /// Some path was cut off past the bounds before the check: one that would reach it may be
+    /// among those, so a check no input reaches is not shown unreachable.
+    pub beyond_bound: bool,
+    /// Some path was cut off at a construct the encoding lacks before the check.
+    pub beyond_lacked: bool,
 }
 
 impl Site {
     /// What tells this obligation apart from Tier 1's others.
     pub fn key(&self) -> (Kind, Span, Tag) {
         (self.kind, self.span, self.tag)
+    }
+
+    /// The obligation as a query names it: its kind, its place and its tag, such as
+    /// `range at 4:19 into `i32``.
+    pub fn obligation(&self) -> String {
+        format!(
+            "{} at {}:{}{}",
+            self.kind.name(),
+            self.span.line,
+            self.span.col,
+            tag_text(self.tag)
+        )
     }
 }
 
@@ -303,6 +320,13 @@ pub struct Encoding {
     /// Some path of the inputs is cut off: by a loop or a call past the bounds, or by a
     /// construct the encoding lacks.
     pub cut: T,
+    /// The run of the inputs returns, on a path the encoding follows, without a trap.
+    pub returns: T,
+    /// The value it returns, where the function has one.
+    pub result: Option<T>,
+    /// Each parameter's value when the run returns, in the parameters' order: what a `mut`
+    /// parameter copies back to its caller's place.
+    pub finals: Vec<Option<T>>,
 }
 
 impl Encoding {
@@ -329,14 +353,7 @@ impl Encoding {
         let s = &self.sites[first];
         let mut out = String::new();
         let _ = writeln!(out, "; function: {}", self.function);
-        let _ = writeln!(
-            out,
-            "; obligation: {} at {}:{}{}",
-            s.kind.name(),
-            s.span.line,
-            s.span.col,
-            tag_text(s.tag)
-        );
+        let _ = writeln!(out, "; obligation: {}", s.obligation());
         let _ = writeln!(
             out,
             "; trap: {} at {}:{}",
@@ -373,7 +390,9 @@ fn tag_text(tag: Tag) -> String {
     }
 }
 
-/// The function, the obligation's kind and the trap's kind and place a query's comments name.
+/// The function, the obligation and the trap's kind and place a query's comments name. The
+/// obligation is its kind, its place and its tag, `range at 4:19 into `i32``, which tells apart
+/// the obligations that share one trap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
     pub function: String,
@@ -381,6 +400,52 @@ pub struct Header {
     pub trap_kind: String,
     pub trap_line: u32,
     pub trap_col: u32,
+}
+
+/// The arithmetic a query's terms use, which decides how hard it is for a solver, from the
+/// least: `linear` integer arithmetic, its divisions and remainders by numerals among it;
+/// `nonlinear`, with a product of two terms of no numeral, or a division or a remainder by one;
+/// and `bit-vector`, with a conversion between integers and bit-vectors.
+pub fn fragment(query: &str) -> &'static str {
+    let Ok(exprs) = eval::parse(query) else {
+        return "unread";
+    };
+    fn walk(s: &eval::Sexp, nonlinear: &mut bool, bits: &mut bool) {
+        let eval::Sexp::List(items) = s else {
+            return;
+        };
+        let numeral = |s: &eval::Sexp| match s {
+            eval::Sexp::Atom(a) => a.bytes().all(|b| b.is_ascii_digit()),
+            eval::Sexp::List(l) => {
+                matches!(l.as_slice(), [eval::Sexp::Atom(m), eval::Sexp::Atom(n)]
+                if m == "-" && n.bytes().all(|b| b.is_ascii_digit()))
+            }
+        };
+        match items.as_slice() {
+            [eval::Sexp::Atom(op), a, b] if op == "*" => {
+                *nonlinear |= !numeral(a) && !numeral(b);
+            }
+            [eval::Sexp::Atom(op), _, b] if op == "div" || op == "mod" => {
+                *nonlinear |= !numeral(b);
+            }
+            [eval::Sexp::Atom(op), ..] if op == "bv2nat" => *bits = true,
+            _ => {}
+        }
+        for item in items {
+            walk(item, nonlinear, bits);
+        }
+    }
+    let (mut nonlinear, mut bits) = (false, false);
+    for e in &exprs {
+        walk(e, &mut nonlinear, &mut bits);
+    }
+    if bits {
+        "bit-vector"
+    } else if nonlinear {
+        "nonlinear"
+    } else {
+        "linear"
+    }
 }
 
 /// What a query's comments say of it, as [`Encoding::query`] writes them.
@@ -392,7 +457,7 @@ pub fn header(query: &str) -> Option<Header> {
         if let Some(rest) = line.strip_prefix("; function: ") {
             function = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("; obligation: ") {
-            obligation = rest.split(' ').next().map(str::to_string);
+            obligation = Some(rest.to_string());
         } else if let Some(rest) = line.strip_prefix("; trap: ") {
             let (kind, place) = rest.split_once(" at ")?;
             let (l, c) = place.split_once(':')?;
@@ -457,6 +522,36 @@ mod tests {
         assert_eq!(Shape::Bool.int(), None);
     }
 
+    /// A query's fragment is the hardest arithmetic its terms use: a product of two terms of no
+    /// numeral, or a division or a remainder by one, is nonlinear; a bit-vector conversion is
+    /// harder still; divisions by numerals and products with one stay linear.
+    #[test]
+    fn test_a_query_names_the_arithmetic_it_uses() {
+        let q = |body: &str| {
+            format!("(declare-const p.x Int)\n(declare-const p.y Int)\n(define-fun t1 () Int {})\n(assert (< t1 0))\n", body)
+        };
+        for (body, named) in [
+            ("(+ p.x (* 3 p.y))", "linear"),
+            ("(* p.x (- 2))", "linear"),
+            ("(div p.x 4)", "linear"),
+            ("(mod p.x (- 4))", "linear"),
+            ("(* p.x p.y)", "nonlinear"),
+            ("(div p.x p.y)", "nonlinear"),
+            ("(mod 7 p.y)", "nonlinear"),
+            (
+                "(bv2nat (bvand ((_ int2bv 8) p.x) ((_ int2bv 8) p.y)))",
+                "bit-vector",
+            ),
+            (
+                "(+ (* p.x p.y) (bv2nat (bvnot ((_ int2bv 8) p.x))))",
+                "bit-vector",
+            ),
+        ] {
+            assert_eq!(fragment(&q(body)), named, "{}", body);
+        }
+        assert_eq!(fragment("(assert"), "unread");
+    }
+
     #[test]
     fn test_a_query_header_names_the_function_and_the_trap() {
         let q = "; source: a.mn:3:4\n; function: f\n; obligation: divisor at 3:9\n; trap: division-by-zero at 3:5\n(assert true)\n";
@@ -464,7 +559,7 @@ mod tests {
             header(q),
             Some(Header {
                 function: "f".into(),
-                obligation: "divisor".into(),
+                obligation: "divisor at 3:9".into(),
                 trap_kind: "division-by-zero".into(),
                 trap_line: 3,
                 trap_col: 5,
