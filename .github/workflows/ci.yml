@@ -27,12 +27,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `nested`: whether the job runs the types nested as a DAG and as a long chain through
+          # every phase (`test_types_nested_as_a_dag_or_a_long_chain_pass_every_phase`), on one
+          # runner, under the memory limits of .github/scripts/limits.sh.
           - name: x86-64 Linux
             os: ubuntu-24.04
+            nested: run
           - name: x86-64 Windows
             os: windows-2025
+            nested: skip
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
+            nested: skip
     runs-on: ${{ matrix.os }}
     # Four times the slowest run, 10 minutes with nextest still to build: a hang in a step outside
     # nextest's limits, the doctests or the gates by name, holds the runner no longer.
@@ -40,6 +46,9 @@ jobs:
     env:
       # A warning fails the build (ROADMAP.md, M0a: Rust hygiene).
       RUSTFLAGS: -D warnings
+      # Every job that runs the tests says whether the nested types' test runs; one that says
+      # neither fails it on CI, so that it never passes there without having run.
+      MENTE_NESTED_TYPES: ${{ matrix.nested }}
     defaults:
       run:
         shell: bash
@@ -150,6 +159,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       CARGO_LLVM_COV_VERSION: "0.9.1"
+      MENTE_NESTED_TYPES: skip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

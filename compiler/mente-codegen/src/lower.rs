@@ -28,8 +28,9 @@ use mente_mir::cfg::{
 };
 use mente_mir::NodeId;
 use mente_sema::names::BindingKind;
-use mente_sema::structs::Structs;
+use mente_sema::structs::{Decl, Structs};
 use mente_sema::tier1::{Obligation, ObligationKind, Tag};
+use mente_sema::type_walk::{Facts, Field, Fold, TypeWalk};
 use mente_sema::types::{Int as SemaInt, IntTy as SemaIntTy, Ty as SemaTy};
 use mente_sema::wide::{self, Interval};
 use mente_sema::{CheckedFn, CheckedModule};
@@ -137,23 +138,177 @@ impl StructShape {
     }
 }
 
+/// A struct's shape lets go of its fields' shapes one at a time ([`take_apart`]).
+impl Drop for StructShape {
+    fn drop(&mut self) {
+        take_apart(self.fields.drain(..).map(|f| f.shape).collect());
+    }
+}
+
+/// An enum's shape lets go of its payloads' shapes one at a time ([`take_apart`]).
+impl Drop for EnumShape {
+    fn drop(&mut self) {
+        take_apart(
+            self.variants
+                .drain(..)
+                .flat_map(|v| v.fields)
+                .map(|f| f.shape)
+                .collect(),
+        );
+    }
+}
+
+/// Drops the shapes `pending` holds, and the struct and enum shapes nothing else holds inside
+/// them, one at a time from a list of its own, so that letting go of a shape nests no deeper on
+/// the host's stack however deep its fields nest. The shape of a chain of eight thousand
+/// structs, each holding the one before it, let go of by the last entry that held it, took a
+/// level of the host's stack for each struct and overflowed a thread's 2 MiB (2026-11-22).
+fn take_apart(mut pending: Vec<Shape>) {
+    while let Some(shape) = pending.pop() {
+        match shape {
+            Shape::Array(_, elem) => pending.push(*elem),
+            // Emptied here, the shape that is dropped at the end of the arm has nothing left to
+            // take apart.
+            Shape::Struct(s) => {
+                if let Some(mut s) = Arc::into_inner(s) {
+                    pending.extend(s.fields.drain(..).map(|f| f.shape));
+                }
+            }
+            Shape::Enum(e) => {
+                if let Some(mut e) = Arc::into_inner(e) {
+                    pending.extend(e.variants.drain(..).flat_map(|v| v.fields).map(|f| f.shape));
+                }
+            }
+            Shape::Int(_) | Shape::Bool | Shape::Unit => {}
+        }
+    }
+}
+
 /// The shape of each struct and enum of a module, made from the layouts the checker gives them
-/// (`mente_sema::structs`), which is the one place a layout is defined.
+/// (`mente_sema::structs`), which is the one place a layout is defined, and which of them hold a
+/// refined field: each fact once for each declaration, in dependency order.
 #[derive(Clone, Debug, Default)]
 pub struct Shapes(
     HashMap<String, Arc<StructShape>>,
     HashMap<String, Arc<EnumShape>>,
+    Refined,
 );
+
+/// How many refinement checks a value of each struct and enum takes, through its fields and
+/// arrays: one for each refined field, an array's element's once, since an array is checked in a
+/// loop, and every variant's of an enum; a declaration holds a refined field when it takes one.
+/// A fact of each declaration, worked out once by the type walk (`mente_sema::type_walk`). Asked
+/// again for each path to a declaration, a DAG of declarations, each holding two of the one before
+/// it, took two to the power of its depth, and a lowering forty deep did not end (2026-11-22).
+#[derive(Clone, Debug, Default)]
+struct Refined(Option<Facts<u128>>);
+
+/// The most refinement checks the lowering unrolls for one value where it enters a function from
+/// outside, or comes back from a `mut` argument: the fields of a struct are checked one after
+/// another in the code, so that the code grows with the refined fields of the value, which a DAG
+/// of structs, each holding two of the one before it, doubles at each level, 2^31 within the
+/// 4 GiB a value may take. Past it the lowering stops with a limit of the compiler, never building
+/// code of that size (the Manager's decision of 2026-11-22); a check function for each declaration
+/// held twice would make the code grow with the program instead, a change to item 25's stack
+/// budget that waits with [`aligned-frame-layout`](../../docs/design-review.md#aligned-frame-layout).
+const MAX_UNROLLED_CHECKS: u128 = 4096;
+
+/// The fold of [`Refined`]: a declaration takes a check for each of its fields refined at the
+/// bottom of its arrays, and those of each declaration its fields hold.
+struct Refining;
+
+impl Fold for Refining {
+    type Fact = u128;
+
+    fn leaf(&mut self, _: &SemaTy) -> Option<u128> {
+        Some(0)
+    }
+
+    fn array(&mut self, _: u128, elem: u128) -> Option<u128> {
+        Some(elem)
+    }
+
+    fn decl(&mut self, _: Decl, variants: &[Vec<Field<'_, u128>>]) -> Option<u128> {
+        Some(variants.iter().flatten().fold(0, |n, f| {
+            let checks = match refined_at_the_bottom(f.tree, f.def.decl) {
+                true => 1,
+                false => f.fact.unwrap_or(0),
+            };
+            n.saturating_add(checks)
+        }))
+    }
+}
+
+/// Whether the type `t` of `tree` is a refined integer, or an array of them at the bottom of its
+/// arrays.
+fn refined_at_the_bottom(tree: &Tree, t: TypeId) -> bool {
+    let mut at = t;
+    loop {
+        match &tree.ty(at).kind {
+            TypeKind::Int { refinement, .. } => return refinement.is_some(),
+            TypeKind::Array { elem, .. } => at = *elem,
+            TypeKind::Named(_) | TypeKind::Enum(_) | TypeKind::Bool | TypeKind::Error => {
+                return false
+            }
+        }
+    }
+}
+
+impl Refined {
+    /// How many refinement checks a value of declaration `d` takes.
+    fn of(&self, d: Decl) -> u128 {
+        self.0.as_ref().and_then(|f| f.of(d)).copied().unwrap_or(0)
+    }
+
+    /// How many refinement checks a value of the type `t` of `tree` takes: one for a refined
+    /// integer, its element's for an array, and, where `declared` asks it to, a struct's or an
+    /// enum's.
+    fn checks(&self, structs: &Structs, tree: &Tree, t: TypeId, declared: bool) -> u128 {
+        let mut at = t;
+        loop {
+            match &tree.ty(at).kind {
+                TypeKind::Int { refinement, .. } => return u128::from(refinement.is_some()),
+                TypeKind::Array { elem, .. } => at = *elem,
+                TypeKind::Named(name) => {
+                    return match (declared, structs.position(name)) {
+                        (true, Some(i)) => self.of(Decl::Struct(i)),
+                        (false, _) | (_, None) => 0,
+                    }
+                }
+                TypeKind::Enum(name) => {
+                    return match (declared, structs.enum_position(name)) {
+                        (true, Some(i)) => self.of(Decl::Enum(i)),
+                        (false, _) | (_, None) => 0,
+                    }
+                }
+                TypeKind::Bool | TypeKind::Error => return 0,
+            }
+        }
+    }
+
+    /// Whether the type `t` of `tree` is refined, or holds a refined field through its
+    /// elements, and through a struct's or an enum's fields where `declared` asks it to.
+    fn type_refines(&self, structs: &Structs, tree: &Tree, t: TypeId, declared: bool) -> bool {
+        self.checks(structs, tree, t, declared) > 0
+    }
+}
 
 impl Shapes {
     pub fn of(structs: &Structs) -> Result<Shapes, String> {
         let mut shapes = Shapes::default();
-        for d in &structs.defs {
-            shapes.add(structs, &d.name)?;
+        // Each declaration after those its fields hold (`TypeWalk::order`), so that a field's
+        // shape is made before the shape that holds it and never by a walk down the
+        // declarations, which a chain of sixty thousand nested as deep on the host's stack.
+        let walk = TypeWalk::new(structs);
+        for d in walk.order() {
+            match d {
+                Decl::Struct(i) => shapes.add(structs, &structs.defs[i].name).map(|_| ())?,
+                Decl::Enum(i) => shapes
+                    .add_enum(structs, &structs.enums[i].name)
+                    .map(|_| ())?,
+            }
         }
-        for e in &structs.enums {
-            shapes.add_enum(structs, &e.name)?;
-        }
+        shapes.2 = Refined(Some(walk.fold(&mut Refining)));
         Ok(shapes)
     }
 
@@ -1744,6 +1899,18 @@ impl<'a> Lower<'a> {
         if self.proven(ObligationKind::Refinement, key) || !self.refines(tree, d) {
             return Ok(());
         }
+        // The checks it unrolls, counted before any is built (`MAX_UNROLLED_CHECKS`).
+        let checks = self.shapes.2.checks(&self.m.structs, tree, d, self.entry);
+        if checks > MAX_UNROLLED_CHECKS {
+            return Err(format!(
+                "a limit of the compiler: checking the refinements of a value of `{}` takes {} \
+                 checks, one for each refined field it holds, past the {} the compiler unrolls \
+                 for one value; `mn check` and the interpreters accept the program",
+                tree.render_type(d),
+                checks,
+                MAX_UNROLLED_CHECKS
+            ));
+        }
         let kind = &tree.ty(d).kind;
         // A value of no type is never checked: control left before it was given.
         match kind {
@@ -1807,21 +1974,12 @@ impl<'a> Lower<'a> {
     /// Whether a value of the declared type `t` has a refinement [`Self::refined`] checks: at the
     /// bottom of its arrays, or, in an entry, in its structs' fields.
     fn refines(&self, tree: &Tree, t: TypeId) -> bool {
-        match &tree.ty(t).kind {
-            TypeKind::Int { refinement, .. } => refinement.is_some(),
-            TypeKind::Array { elem, .. } => self.refines(tree, *elem),
-            TypeKind::Named(name) if self.entry => self
-                .m
-                .structs
-                .get(name)
-                .is_some_and(|d| d.fields.iter().any(|f| self.refines(d.tree(), f.decl))),
-            TypeKind::Enum(name) if self.entry => self.m.structs.get_enum(name).is_some_and(|d| {
-                d.variants
-                    .iter()
-                    .any(|v| v.fields.iter().any(|f| self.refines(d.tree(), f.decl)))
-            }),
-            TypeKind::Bool | TypeKind::Named(_) | TypeKind::Enum(_) | TypeKind::Error => false,
-        }
+        // A struct's or an enum's fields hold their refinements in a value made in the program,
+        // so only an entry, whose arguments come from outside, checks them; each declaration's
+        // fact is the module's, counted once (`Refined`).
+        self.shapes
+            .2
+            .type_refines(&self.m.structs, tree, t, self.entry)
     }
 
     /// In an entry, checks the refinements of the payload of the variant an enum at `a` holds,
@@ -3460,6 +3618,133 @@ mod tests {
         signed: false,
         bits: 16,
     };
+
+    /// How many refinement checks a value of each declaration takes is found in a step for each
+    /// node of each field's type, however many paths lead to a declaration: a DAG of structs, each
+    /// holding two of the one before it, eight deep, takes two steps a level, where asking each
+    /// path took 2^8, and forty deep the lowering did not end (2026-11-22). A refinement at the
+    /// bottom takes a check at every level, twice the one below's; a struct beside them takes
+    /// none, and an enum the checks of its variants' fields.
+    #[test]
+    fn test_refined_fields_are_found_in_a_step_for_each_field() {
+        let mut src = String::from(
+            "module m\nstruct S0 {\n  a: u8[1..=3]\n}\nstruct Plain {\n  b: [2]u8\n}\n\
+             enum Held {\n  V(s: S0)\n  W\n}\nenum Bare {\n  V(p: Plain)\n}\n",
+        );
+        for k in 1..8 {
+            src.push_str(&format!(
+                "struct S{k} {{\n  l: S{p}\n  r: S{p}\n}}\n",
+                p = k - 1
+            ));
+        }
+        src.push_str("pub fn f(x: u8) -> u8 = x\n");
+        let module = mente_sema::check_program_without_proofs(&src).unwrap();
+        let structs = &module.structs;
+        let walk = TypeWalk::new(structs);
+        let facts = walk.fold(&mut Refining);
+        // Eleven declarations; `S0`'s one field, `Plain`'s array and its element, the enums'
+        // payload fields, and two fields on each of seven levels.
+        assert_eq!(facts.steps, 11 + 1 + 2 + 2 + 2 * 7);
+        let refined = Refined(Some(facts));
+        for k in 0..8 {
+            assert_eq!(
+                refined.of(Decl::Struct(structs.position(&format!("S{k}")).unwrap())),
+                1 << k,
+                "S{k}"
+            );
+        }
+        assert_eq!(
+            refined.of(Decl::Struct(structs.position("Plain").unwrap())),
+            0
+        );
+        assert_eq!(
+            refined.of(Decl::Enum(structs.enum_position("Held").unwrap())),
+            1
+        );
+        assert_eq!(
+            refined.of(Decl::Enum(structs.enum_position("Bare").unwrap())),
+            0
+        );
+    }
+
+    /// The refinement checks of a value that enters from outside are unrolled field by field, so
+    /// the lowering counts them first and stops past [`MAX_UNROLLED_CHECKS`], with a limit of the
+    /// compiler that names the type and the count: a DAG of refined structs twelve deep takes
+    /// exactly the limit, 4,096 checks, and is built; thirteen deep takes 8,192 and is not, where
+    /// thirty-one deep, 2^31 checks within the 4 GiB a value may take, would have built code
+    /// without end (the Manager's decision of 2026-11-22). The checker accepts both.
+    #[test]
+    fn test_unrolled_refinement_checks_stop_at_a_limit() {
+        let mut src = String::from("module m\nstruct S0 {\n  a: u8[1..=3]\n}\n");
+        for k in 1..=13 {
+            src.push_str(&format!(
+                "struct S{k} {{\n  l: S{p}\n  r: S{p}\n}}\n",
+                p = k - 1
+            ));
+        }
+        let at = |levels: usize| format!("{src}pub fn f(s: S{levels}) -> u8 = 0\n");
+        assert_eq!(MAX_UNROLLED_CHECKS, 1 << 12);
+        let module = mente_sema::check_program(&at(12)).unwrap();
+        assert!(lower(&module).is_ok());
+        let module = mente_sema::check_program(&at(13)).unwrap();
+        let e = lower(&module).unwrap_err();
+        assert!(
+            e.contains("a limit of the compiler")
+                && e.contains("`S13`")
+                && e.contains("8192 checks")
+                && e.contains("past the 4096"),
+            "{e}"
+        );
+    }
+
+    /// The shape of a struct twenty thousand deep, each level a struct or an enum holding the one
+    /// below it through an array, is let go of on the test's thread, whose 2 MiB a drop that took
+    /// a level of the host's stack for each struct overflowed at eight thousand (2026-11-22).
+    /// A level another shape still holds is left whole.
+    #[test]
+    fn test_a_deep_shape_is_let_go_of_one_level_at_a_time() {
+        let field = |shape: Shape| FieldShape {
+            name: "a".to_string(),
+            offset: 0,
+            shape,
+        };
+        let mut shape = Shape::Int(U16);
+        let mut kept = None;
+        for k in 0..20_000 {
+            let held = Shape::Array(1, Box::new(shape));
+            shape = if k % 2 == 0 {
+                Shape::Struct(Arc::new(StructShape {
+                    name: format!("S{k}"),
+                    fields: vec![field(held)],
+                    size: 2,
+                    align: 2,
+                }))
+            } else {
+                Shape::Enum(Arc::new(EnumShape {
+                    name: format!("E{k}"),
+                    tag: U16,
+                    variants: vec![VariantShape {
+                        name: "V".to_string(),
+                        fields: vec![field(held)],
+                    }],
+                    size: 4,
+                    align: 2,
+                }))
+            };
+            if k == 101 {
+                kept = Some(shape.clone());
+            }
+        }
+        drop(shape);
+        let Some(Shape::Enum(e)) = kept else {
+            panic!("level 101 is an enum");
+        };
+        assert_eq!((e.name.as_str(), Arc::strong_count(&e)), ("E101", 1));
+        let Shape::Array(1, below) = &e.variants[0].fields[0].shape else {
+            panic!("level 101 holds an array");
+        };
+        assert!(matches!(&**below, Shape::Struct(s) if s.name == "S100" && s.fields.len() == 1));
+    }
 
     /// Lowering and verifying take time that grows with the function, not with its square: a body
     /// of 3,000 `if`s, each a branch and a join and a call, threading its effects through every

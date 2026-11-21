@@ -45,6 +45,7 @@ use mente_codegen::lower::{Lowered, Shape};
 use mente_codegen::native;
 use mente_interp::{Int, Value};
 use mente_mir::cfg::{self, Memory, Num, Val};
+use mente_sema::type_walk::TypeWalk;
 use mente_sema::CheckedModule;
 use mente_syntax::diagnostics::{render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::TokenKind;
@@ -1119,7 +1120,10 @@ impl Phases {
         let Some(module) = proven else {
             return;
         };
-        let functions = scalar_functions(&module);
+        // The arguments' shapes are codegen's, so a hang there is reported as their phase's.
+        let functions = run
+            .phase("shapes", || scalar_functions(&module))
+            .unwrap_or_default();
         let lowered = self.lower(run, "lower", &module);
         if let Some(lowered) = &lowered {
             run.stable("dump-mir", || lowered.module.to_string());
@@ -1131,7 +1135,12 @@ impl Phases {
         // allowance does not run on it, since its run could take more than a test process may
         // (`mir_run::HOST_ALLOWANCE`): it is set aside, and counted as reaching the phase
         // `beyond-host-allowance`, which the run's summary reports with the others.
-        if crate::mir_run::within_host_allowance(mente_interp::host_bound_of(&module)) {
+        let within = run
+            .phase("host-bound", || {
+                crate::mir_run::within_host_allowance(mente_interp::host_bound_of(&module))
+            })
+            .unwrap_or(false);
+        if within {
             let panicked = run
                 .phase("interp", || interpret(&module, &functions))
                 .flatten();
@@ -1319,31 +1328,6 @@ impl Scalar {
     }
 }
 
-/// How many values an argument of `shape` is built of, each element and field counted.
-fn values_of(shape: &Shape) -> usize {
-    match shape {
-        Shape::Array(n, elem) => (*n as usize)
-            .saturating_mul(values_of(elem))
-            .saturating_add(1),
-        Shape::Struct(st) => st
-            .fields
-            .iter()
-            .fold(1, |sum: usize, f| sum.saturating_add(values_of(&f.shape))),
-        // The variant with the most values, its tag counted.
-        Shape::Enum(en) => en
-            .variants
-            .iter()
-            .map(|v| {
-                v.fields
-                    .iter()
-                    .fold(1, |sum: usize, f| sum.saturating_add(values_of(&f.shape)))
-            })
-            .max()
-            .unwrap_or(1),
-        _ => 1,
-    }
-}
-
 /// The values worth calling a parameter of `shape` with: 0, 1, its maximum, and for a signed
 /// type -1 and its minimum; `false` and `true`; an array with every element at one edge of
 /// its type, a struct with each field at its own edge of that rank, and each variant of an
@@ -1440,27 +1424,41 @@ fn scalar_functions(module: &CheckedModule) -> Vec<Function> {
     let Ok(shapes) = mente_codegen::lower::Shapes::of(&module.structs) else {
         return Vec::new();
     };
+    // How many values an argument of each declaration is built of, worked out once by the type
+    // walk (`mente_sema::type_walk`): a count down every path took two to the power of a DAG's
+    // depth, and did not end on one forty deep (2026-11-22).
+    let walk = TypeWalk::new(&module.structs);
+    let measures = walk.measures();
     module
         .functions
         .iter()
         .flatten()
         .filter_map(|f| {
             let tree = &f.syntax.tree;
-            let params = f
+            let tys: Vec<mente_sema::types::Ty> = f
                 .syntax
                 .params
                 .iter()
-                .map(|p| Shape::of(&mente_sema::types::Ty::of(tree, p.ty), &shapes).ok())
-                .collect::<Option<Vec<Shape>>>()?;
-            params
+                .map(|p| mente_sema::types::Ty::of(tree, p.ty))
+                .collect();
+            let values = tys
                 .iter()
-                .map(values_of)
-                .fold(0, usize::saturating_add)
-                .le(&MAX_ARGUMENT_VALUES)
-                .then(|| Function {
-                    name: f.syntax.name.clone(),
-                    params,
+                .map(|t| {
+                    walk.measure_of(&measures, t)
+                        .map_or(u128::MAX, |m| m.values)
                 })
+                .fold(0, u128::saturating_add);
+            if values > MAX_ARGUMENT_VALUES as u128 {
+                return None;
+            }
+            let params = tys
+                .iter()
+                .map(|t| Shape::of(t, &shapes).ok())
+                .collect::<Option<Vec<Shape>>>()?;
+            Some(Function {
+                name: f.syntax.name.clone(),
+                params,
+            })
         })
         .take(MAX_FUNCTIONS)
         .collect()
@@ -2850,6 +2848,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&out);
     }
 
+    /// A function whose arguments hold more values than the fuzzer builds is not run, by the
+    /// measures of its parameters' types: of a DAG of structs, each holding two of the one before
+    /// it, `S6` holds 191 values and `S7` 383, past the 256 the fuzzer builds, as two `S6` are.
+    #[test]
+    fn test_functions_past_the_arguments_values_are_not_run() {
+        let mut text = String::from("module m\nstruct S0 {\n  a: u8\n}\n");
+        for k in 1..8 {
+            text.push_str(&format!(
+                "struct S{k} {{\n  l: S{p}\n  r: S{p}\n}}\n",
+                p = k - 1
+            ));
+        }
+        text.push_str(
+            "pub fn big(s: S7) -> u8 = 0\npub fn small(s: S6) -> u8 = 0\npub fn pair(a: S6, b: S6) -> u8 = 0\n",
+        );
+        let module = mente_sema::check_program(&text).unwrap();
+        let run: Vec<String> = scalar_functions(&module)
+            .into_iter()
+            .map(|f| f.name)
+            .collect();
+        assert_eq!(run, ["small"]);
+    }
+
     /// A module that checks reaches every phase, the objects and both interpreters included,
     /// and fails none; one that does not check stops before the lowering, and fails none.
     #[test]
@@ -2869,6 +2890,11 @@ mod tests {
             "render",
             "incremental",
             "tier1",
+            // The shapes of the functions' arguments, and the bound on the reference
+            // interpreter's host memory, are phases of their own, so that a walk that does not end
+            // in either is not charged to the checking before it (2026-11-22).
+            "shapes",
+            "host-bound",
             "lower",
             "dump-mir",
             "object x86_64-unknown-linux-gnu",
