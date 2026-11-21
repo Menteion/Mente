@@ -18,8 +18,20 @@ use std::collections::BTreeSet;
 use mente_mir::cfg::{self, Op, Term};
 use mente_mir::NodeId;
 
-/// The alignment of every slot, which `Op::Slot` promises.
-const ALIGN: u32 = 16;
+/// The alignment a slot of `bytes` takes: the largest power of two up to 16 that divides its size.
+/// A value's size is a multiple of its alignment, a power of two up to an `i128`'s 16, so this is
+/// at least the alignment of what the slot holds, and no slot is rounded up past its bytes.
+fn align_of(bytes: u32) -> u64 {
+    match bytes {
+        0 => 1,
+        n => (1u64 << n.trailing_zeros()).min(16),
+    }
+}
+
+/// `at` rounded up to a multiple of `align`, a power of two.
+fn align_up(at: u64, align: u64) -> u64 {
+    at.div_ceil(align) * align
+}
 
 /// The bytes of a frame left beside a function's slots for the one slot native code adds, its
 /// scratch (`native::SCRATCH`).
@@ -91,27 +103,30 @@ fn term_uses(term: &Term) -> Vec<NodeId> {
 }
 
 /// Where each slot of `f` lies: slots alive at one point lie apart, and the rest share bytes,
-/// each placed, in the order the function makes them, at the lowest offset no slot alive with it
-/// has taken.
-pub(crate) fn layout(f: &cfg::Function) -> Layout {
+/// each placed, in the order the function makes them, at the lowest offset of its alignment no
+/// slot alive with it has taken. Slots past what one stack slot can hold, 4 GiB, are a limit of
+/// the compiler, reported as one.
+pub(crate) fn layout(f: &cfg::Function) -> Result<Layout, String> {
     let values = f.ops.len();
     let mut offsets = vec![None; values];
-    // The slots, in the order of the blocks and their instructions, each of its bytes rounded up
-    // to the alignment, at least one.
+    // The slots, in the order of the blocks and their instructions, each with its bytes and its
+    // alignment.
     let mut slot_of: Vec<Option<usize>> = vec![None; values];
-    let mut sizes: Vec<u32> = Vec::new();
+    let mut sizes: Vec<u64> = Vec::new();
+    let mut aligns: Vec<u64> = Vec::new();
     let mut makers: Vec<NodeId> = Vec::new();
     for block in &f.blocks {
         for &v in &block.insts {
             if let Some(bytes) = slot_bytes(&f.ops[v.0 as usize]) {
                 slot_of[v.0 as usize] = Some(sizes.len());
-                sizes.push(bytes.max(1).div_ceil(ALIGN) * ALIGN);
+                sizes.push(u64::from(bytes));
+                aligns.push(align_of(bytes));
                 makers.push(v);
             }
         }
     }
     if sizes.is_empty() {
-        return Layout { offsets, bytes: 0 };
+        return Ok(Layout { offsets, bytes: 0 });
     }
     // The slots each address may point into: a slot's own value its slot; an address computed
     // from addresses, those addresses' slots; a block parameter, the slots of every value passed
@@ -301,29 +316,31 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
     // Two slots one run makes in turn, at one offset, would have one address, which Cranelift
     // computes once and keeps alive from the first slot's use to the last's, so that its register
     // allocation, and the instructions it executes, change with what shares bytes. So a slot
-    // starts where no slot of its run started, sharing their bytes from 16 on, while that keeps
-    // the slots within the frame they hold values of; past that, at the lowest clear offset.
-    let budget = u32::try_from(f.frame.saturating_sub(u128::from(RESERVED))).unwrap_or(u32::MAX);
-    let place = |apart: bool| -> (Vec<u32>, u32) {
-        let mut placed: Vec<u32> = Vec::with_capacity(sizes.len());
+    // starts where no slot of its run started, at the next offset of its alignment past one, while
+    // that keeps the slots within the frame they hold values of; past that, at the lowest clear
+    // offset. Offsets and ends are counted in 64 bits, which no sum of 32-bit sizes passes.
+    let budget = u64::try_from(f.frame.saturating_sub(u128::from(RESERVED))).unwrap_or(u64::MAX);
+    let place = |apart: bool| -> (Vec<u64>, u64) {
+        let mut placed: Vec<u64> = Vec::with_capacity(sizes.len());
         let mut bytes = 0;
         for k in 0..sizes.len() {
-            let taken: Vec<(u32, u32)> = together[k]
+            let taken: Vec<(u64, u64)> = together[k]
                 .iter()
                 .filter(|o| related[k].binary_search(o).is_ok())
                 .map(|&o| (placed[o], placed[o] + sizes[o]))
                 .collect();
-            let starts: BTreeSet<u32> = if apart {
+            let starts: BTreeSet<u64> = if apart {
                 related[k].iter().map(|&o| placed[o]).collect()
             } else {
                 BTreeSet::new()
             };
-            let clear = |at: u32| taken.iter().all(|&(s, e)| at + sizes[k] <= s || e <= at);
-            // Where a slot may begin: the start, the end of every slot it lies apart from, and
-            // one alignment past each start it does not take.
-            let candidates: BTreeSet<u32> = std::iter::once(0)
-                .chain(taken.iter().map(|&(_, e)| e))
-                .chain(starts.iter().map(|s| s + ALIGN))
+            let clear = |at: u64| taken.iter().all(|&(s, e)| at + sizes[k] <= s || e <= at);
+            // Where a slot may begin, at its alignment: the start, the end of every slot it lies
+            // apart from, and past each start it does not take.
+            let a = aligns[k];
+            let candidates: BTreeSet<u64> = std::iter::once(0)
+                .chain(taken.iter().map(|&(_, e)| align_up(e, a)))
+                .chain(starts.iter().map(|s| align_up(s + 1, a)))
                 .collect();
             // The last candidate lies past every slot apart and past every start, so one is found.
             let at = candidates
@@ -339,10 +356,17 @@ pub(crate) fn layout(f: &cfg::Function) -> Layout {
         (placed, bytes) if bytes <= budget => (placed, bytes),
         _ => place(false),
     };
+    let too_many = || {
+        format!(
+            "the slots of `{}` take {} bytes, past what a stack slot holds",
+            f.name, bytes
+        )
+    };
+    let bytes = u32::try_from(bytes).map_err(|_| too_many())?;
     for (k, at) in placed.into_iter().enumerate() {
-        offsets[makers[k].0 as usize] = Some(at);
+        offsets[makers[k].0 as usize] = Some(u32::try_from(at).map_err(|_| too_many())?);
     }
-    Layout { offsets, bytes }
+    Ok(Layout { offsets, bytes })
 }
 
 #[cfg(test)]
@@ -360,7 +384,7 @@ mod tests {
             .iter()
             .find(|f| f.name == name)
             .unwrap();
-        let layout = layout(f);
+        let layout = layout(f).unwrap();
         let slots = f
             .blocks
             .iter()
@@ -401,13 +425,13 @@ mod tests {
         let y = b.inst(Op::Load, u8t, &[p]);
         let v = b.inst(Op::Bits(mente_mir::cfg::BitOp::Or), u8t, &[x, y]);
         b.ret(Some(v));
-        let l = layout(&b.finish());
+        let l = layout(&b.finish()).unwrap();
         assert_eq!(l.offsets[first.0 as usize], l.offsets[second.0 as usize]);
         assert_eq!(l.bytes, 16);
     }
 
     /// Slots one run may make both, two of one block or two of blocks one reaches, start at
-    /// offsets of their own while the frame holds them, and share bytes from 16 on, so that
+    /// offsets of their own while the frame holds them, the next of their alignment, so that
     /// Cranelift never takes two for one address; slots of which no run makes both, those of two
     /// branches, start at one. With no room in the frame, they share their bytes from the start.
     #[test]
@@ -438,7 +462,7 @@ mod tests {
             b.ret(None);
             let mut f = b.finish();
             f.frame = frame;
-            let l = layout(&f);
+            let l = layout(&f).unwrap();
             let at = |s: NodeId| l.offsets[s.0 as usize].unwrap_or(u32::MAX);
             ([at(s1), at(s2), at(s3), at(s4)], l.bytes)
         };
@@ -469,9 +493,10 @@ mod tests {
         assert_eq!(layout.bytes, 2 * 4096);
     }
 
-    /// Slots alive together lie apart, each at its alignment, and a slot whose value has been
-    /// copied away gives its bytes to the next: `a`'s literal, copied into `a`, gives its bytes
-    /// to `b`'s, while `a` stays apart from both of `b`'s slots.
+    /// Slots alive together lie apart, each at the alignment its size implies and none rounded up:
+    /// `a`'s literal and `a`, three bytes each, then `b`'s literal and `b`, five each, take 16
+    /// bytes in all, where rounding each slot up to 16 took 48. A slot one run makes after
+    /// another starts at an offset of its own while the frame holds them.
     #[test]
     fn test_slots_alive_together_lie_apart() {
         let source = "module m\npub fn f(x: u8) -> u8 {\n  val a: [3]u8 = [x; 3]\n  val b: [5]u8 = [x; 5]\n  a[0] + b[0]\n}\n";
@@ -482,9 +507,8 @@ mod tests {
         for (x, y) in [(a_literal, a), (a, b_literal), (a, b), (b_literal, b)] {
             assert!(apart(x, y), "{slots:?}");
         }
-        assert_eq!(a_literal.0, b_literal.0, "{slots:?}");
-        assert!(slots.iter().all(|(at, _)| at % ALIGN == 0), "{slots:?}");
-        assert_eq!(layout.bytes, 3 * ALIGN);
+        assert_eq!(slots, [(0, 3), (3, 3), (6, 5), (11, 5)]);
+        assert_eq!(layout.bytes, 16);
     }
 
     /// The array an `if` gives stays alive where the branches join, in whichever branch's slot
@@ -507,6 +531,59 @@ mod tests {
         ] {
             assert!(apart(x, y), "{slots:?}");
         }
-        assert_eq!(layout.bytes, 3 * ALIGN);
+        assert_eq!(slots, [(0, 4), (0, 4), (4, 4), (8, 4), (12, 4)]);
+        assert_eq!(layout.bytes, 16);
+    }
+
+    /// A slot takes the alignment its size implies, the largest power of two up to 16 that
+    /// divides it, which is at least the alignment of what it holds: five `u8` variables alive
+    /// together take five bytes, under the frame of 73 item 25 counts, where rounding each to 16
+    /// took 80 (the review of pull request 183).
+    #[test]
+    fn test_a_slot_takes_the_alignment_its_size_implies() {
+        for (bytes, align) in [
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (3, 1),
+            (4, 4),
+            (6, 2),
+            (8, 8),
+            (12, 4),
+            (16, 16),
+            (24, 8),
+            (32, 16),
+            (100, 4),
+            (4096, 16),
+        ] {
+            assert_eq!(align_of(bytes), align, "{bytes}");
+        }
+        assert_eq!(align_up(13, 8), 16);
+        assert_eq!(align_up(16, 8), 16);
+        let source = "module m\npub fn five(x: u8) -> u8 {\n  var a: u8 = x\n  var b: u8 = x\n  var c: u8 = x\n  var d: u8 = x\n  var e: u8 = x\n  a = a / 2\n  b = b / 2\n  c = c / 2\n  d = d / 2\n  e = e / 2\n  a + b + c + d + e\n}\n";
+        let (layout, slots) = layout_of(source, "five");
+        assert_eq!(slots, [(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)]);
+        assert_eq!(layout.bytes, 5);
+    }
+
+    /// Slots past what one stack slot holds, 4 GiB, are a limit of the compiler, reported as one,
+    /// never an overflow: a 4 GiB array and the binding it is copied into, alive together at the
+    /// copy, in a branch that never runs, as the review of pull request 183 wrote it.
+    #[test]
+    fn test_slots_past_four_gib_are_a_limit_not_an_overflow() {
+        let source = "module m\npub fn f(x: u8) -> u8 {\n  if x == 7 {\n    val a: [4294967295]u8 = [x; 4294967295]\n    _ = a\n  }\n  x\n}\n";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        let f = lowered
+            .module
+            .functions
+            .iter()
+            .find(|f| f.name == "f")
+            .unwrap();
+        let refused = layout(f).err().unwrap_or_default();
+        assert!(
+            refused.contains("past what a stack slot holds"),
+            "{refused}"
+        );
     }
 }
