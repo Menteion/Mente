@@ -473,8 +473,8 @@ fn names(fx: &Fx) -> Vec<(String, String)> {
                 let Some(callee) = fx.callees.get(c.callee).copied().flatten() else {
                     continue;
                 };
-                let f = &callee.syntax.name;
-                for (k, p) in callee.syntax.params.iter().enumerate() {
+                let f = &callee.name();
+                for (k, p) in callee.params().iter().enumerate() {
                     if let Some(v) = c.ins.get(k).copied().flatten() {
                         let what =
                             format!("argument `{}` of the call to `{}` at {}", p.name, f, place);
