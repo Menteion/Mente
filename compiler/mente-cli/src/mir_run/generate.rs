@@ -4933,7 +4933,8 @@ impl Gen {
     ///   sum that the body makes overflow in a later round where the input is large, both before
     ///   the condition's other conjuncts;
     /// - a call whose `ensures` bounds its argument, of a function written for it that returns
-    ///   only where that holds, and which the loop's exit never calls.
+    ///   only where that holds, and which the loop's exit never calls; in a refined program only,
+    ///   since a plain one has no contracts.
     ///
     /// Each reads a binding in scope, so that a fact Tier 1 wrongly held there would prove a
     /// check some run fails. The statements to write before the loop come back; `cond` takes the
@@ -4956,7 +4957,11 @@ impl Gen {
         }
         let (x, t) = ints[self.no_candidates.below(ints.len() as u64) as usize];
         let zero = || E::Lit("0".to_string());
-        let pick = self.no_candidates.below(4);
+        // A contract is the refined mode's alone, so a plain program's call is a leaving one.
+        let pick = match self.no_candidates.below(4) {
+            3 if self.mode != Mode::Refined => 0,
+            pick => pick,
+        };
         let test = {
             let k = self.no_candidates.below(10);
             E::bin(Op::Gt, self.read(x), E::Lit(k.to_string()))

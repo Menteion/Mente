@@ -1274,6 +1274,31 @@ mod tests {
     use super::*;
     use mente_sema::verify_module;
 
+    /// Whether a function of the module has a loop inside another loop, in its body or its
+    /// condition, by their spans.
+    fn has_a_loop_inside_a_loop(src: &str) -> bool {
+        let Ok(module) = parse_module(src) else {
+            return false;
+        };
+        mente_syntax::parse_bodies(src, &module)
+            .iter()
+            .filter_map(|p| p.syntax.as_ref())
+            .any(|f| {
+                let loops: Vec<mente_syntax::Span> = f
+                    .tree
+                    .stmts
+                    .iter()
+                    .filter(|s| matches!(s.kind, mente_syntax::tree::StmtKind::While { .. }))
+                    .map(|s| s.span)
+                    .collect();
+                loops.iter().any(|a| {
+                    loops
+                        .iter()
+                        .any(|b| a != b && b.start <= a.start && a.end <= b.end)
+                })
+            })
+    }
+
     fn mn_files(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
             let path = entry.path();
@@ -1304,28 +1329,28 @@ mod tests {
             mn_files(&root.join(dir), &mut files);
         }
         assert!(files.len() > 500, "{}", files.len());
-        // Only a loop inside another loop is met again outside the pass that records: a program
-        // that writes `while` once has nothing to replay.
-        let sources: Vec<(&PathBuf, String)> = files
-            .iter()
-            .map(|f| (f, fs::read_to_string(f).unwrap_or_default()))
-            .filter(|(_, src)| src.matches("while").count() > 1)
-            .collect();
-        assert!(sources.len() > 50, "{}", sources.len());
-        let (compared, differing) = mente_threads::alone(None, Some(STACK), || {
-            let (mut compared, mut differing) = (0, Vec::new());
-            for (file, src) in &sources {
-                for (name, again, spans) in mente_sema::tier1_loop_replays(src) {
+        let (nested, compared, differing) = mente_threads::alone(None, Some(STACK), || {
+            let (mut nested, mut compared, mut differing) = (0, 0, Vec::new());
+            for file in &files {
+                let src = fs::read_to_string(file).unwrap_or_default();
+                // Only a loop inside another loop is met again outside the pass that records:
+                // a program without one has nothing to replay.
+                if !has_a_loop_inside_a_loop(&src) {
+                    continue;
+                }
+                nested += 1;
+                for (name, again, spans) in mente_sema::tier1_loop_replays(&src) {
                     compared += again;
                     for s in spans {
                         differing.push(format!("{} `{}` at {}", file.display(), name, s.start));
                     }
                 }
             }
-            (compared, differing)
+            (nested, compared, differing)
         })
         .unwrap()
         .unwrap();
+        assert!(nested > 30, "{}", nested);
         assert!(differing.is_empty(), "{}", differing.join("\n"));
         // The loops met again are many, so that the test compares something.
         assert!(compared > 100, "{}", compared);
