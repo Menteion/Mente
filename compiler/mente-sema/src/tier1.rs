@@ -1413,49 +1413,115 @@ type PathVal = (Vec<String>, Val);
 
 /// The scalar field paths of a value of struct `name`, not through an array, each with its
 /// declared shape: an integer field, and each scalar path of a struct field, in the order of
-/// the declaration. `None` when there are more than `room`, which each one listed takes one of:
-/// structs nested level by level can have a number of them that doubles with each level, and
-/// none is listed past the room. `None` too for a struct that contains itself, which no value
-/// has (`E0225`): its paths would go on without end, with no integer field on the way to use
-/// the room up.
+/// the declaration. Each takes one of `room`, which they are taken from only when they all fit.
+/// `None` when there are more than `room`, and for a struct that contains itself, which no value
+/// has (`E0225`).
 fn scalar_paths(
     structs: &crate::structs::Structs,
     name: &str,
     room: &mut usize,
 ) -> Option<Vec<(Vec<String>, Shape)>> {
-    paths_within(structs, name, room, &mut Vec::new())
+    scalar_paths_counted(structs, name, room, &mut 0)
 }
 
-/// [`scalar_paths`] of struct `name`, inside the structs `open` whose paths lead to it.
-fn paths_within(
+/// How far [`path_count`] has counted a struct's scalar paths.
+#[derive(Clone, Copy, Debug)]
+enum Count {
+    Unseen,
+    /// Being counted: a struct met again here contains itself.
+    Open,
+    /// Counted, saturating; `None` for a struct that contains itself or reaches one that does.
+    Done(Option<usize>),
+}
+
+/// [`scalar_paths`], adding to `visits` each struct it enters. Each struct's paths are counted
+/// once, by its index, so counting takes a step per struct and per field whatever the number
+/// of paths, which structs nested level by level double at each level, with fields of integers
+/// or of none. The walk that lists the paths enters only a struct that has some, so it takes at
+/// most a step per level of nesting for each path it lists, and lists none past the room.
+fn scalar_paths_counted(
     structs: &crate::structs::Structs,
     name: &str,
     room: &mut usize,
-    open: &mut Vec<String>,
+    visits: &mut usize,
 ) -> Option<Vec<(Vec<String>, Shape)>> {
-    if open.iter().any(|o| o == name) {
-        return None;
-    }
-    let def = structs.get(name)?;
-    open.push(name.to_string());
+    let at = structs.position(name)?;
+    let mut counts = vec![Count::Unseen; structs.defs.len()];
+    let n = path_count(structs, at, &mut counts, visits)?;
+    let left = room.checked_sub(n)?;
     let mut out = Vec::new();
+    list_paths(structs, at, &counts, &mut Vec::new(), &mut out, visits);
+    *room = left;
+    Some(out)
+}
+
+/// The number of scalar paths of the struct at `at` in `structs.defs`, saturating, each struct
+/// counted once in `counts`; `None` when it contains itself or reaches one that does, or names
+/// a struct the module does not declare.
+fn path_count(
+    structs: &crate::structs::Structs,
+    at: usize,
+    counts: &mut [Count],
+    visits: &mut usize,
+) -> Option<usize> {
+    match counts[at] {
+        Count::Done(n) => return n,
+        Count::Open => return None,
+        Count::Unseen => {}
+    }
+    *visits = visits.saturating_add(1);
+    counts[at] = Count::Open;
+    let def = &structs.defs[at];
+    let mut n = Some(0usize);
+    for f in &def.fields {
+        let k = match Fx::declared_shape(def.tree(), f.decl) {
+            Shape::Int { .. } => Some(1),
+            Shape::Struct(inner) => structs
+                .position(&inner)
+                .and_then(|i| path_count(structs, i, counts, visits)),
+            Shape::Array(..) | Shape::Other => Some(0),
+        };
+        n = n.zip(k).map(|(a, b)| a.saturating_add(b));
+    }
+    counts[at] = Count::Done(n);
+    n
+}
+
+/// Pushes to `out` the scalar paths of the struct at `at`, under the field names `prefix`,
+/// entering only the struct fields that have some, as `counts` holds them.
+fn list_paths(
+    structs: &crate::structs::Structs,
+    at: usize,
+    counts: &[Count],
+    prefix: &mut Vec<String>,
+    out: &mut Vec<(Vec<String>, Shape)>,
+    visits: &mut usize,
+) {
+    *visits = visits.saturating_add(1);
+    let def = &structs.defs[at];
     for f in &def.fields {
         match Fx::declared_shape(def.tree(), f.decl) {
             shape @ Shape::Int { .. } => {
-                *room = room.checked_sub(1)?;
-                out.push((vec![f.name.clone()], shape));
+                let mut names = prefix.clone();
+                names.push(f.name.clone());
+                out.push((names, shape));
             }
             Shape::Struct(inner) => {
-                for (mut names, shape) in paths_within(structs, &inner, room, open)? {
-                    names.insert(0, f.name.clone());
-                    out.push((names, shape));
+                let Some(i) = structs.position(&inner) else {
+                    continue;
+                };
+                match counts[i] {
+                    Count::Done(Some(0)) | Count::Done(None) | Count::Open | Count::Unseen => {}
+                    Count::Done(Some(_)) => {
+                        prefix.push(f.name.clone());
+                        list_paths(structs, i, counts, prefix, out, visits);
+                        prefix.pop();
+                    }
                 }
             }
             Shape::Array(..) | Shape::Other => {}
         }
     }
-    open.pop();
-    Some(out)
 }
 
 /// The declared shape of scalar field path `names` of a value of struct `name`.
@@ -9688,9 +9754,8 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         assert_eq!(codes(&format!("{}{}", wide(119), two)), ["E0502"]);
     }
 
-    /// The field paths of a struct are listed no further than the room they may take: structs
-    /// nested level by level, whose paths double with each level, are given up on once the room
-    /// is used, so a struct of 2^41 paths costs as much as one of 128.
+    /// A struct that contains itself, which no value has (`E0225`), has no paths to follow,
+    /// directly or through another struct, and Tier 1 ends on a binding of it.
     #[test]
     fn test_a_struct_that_contains_itself_has_no_paths_to_follow() {
         // A cycle with no integer field on it, directly or through another struct: its paths
@@ -9734,6 +9799,11 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         );
     }
 
+    /// The field paths of a struct are listed no further than the room they may take: structs
+    /// nested level by level, whose paths double with each level, are given up on when their
+    /// count, which takes a step per struct and per field, passes the room, and the walk that
+    /// lists them takes a step per level of nesting for each path it lists
+    /// ([`test_counting_a_structs_paths_takes_a_step_per_struct`]).
     #[test]
     fn test_field_paths_are_listed_no_further_than_the_cap() {
         let mut src = String::from("module t\npub struct S0 {\n  a: u8\n  b: u8\n}\n");
@@ -9752,9 +9822,10 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         let paths = scalar_paths(&structs, "S5", &mut room).unwrap();
         assert_eq!((paths.len(), room), (64, RELATIONAL_LIMIT - 64));
         assert_eq!(paths[1].0, ["l", "l", "l", "l", "l", "b"]);
+        // Paths past the room take none of it.
         let mut room = RELATIONAL_LIMIT;
         assert!(scalar_paths(&structs, "S40", &mut room).is_none());
-        assert_eq!(room, 0);
+        assert_eq!(room, RELATIONAL_LIMIT);
         // A function of such bindings, of 2^21 paths each within the size a value may have,
         // follows none of them, and checks.
         let upto = src.find("pub struct S21").unwrap();
@@ -9771,6 +9842,84 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
                 path
             )]
         );
+    }
+
+    /// Counting a struct's scalar paths takes a step per struct, however many paths its nesting
+    /// doubles to, and listing them a step per level for each path listed: the review of pull
+    /// request 184 found structs nested forty levels deep whose leaves are no integers, an empty
+    /// array or a `bool`, which the walk that charged the room for integers alone visited
+    /// 2^41 times and never ended on. Steps are counted, not timed.
+    #[test]
+    fn test_counting_a_structs_paths_takes_a_step_per_struct() {
+        let nested = |leaf: &str, levels: usize| {
+            let mut src = format!(
+                "module t
+pub struct S0 {{
+  a: {}
+}}
+",
+                leaf
+            );
+            for k in 1..=levels {
+                src.push_str(&format!(
+                    "pub struct S{} {{
+  l: S{}
+  r: S{}
+}}
+",
+                    k,
+                    k - 1,
+                    k - 1
+                ));
+            }
+            src
+        };
+        let count = |src: &str, name: &str| {
+            let m = mente_syntax::parse_module(src).unwrap();
+            let parsed = mente_syntax::parse_structs(src, &m);
+            let (structs, declared) = crate::structs::declare(&m, &parsed, &[]);
+            assert!(declared.is_empty(), "{:?}", declared);
+            let (mut room, mut visits) = (RELATIONAL_LIMIT, 0);
+            let paths = scalar_paths_counted(&structs, name, &mut room, &mut visits);
+            (paths.map(|p| p.len()), visits)
+        };
+        // Leaves of no integer: no path, a step per struct to count, and one into the outermost
+        // to list none. Thirty levels of `bool` keep within the size a value may have (`E0223`).
+        let empty = [("[0]u8", 40), ("bool", 30)];
+        for (leaf, levels) in empty {
+            let outermost = format!("S{}", levels);
+            assert_eq!(
+                count(&nested(leaf, levels), &outermost),
+                (Some(0), levels + 2),
+                "{}",
+                leaf
+            );
+        }
+        // Integer leaves past the room: given up on after the count, which listed nothing.
+        assert_eq!(count(&nested("u8", 30), "S30"), (None, 31));
+        // Within the room: the 64 paths of six levels, each listed in a step per level.
+        let (paths, visits) = count(&nested("u8", 6), "S6");
+        assert_eq!(paths, Some(64));
+        assert!(visits <= 7 + 64 * 7, "{}", visits);
+        // A function of such a binding checks, of either leaf.
+        for (leaf, levels) in empty {
+            let src = format!(
+                "{}pub fn f(s: S{}) -> u8 = 0
+",
+                nested(leaf, levels),
+                levels
+            );
+            assert_eq!(
+                codes(
+                    &src["module t
+"
+                    .len()..]
+                ),
+                NONE,
+                "{}",
+                leaf
+            );
+        }
     }
 
     /// A measure over a field path proves where it gets smaller: a loop's `decreases k.n` with
