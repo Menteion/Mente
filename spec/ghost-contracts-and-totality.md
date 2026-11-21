@@ -59,7 +59,7 @@ date: 2026-11-04
 4. `Specified` **Tier-1 solver predictability and concrete counterexample diagnostics (Engineering Guardrail #1)**:
    - To eliminate the "SMT butterfly effect" (where a minor code edit causes unpredictable solver timeouts in Dafny/LiquidHaskell), Tier 1 MUST remain strictly within **polynomial-time decidable abstract domains**: Interval Arithmetic (`[min, max]`) plus the **Octagon / Difference-Bound Matrix (DBM) domain** ($\pm x \pm y \le c$, solved in $O(V^3)$ incremental Floyd-Warshall closure).
    - **Contracts are used modularly**: at each call, Tier 1 checks the callee's `requires` and then assumes its `ensures`; it never analyses the callee's body, which keeps every caller's proof independent of callee bodies (`holographic-module.md`). A fact the two domains cannot derive is supplied by a function whose `ensures` states it inside them and whose body is proven once by Tier 2, a trusted axiom until `mn prove` runs.
-   - `midpoint` is the canonical case, which example 01 writes in its own module ([`example-01-m2`](../docs/design-review.md#example-01-m2)):
+   - `midpoint` is the canonical case, which example 01 writes in its own module ([`example-binary-search-m2`](../docs/design-review.md#example-binary-search-m2)):
      ```rust
      pub fn midpoint(lo: usize, hi: usize) -> usize
        requires lo < hi

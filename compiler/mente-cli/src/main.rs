@@ -17,6 +17,10 @@
 //! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate;
 //!   `@example` bodies are parsed as tokens but not executed.
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
+//! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes/` per week and per area;
+//!   `--check` checks each escape as its test does.
+//! - `mn evidence --spec-guard F --nextest F... [--node F]...`: Checks every guard of the escaped bugs
+//!   and every test an `@assert-count` names as evidence against what the runners run.
 
 use std::env;
 use std::fs;
@@ -25,6 +29,7 @@ use std::process;
 use std::time::Instant;
 
 use mente_ast::project_spec_blueprint;
+use mente_cli::{escapes, evidence};
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
 use mente_sema::check_module;
 use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
@@ -84,6 +89,8 @@ fn run() {
         "dump" => cmd_dump(&args[1..]),
         "smt" => cmd_smt(&args[1..]),
         "fuzz" => cmd_fuzz(&args[1..]),
+        "escapes" => cmd_escapes(&args[1..]),
+        "evidence" => cmd_evidence(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -115,6 +122,8 @@ fn print_help() {
     println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
+    println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes/ per week and per area; --check checks each escape");
+    println!("  mn evidence --spec-guard F --nextest F... [--node F]...  Check each escape's guard and each test named as evidence against the tests the runners run");
     println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
     println!("                               Fuzz every phase of the compiler, and minimize each crash found");
 }
@@ -1246,6 +1255,120 @@ fn strip_mn_comments(src: &str) -> String {
         }
     }
     out
+}
+
+/// `mn escapes [--check]`: the record of escaped bugs, one file an escape in `docs/escapes/`, read
+/// from the current directory, counted per ISO week and per area; with `--check`, each escape checked against the tree
+/// as `tests/escapes.rs` checks it. The counts are printed, never written into a document.
+fn cmd_escapes(args: &[String]) {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => {
+            eprintln!("Usage: mn escapes [--check]");
+            process::exit(1);
+        }
+    };
+    let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let rows = match escapes::read(&root.join(escapes::RECORD)) {
+        Ok(rows) => rows,
+        Err(problems) => {
+            for p in problems {
+                eprintln!("[FAIL] {}", p);
+            }
+            process::exit(1);
+        }
+    };
+    if !check {
+        print!("{}", escapes::counts(&rows));
+        return;
+    }
+    let problems = escapes::problems(&rows);
+    if problems.is_empty() {
+        println!(
+            "[PASS] mn escapes: every escape of {} holds",
+            escapes::RECORD
+        );
+    } else {
+        for p in problems {
+            eprintln!("[FAIL] {}", p);
+        }
+        process::exit(1);
+    }
+}
+
+/// `mn evidence --spec-guard <file> --nextest <file>... [--node <file>]...`: every guard of the
+/// record of escaped bugs, and every test an `@assert-count` names as evidence, checked against
+/// what the runners run (`evidence.rs`). The directives are spec-guard's own report of them; the
+/// Rust tests are nextest's list from each runner, a test listed on any of them counting, since a
+/// test may be compiled on one platform only; the Node tests are our reporter's report of each
+/// run. Run from the repository's root. A list that cannot be read fails the check.
+fn cmd_evidence(args: &[String]) {
+    fn usage() -> ! {
+        eprintln!(
+            "Usage: mn evidence --spec-guard <file> --nextest <file>... [--node <file>]...\n  spec-guard's report: {} > <file>\n  nextest's list, from each runner: {} > <file>\n  a Node run's report: {}",
+            evidence::SPEC_GUARD,
+            evidence::NEXTEST,
+            evidence::NODE
+        );
+        process::exit(1);
+    }
+    let mut spec_guard = None;
+    let mut nextest = Vec::new();
+    let mut node = Vec::new();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let Some(file) = rest.next() else { usage() };
+        match flag.as_str() {
+            "--spec-guard" if spec_guard.is_none() => spec_guard = Some(file),
+            "--nextest" => nextest.push(file),
+            "--node" => node.push(file),
+            _ => usage(),
+        }
+    }
+    let Some(spec_guard) = spec_guard else {
+        usage()
+    };
+    if nextest.is_empty() {
+        usage();
+    }
+    let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let fail = |problems: Vec<String>| -> ! {
+        for p in problems {
+            eprintln!("[FAIL] {}", p);
+        }
+        process::exit(1);
+    };
+    fn load<T>(file: &str, parse: impl Fn(&str) -> Result<T, String>) -> Result<T, Vec<String>> {
+        fs::read_to_string(file)
+            .map_err(|e| format!("{}: {}", file, e))
+            .and_then(|t| parse(&t).map_err(|e| format!("{}: {}", file, e)))
+            .map_err(|e| vec![e])
+    }
+    let documents = evidence::spec_guard_files(&root).unwrap_or_else(|e| fail(vec![e]));
+    let named =
+        load(spec_guard, |t| evidence::spec_guard(t, &documents)).unwrap_or_else(|p| fail(p));
+    let mut runs = evidence::Runs::default();
+    for file in nextest {
+        runs.rust
+            .extend(load(file, evidence::nextest).unwrap_or_else(|p| fail(p)));
+    }
+    for file in node {
+        runs.node
+            .extend(load(file, evidence::node_report).unwrap_or_else(|p| fail(p)));
+    }
+    let quick = root.join("tools/quick-checks.json");
+    runs.quick = load(&quick.to_string_lossy(), evidence::quick_checks).unwrap_or_else(|p| fail(p));
+    let rows = escapes::read(&root.join(escapes::RECORD)).unwrap_or_else(|p| fail(p));
+    let mut problems = evidence::guards(&rows, &runs);
+    problems.extend(evidence::evidence(&root, &named, &runs));
+    if !problems.is_empty() {
+        fail(problems);
+    }
+    println!(
+        "[PASS] mn evidence: every guard of {} and every test named as evidence runs",
+        escapes::RECORD
+    );
 }
 
 fn cmd_spec(_args: &[String]) {

@@ -47,10 +47,25 @@
 # The gate tests of the compiler's own suite: the dependency policy, the lock's allowlist, English
 # text and the workflow policy's place in the Documentation job; the lint that denies a fallback arm
 # in a walker, with the list of every site it excuses and why; the rule that a decided entry of the
-# register names what would reopen it; and each crate's overflow test.
+# register names what would reopen it, and the forms every record is written in, with their cases,
+# the key rule that names every record, and the record of escaped bugs that the forms read;
+# the reader of what the runners run, which holds the guards and the evidence, the JSON reader it
+# shares with the gates, and the Node reporter that writes what a Node run ran, with its test and
+# the report they agree on; and each crate's overflow test.
 /compiler/mente-cli/tests/gates.rs @Dancraft3746
 /compiler/mente-cli/tests/lints.rs @Dancraft3746
 /compiler/mente-cli/tests/register.rs @Dancraft3746
+/compiler/mente-cli/tests/records.rs @Dancraft3746
+/compiler/mente-cli/tests/escapes.rs @Dancraft3746
+/compiler/mente-cli/src/records.rs @Dancraft3746
+/compiler/mente-cli/src/escapes.rs @Dancraft3746
+/compiler/mente-cli/src/evidence.rs @Dancraft3746
+/compiler/mente-cli/src/json.rs @Dancraft3746
+/compiler/mente-cli/tests/evidence.rs @Dancraft3746
+/tools/evidence-reporter.mjs @Dancraft3746
+/tools/evidence-reporter.test.mjs @Dancraft3746
+/tools/evidence-reporter.jsonl @Dancraft3746
+/compiler/mente-cli/src/front-matter/ @Dancraft3746
 /compiler/*/src/overflow_traps.rs @Dancraft3746
 /compiler/mente-threads/ @Dancraft3746
 
