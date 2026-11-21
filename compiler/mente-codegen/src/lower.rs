@@ -2171,12 +2171,12 @@ impl<'a> Lower<'a> {
     }
 
     /// An element of an array literal, in the literal's element shape `elem`. Where the
-    /// literal keeps its integers exact, an integer is kept in `elem`, which holds it; an array
-    /// literal nested in it that keeps its own exact is built in `elem` itself, so that its
-    /// integers are never narrowed on the way, and one whose elements have one integer type
-    /// narrows them into that type first, as every array literal does by itself
-    /// (`core-calculus.md`, item 4, Norman's decision of 2026-11-21), and is then kept in `elem`.
-    /// Any other element is narrowed into `elem`.
+    /// literal keeps its integers exact, an array literal nested in it that keeps its own exact
+    /// is built in `elem` itself, so that its integers are never narrowed on the way; any other
+    /// element is evaluated, a nested literal whose elements have one integer type narrowing them
+    /// into that type first, as every array literal does by itself (`core-calculus.md`, item 4,
+    /// Norman's decision of 2026-11-21), and is then kept in `elem`, which holds it. Where the
+    /// literal does not keep its integers exact, each element is narrowed into `elem`.
     fn literal_element(
         &mut self,
         item: ExprId,
@@ -2197,16 +2197,16 @@ impl<'a> Lower<'a> {
         let v = self.expr(item)?;
         let from = self.shape(item)?;
         let key = Some(tree.expr(item).span);
-        Ok(match (exact, v) {
-            (true, v @ V::Int(..)) => self.kept_exact(v, &from, elem)?,
-            (true, v) if nested => self.kept_exact(v, &from, elem)?,
-            (_, v) => self.narrow(v, &from, elem, span, key)?,
+        Ok(match exact {
+            true => self.kept_exact(v, &from, elem)?,
+            false => self.narrow(v, &from, elem, span, key)?,
         })
     }
 
     /// A value of shape `from` kept in `to`, the machine type of an array literal that keeps
     /// its integers exact, elementwise for an array: cast with no check, since `to` holds the
-    /// static range of every integer of the literal ([`Lower::leaf_hull`]), and every value that
+    /// static range of every integer of the literal ([`Lower::leaf_hull`]), an array among its
+    /// elements that is no literal counted with its element type's range, and every value that
     /// reaches here lies within its own, a nested literal's after its own narrowing too.
     fn kept_exact(&mut self, v: V, from: &Shape, to: &Shape) -> Result<V, String> {
         Ok(match (v, from, to) {
