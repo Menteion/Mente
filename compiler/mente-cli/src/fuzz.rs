@@ -4143,6 +4143,12 @@ mod tests {
             Some("mn fuzz found\nphase: parse\nedit seed: 7\n"),
         );
         assert_eq!(phase_of(&parsed).as_deref(), Some("parse"));
+        // Only a phase that edits its input by the seed needs a record: a failure of any other
+        // replays the same on every edit.
+        assert!(needs_record(EDITED_PHASE));
+        for phase in ["parse", "lex", "check-program", "interp", "mir", "render"] {
+            assert!(!needs_record(phase), "{}", phase);
+        }
         let unrecorded = file("incremental-panic-0badf00d", None);
         assert_eq!(phase_of(&unrecorded).as_deref(), Some(EDITED_PHASE));
         // The replay warns of such a file, which it can replay on the edits 0 to 3 alone.
