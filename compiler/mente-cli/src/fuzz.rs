@@ -2381,30 +2381,39 @@ fn escaped(text: &str) -> String {
         .replace('\r', "\\r")
 }
 
-/// The commit the compiler was built from, as far as this process can tell: the runner's
-/// `GITHUB_SHA`, or the commit git names in the directory of the running `mn`; `unknown`
-/// otherwise.
+/// Whether `text` names a commit as a record writes it: 40 hexadecimal digits.
+fn is_commit(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The commit the compiler was built from, as far as this process can tell ([`commit_of`]):
+/// the runner's `GITHUB_SHA`, or the commit git names in the directory of the running `mn`.
 fn compiler_commit() -> String {
-    if let Ok(sha) = std::env::var("GITHUB_SHA") {
-        if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return sha;
-        }
-    }
     let dir = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf));
-    let named = dir.and_then(|d| {
+    let git = dir.and_then(|d| {
         std::process::Command::new("git")
             .arg("-C")
             .arg(d)
             .args(["rev-parse", "HEAD"])
             .output()
             .ok()
+            .map(|o| (o.status.success(), o.stdout))
     });
-    match named {
-        Some(o) if o.status.success() => {
-            let sha = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+    commit_of(std::env::var("GITHUB_SHA").ok(), git)
+}
+
+/// The first of `github_sha` and git's output, when git succeeded, that names a commit
+/// ([`is_commit`]); [`UNKNOWN`] when neither does.
+fn commit_of(github_sha: Option<String>, git: Option<(bool, Vec<u8>)>) -> String {
+    if let Some(sha) = github_sha.filter(|s| is_commit(s)) {
+        return sha;
+    }
+    match git {
+        Some((true, out)) => {
+            let sha = String::from_utf8_lossy(&out).trim().to_string();
+            if is_commit(&sha) {
                 sha
             } else {
                 UNKNOWN.to_string()
@@ -2836,7 +2845,12 @@ fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
         failed,
         bad
     );
-    i32::from(failed > 0) | (i32::from(bad > 0) << 1)
+    match (failed > 0, bad > 0) {
+        (false, false) => 0,
+        (true, false) => 1,
+        (false, true) => 2,
+        (true, true) => 3,
+    }
 }
 
 #[cfg(test)]
@@ -3845,6 +3859,49 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A record names the commit the compiler was built from: the runner's `GITHUB_SHA` when it
+    /// is one, else what git printed when it succeeded and printed one, else `unknown`; and the
+    /// process names one or says it cannot.
+    #[test]
+    fn test_a_record_names_the_compiler_commit_or_says_it_is_unknown() {
+        let a = "0123456789abcdef0123456789ABCDEF01234567".to_string();
+        let b = "fedcba9876543210fedcba9876543210fedcba98".to_string();
+        let git = |ok: bool, out: &str| Some((ok, out.as_bytes().to_vec()));
+        assert_eq!(commit_of(Some(a.clone()), git(true, &b)), a);
+        for runner in [
+            None,
+            Some(a[..39].to_string()),
+            Some(format!("{}0", a)),
+            Some("z".repeat(40)),
+            Some(String::new()),
+        ] {
+            assert_eq!(
+                commit_of(runner.clone(), git(true, &format!("{}\n", b))),
+                b,
+                "{:?}",
+                runner
+            );
+            assert_eq!(
+                commit_of(runner.clone(), git(false, &b)),
+                UNKNOWN,
+                "{:?}",
+                runner
+            );
+            assert_eq!(commit_of(runner.clone(), None), UNKNOWN, "{:?}", runner);
+            for out in ["fatal: not a git repository", "", &b[..39], &"g".repeat(40)] {
+                assert_eq!(
+                    commit_of(runner.clone(), git(true, out)),
+                    UNKNOWN,
+                    "{:?} {}",
+                    runner,
+                    out
+                );
+            }
+        }
+        let here = compiler_commit();
+        assert!(is_commit(&here) || here == UNKNOWN, "{}", here);
     }
 
     /// A campaign without a number of runs goes on until its deadline, and no further.
