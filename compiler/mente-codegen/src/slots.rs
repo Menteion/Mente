@@ -109,7 +109,8 @@ fn term_uses(term: &Term) -> Vec<NodeId> {
 pub(crate) fn layout(f: &cfg::Function) -> Result<Layout, String> {
     let values = f.ops.len();
     let mut offsets = vec![None; values];
-    // The slots, in the order of the blocks and their instructions, each with its bytes and its
+    // The slots, in the order of the blocks and their instructions, each with its bytes, one at
+    // least, so that a slot of no bytes has an address in the area as any slot has, and its
     // alignment.
     let mut slot_of: Vec<Option<usize>> = vec![None; values];
     let mut sizes: Vec<u64> = Vec::new();
@@ -119,7 +120,7 @@ pub(crate) fn layout(f: &cfg::Function) -> Result<Layout, String> {
         for &v in &block.insts {
             if let Some(bytes) = slot_bytes(&f.ops[v.0 as usize]) {
                 slot_of[v.0 as usize] = Some(sizes.len());
-                sizes.push(u64::from(bytes));
+                sizes.push(u64::from(bytes.max(1)));
                 aligns.push(align_of(bytes));
                 makers.push(v);
             }
@@ -564,6 +565,31 @@ mod tests {
         let (layout, slots) = layout_of(source, "five");
         assert_eq!(slots, [(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)]);
         assert_eq!(layout.bytes, 5);
+    }
+
+    /// A slot of no bytes, as an empty array's, takes one, so that a function whose slots all hold
+    /// nothing still has an area their addresses lie in: one whose only slot held nothing had none,
+    /// and native code refused it, as "a slot with no place in its function's slots" (generated
+    /// program of seed 126, 2026-11-22).
+    #[test]
+    fn test_a_slot_of_no_bytes_takes_one() {
+        let source = "module m\npub fn f(c: bool) -> u8 {\n  _ = [0_u8; 0]\n  3\n}\n";
+        let (layout, slots) = layout_of(source, "f");
+        assert_eq!(slots.len(), 1, "{slots:?}");
+        assert!(slots.iter().all(|(_, bytes)| *bytes == 0), "{slots:?}");
+        assert!(layout.bytes >= 1, "{}", layout.bytes);
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        for target in [
+            crate::Target::X86_64Linux,
+            crate::Target::Aarch64Linux,
+            crate::Target::X86_64Windows,
+        ] {
+            assert!(
+                crate::native::frames_and_slots(&lowered, target).is_ok(),
+                "{target:?}"
+            );
+        }
     }
 
     /// Slots past what one stack slot holds, 4 GiB, are a limit of the compiler, reported as one,
