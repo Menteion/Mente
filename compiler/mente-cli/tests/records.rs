@@ -100,6 +100,7 @@ fn test_a_refused_name_says_which_part_of_the_rule_it_breaks() {
         ("fix-2nd-pass", Some("fix-second-pass")),
         ("Fix_2nd Pass", Some("fix-second-pass")),
         ("pick-2", Some("pick-two")),
+        ("pick-0", Some("pick-zero")),
         ("ring-20th", Some("ring-twentieth")),
         ("esc-001", None),
         ("pick-21", None),
