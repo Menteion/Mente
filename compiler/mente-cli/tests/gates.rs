@@ -11,7 +11,8 @@ use std::path::Path;
 /// The dependency policy of CLAUDE.md, applied to one manifest: a compiler crate depends
 /// only on the workspace's own crates, by path; `mente-mir` depends on nothing; only
 /// `mente-codegen` may add Cranelift, and `gimli` and `object` for its object files and
-/// debug information (Norman, 2026-11-10). Returns each dependency line outside the policy.
+/// debug information (Norman, 2026-11-10). A renamed dependency, `x = { package = "y", .. }`, is
+/// the crate `y`, whatever its key. Returns each dependency line outside the policy.
 fn dependency_policy_violations(krate: &str, manifest: &str) -> Vec<String> {
     let mut section = String::new();
     let mut found = Vec::new();
@@ -23,7 +24,11 @@ fn dependency_policy_violations(krate: &str, manifest: &str) -> Vec<String> {
         if !section.ends_with("dependencies") || line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let name = line.split(['=', '.']).next().unwrap_or("").trim();
+        let key = line.split(['=', '.']).next().unwrap_or("").trim();
+        let name = line
+            .split_once("package = \"")
+            .and_then(|(_, rest)| rest.split('"').next())
+            .unwrap_or(key);
         let allowed = if name.starts_with("mente-") {
             krate != "mente-mir"
                 && !(krate == "mente-interp" && matches!(name, "mente-mir" | "mente-codegen"))
@@ -112,16 +117,34 @@ fn test_crates_depend_only_on_allowed_crates() {
             "mente-sema: [dependencies] object-pool = \"1\"".to_string(),
         ]
     );
+    // A renamed dependency is the crate it names: object under another key passes, and a crate
+    // outside the policy under an allowed key does not.
+    let renamed = "[dependencies]\nobject-features = { package = \"object\", version = \"=0.40.0\" }\ncranelift-extra = { package = \"evil\", version = \"1\" }\n";
+    assert_eq!(
+        dependency_policy_violations("mente-codegen", renamed),
+        vec![
+            "mente-codegen: [dependencies] cranelift-extra = { package = \"evil\", version = \"1\" }"
+                .to_string()
+        ]
+    );
 }
 
 /// The one source a crate of the lock may come from outside the workspace.
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-/// The packages of a `Cargo.lock`: each name, the sources its versions come from (none for
-/// the workspace's own crates), and the names it depends on. Versions are left out: a name
-/// the lock holds twice is one crate here. Only `[[package]]` sections are read, so that a
+/// One `[[package]]` of a `Cargo.lock`: its name, its version, its source (none for the
+/// workspace's own crates), and its dependencies as the lock writes them, `gimli` or, where the
+/// lock holds two versions of it, `gimli 0.33.0`.
+struct LockEntry {
+    name: String,
+    version: String,
+    source: Option<String>,
+    dependencies: Vec<String>,
+}
+
+/// The `[[package]]` sections of a `Cargo.lock`, in its order. Only those are read, so that a
 /// `[[patch.unused]]` or `[metadata]` section never adds to the package before it.
-fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> {
+fn lock_entries(lock: &str) -> Vec<LockEntry> {
     let mut sections: Vec<(bool, Vec<&str>)> = Vec::new();
     for line in lock.lines().map(str::trim) {
         if line.starts_with('[') && line.ends_with(']') && line.len() > 2 {
@@ -130,11 +153,14 @@ fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<Str
             lines.push(line);
         }
     }
-    let mut packages: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    let mut entries = Vec::new();
     for (_, lines) in sections.iter().filter(|(package, _)| *package) {
-        let mut name = String::new();
-        let mut sources = BTreeSet::new();
-        let mut deps = BTreeSet::new();
+        let mut entry = LockEntry {
+            name: String::new(),
+            version: String::new(),
+            source: None,
+            dependencies: Vec::new(),
+        };
         let mut in_deps = false;
         for line in lines {
             if in_deps {
@@ -142,21 +168,87 @@ fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<Str
                     in_deps = false;
                 } else {
                     let dep = line.trim_matches(|c| c == '"' || c == ',');
-                    deps.insert(dep.split(' ').next().unwrap_or(dep).to_string());
+                    entry.dependencies.push(dep.to_string());
                 }
             } else if let Some(value) = line.strip_prefix("name = ") {
-                name = value.trim_matches('"').to_string();
+                entry.name = value.trim_matches('"').to_string();
+            } else if let Some(value) = line.strip_prefix("version = ") {
+                entry.version = value.trim_matches('"').to_string();
             } else if let Some(value) = line.strip_prefix("source = ") {
-                sources.insert(value.trim_matches('"').to_string());
+                entry.source = Some(value.trim_matches('"').to_string());
             } else if *line == "dependencies = [" {
                 in_deps = true;
             }
         }
-        let entry = packages.entry(name).or_default();
-        entry.0.extend(sources);
-        entry.1.extend(deps);
+        entries.push(entry);
+    }
+    entries
+}
+
+/// The packages of a `Cargo.lock`: each name, the sources its versions come from (none for
+/// the workspace's own crates), and the names it depends on. Versions are left out: a name
+/// the lock holds twice is one crate here.
+fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> {
+    let mut packages: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    for entry in lock_entries(lock) {
+        let package = packages.entry(entry.name).or_default();
+        package.0.extend(entry.source);
+        package.1.extend(
+            entry
+                .dependencies
+                .iter()
+                .map(|d| d.split(' ').next().unwrap_or(d).to_string()),
+        );
     }
     packages
+}
+
+/// The crates cranelift uses in its own signatures, `gimli::write::Address`,
+/// `FrameDescriptionEntry`, `object::write::SymbolId`, each with the crate of cranelift whose
+/// version it must be.
+const WITH_CRANELIFT: [(&str, &str); 2] = [
+    ("gimli", "cranelift-codegen"),
+    ("object", "cranelift-object"),
+];
+
+/// The rule a second version of gimli or object breaks, with its fix.
+const MOVE_WITH_CRANELIFT: &str = "cranelift-codegen and cranelift-object use gimli and object in their own signatures, so a version of either apart from cranelift's is a second crate whose types are not cranelift's, and every Rust job fails with E0308, as Dependabot's pull request 164 did: move gimli and object only with cranelift, in the Dependabot group `cranelift` of .github/dependabot.yml, and reach them in mente-codegen only through `cranelift_codegen::gimli` and `cranelift_object::object`";
+
+/// What keeps gimli and object from being cranelift's: a crate the lock holds in more versions
+/// than one, or in none, or whose crate of cranelift no longer takes it.
+fn cranelift_splits(lock: &str) -> Vec<String> {
+    let entries = lock_entries(lock);
+    let mut problems = Vec::new();
+    for (krate, user) in WITH_CRANELIFT {
+        let versions: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.name == krate)
+            .map(|e| e.version.as_str())
+            .collect();
+        let taken: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.name == user)
+            .flat_map(|e| &e.dependencies)
+            .filter(|d| d.split(' ').next() == Some(krate))
+            .map(|d| {
+                d.split(' ')
+                    .nth(1)
+                    .unwrap_or(versions.first().copied().unwrap_or(""))
+            })
+            .collect();
+        match (versions.as_slice(), taken.as_slice()) {
+            ([_], [_]) => {}
+            (_, []) => problems.push(format!("{user} takes no {krate}")),
+            (held, [version]) => problems.push(format!(
+                "Cargo.lock holds {krate} {}, where {user} takes {version}",
+                held.join(" and ")
+            )),
+            (_, versions) => {
+                problems.push(format!("{user} takes {krate} {}", versions.join(" and ")))
+            }
+        }
+    }
+    problems
 }
 
 /// What keeps a lock from matching the approved list (`<crate>: <direct dependency>` lines):
@@ -240,6 +332,47 @@ fn lock_approval_problems(lock: &str, approved: &str) -> Vec<String> {
         }
     }
     problems
+}
+
+/// gimli and object each resolve to one version, the one cranelift-codegen and cranelift-object
+/// take, so that no update moves them apart from cranelift (Dependabot's pull request 164 bumped
+/// them alone, and every Rust job failed).
+#[test]
+fn test_gimli_and_object_are_cranelifts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let problems = cranelift_splits(&fs::read_to_string(root.join("Cargo.lock")).unwrap());
+    assert!(
+        problems.is_empty(),
+        "{}:\n{}",
+        MOVE_WITH_CRANELIFT,
+        problems.join("\n")
+    );
+
+    // The check itself, on a lock of cranelift and the two crates, then with gimli split.
+    let lock = "version = 4\n\n[[package]]\nname = \"cranelift-codegen\"\nversion = \"0.137.1\"\ndependencies = [\n \"gimli\",\n]\n\n[[package]]\nname = \"cranelift-object\"\nversion = \"0.137.1\"\ndependencies = [\n \"gimli\",\n \"object\",\n]\n\n[[package]]\nname = \"gimli\"\nversion = \"0.33.0\"\n\n[[package]]\nname = \"object\"\nversion = \"0.40.0\"\n\n[[package]]\nname = \"mente-codegen\"\nversion = \"0.1.0\"\ndependencies = [\n \"cranelift-codegen\",\n \"object\",\n]\n";
+    assert_eq!(cranelift_splits(lock), Vec::<String>::new());
+    let split = lock
+        .replace(
+            "dependencies = [\n \"gimli\",\n]",
+            "dependencies = [\n \"gimli 0.33.0\",\n]",
+        )
+        .replace(
+            "dependencies = [\n \"gimli\",\n \"object\",",
+            "dependencies = [\n \"gimli 0.33.0\",\n \"object\",",
+        )
+        .replace(
+            "[[package]]\nname = \"object\"",
+            "[[package]]\nname = \"gimli\"\nversion = \"0.34.0\"\n\n[[package]]\nname = \"object\"",
+        );
+    assert_eq!(
+        cranelift_splits(&split),
+        vec!["Cargo.lock holds gimli 0.33.0 and 0.34.0, where cranelift-codegen takes 0.33.0"]
+    );
+    let dropped = lock.replace(" \"gimli\",\n \"object\",\n", " \"gimli\",\n");
+    assert_eq!(
+        cranelift_splits(&dropped),
+        vec!["cranelift-object takes no object"]
+    );
 }
 
 /// Every crate the lock holds was approved: a dependency that brings a crate the list lacks,

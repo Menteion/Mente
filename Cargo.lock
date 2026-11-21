@@ -330,7 +330,6 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
- "gimli",
  "mente-mir",
  "mente-sema",
  "mente-syntax",
