@@ -180,23 +180,30 @@ pub fn groups(enc: &Encoding, keep: impl Fn(&Key) -> bool) -> Vec<Vec<usize>> {
     out.into_iter().map(|g| g.2).collect()
 }
 
-/// Why a check Tier 1 erased has no query: no input reaches it on any path the encoding follows.
+/// Why a check Tier 1 erased has no query: no input fails it on any path the encoding follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unqueried {
-    /// No path was cut off before it: no input reaches it at all.
+    /// No path of the function was cut off, before the check or after it: no input reaches a
+    /// failure of it at all.
     Unreachable,
-    /// A path was cut off past the bounds before it, which may reach it.
+    /// A path was cut off past the bounds, which may reach it: before it, or after it, where a
+    /// later round may fail it.
     BeyondBound,
-    /// A path was cut off at a construct the encoding lacks before it, which may reach it.
+    /// A path was cut off at a construct the encoding lacks, before it or after it.
     BeyondLacked,
 }
 
-/// Why the sites `g` of one obligation have no query, where none does.
+/// Why the sites `g` of one obligation have no query, where none does: a cut before one of
+/// them first, then a cut anywhere in the function.
 pub fn unqueried(enc: &Encoding, g: &[usize]) -> Unqueried {
     let sites = || g.iter().map(|&k| &enc.sites[k]);
     if sites().any(|s| s.beyond_bound) {
         Unqueried::BeyondBound
     } else if sites().any(|s| s.beyond_lacked) {
+        Unqueried::BeyondLacked
+    } else if enc.cut_past_bound {
+        Unqueried::BeyondBound
+    } else if enc.cut_at_lacked {
         Unqueried::BeyondLacked
     } else {
         Unqueried::Unreachable
@@ -510,11 +517,17 @@ impl Erased {
         kinds.join(", ")
     }
 
-    /// Whether this run's check is verified less than the base's `base`: its least verified
-    /// trap lower, or, where some trap goes unqueried, fewer of its traps queried.
+    /// Whether this run's check is verified less than the base's `base`: unless its traps,
+    /// best first, are each verified at least as well as the base's in the same place, with no
+    /// fewer of them; so one trap lost, or one verified less, is less.
     fn less_than(&self, base: &Erased) -> bool {
-        self.rank() < base.rank()
-            || (self.rank() < 2 && self.queries().len() < base.queries().len())
+        let ranks = |e: &Erased| {
+            let mut r: Vec<u8> = e.classes.iter().map(Class::rank).collect();
+            r.sort_unstable_by(|a, b| b.cmp(a));
+            r
+        };
+        let (mine, theirs) = (ranks(self), ranks(base));
+        mine.len() < theirs.len() || mine.iter().zip(&theirs).any(|(m, t)| m < t)
     }
 }
 
@@ -2589,9 +2602,9 @@ mod tests {
         }
     }
 
-    /// A check the run verifies less than its base fails it: its least verified trap lower, or,
-    /// where a trap goes unqueried, fewer traps queried; and so does a check Tier 1 erases in the
-    /// run alone that the encoding cuts off or has no site for. Two runs tell a check by its
+    /// A check the run verifies less than its base fails it: unless each of its traps, best
+    /// first, is verified at least as well as the base's, with no fewer of them; and so does a
+    /// check Tier 1 erases in the run alone that the encoding cuts off or has no site for. Two runs tell a check by its
     /// function and obligation, so a query that becomes unreachable is one check verified less,
     /// not two that moved.
     #[test]
@@ -2663,12 +2676,59 @@ mod tests {
             );
             assert!(c.moved.iter().all(|m| !m.contains(obligation)), "{:#?}", c);
         }
-        // Every trap queried where one was not: verified more, though with fewer traps.
-        let mut run = passing_run();
-        let k = at(&run, "k", "range at 8:2 into `i8`");
-        run.checks[k].classes = vec![q("head/k-8.smt2")];
-        let c = compare(&base, &quiet, &run, &quiet, &nowhere, &nowhere, &[]);
-        assert!(c.passes(), "{:#?}", c);
+        // Trap for trap: a trap lost is verified less, however well the others are. The review's
+        // three cases, then a query kept where a cut one went.
+        let k = "range at 8:2 into `i8`";
+        let with = |export: &Export, classes: Vec<Class>| {
+            let mut export = export.clone();
+            let at = at(&export, "k", k);
+            export.checks[at].classes = classes;
+            export
+        };
+        let u = || Class::Unreachable;
+        for (was, now) in [
+            (vec![q("b1"), q("b2")], vec![q("h1")]),
+            (vec![q("b1"), u()], vec![q("h1")]),
+            (vec![q("b1"), u(), u()], vec![q("h1"), u()]),
+            (vec![q("b1"), Class::BeyondBound], vec![q("h1")]),
+        ] {
+            let c = compare(
+                &with(&base, was.clone()),
+                &quiet,
+                &with(&passing_run(), now.clone()),
+                &quiet,
+                &nowhere,
+                &nowhere,
+                &[],
+            );
+            assert!(
+                !c.passes() && c.dropped.len() == 1 && c.dropped[0].contains("`k`'s obligation"),
+                "{:?} to {:?}: {:#?}",
+                was,
+                now,
+                c
+            );
+        }
+        // Each trap verified at least as well, in any order, with no fewer of them, passes.
+        for (was, now) in [
+            (
+                vec![q("b1"), Class::BeyondBound],
+                vec![Class::BeyondLacked, q("h1")],
+            ),
+            (vec![q("b1"), Class::BeyondBound], vec![q("h1"), q("h2")]),
+            (vec![q("b1")], vec![u(), q("h1")]),
+        ] {
+            let c = compare(
+                &with(&base, was.clone()),
+                &quiet,
+                &with(&passing_run(), now.clone()),
+                &quiet,
+                &nowhere,
+                &nowhere,
+                &[],
+            );
+            assert!(c.passes(), "{:?} to {:?}: {:#?}", was, now, c);
+        }
         // Cut off at one place or at another, or with no site, verifies as little.
         let mut cut = base.clone();
         cut.checks[1].classes = vec![Class::BeyondLacked];
@@ -2914,6 +2974,34 @@ mod tests {
             .position(|s| s.kind == Kind::Divisor)
             .unwrap();
         assert_eq!(unqueried(&enc, &[divisor]), Unqueried::Unreachable);
+    }
+
+    /// A check none of whose sites fails is unreachable only where no path of its function is
+    /// cut off: a loop cut past the bound after the check's last round may fail it in a later
+    /// one, so the check is cut off by the bound, though no cut came before any of its sites.
+    #[test]
+    fn test_a_check_whose_path_is_cut_after_it_is_cut_off_not_unreachable() {
+        let src =
+            "module m\npub fn count(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n {\n    i += 1\n  }\n  i\n}\n";
+        let checked = mente_sema::check_program_without_proofs(src).unwrap();
+        let module = module_of(&checked);
+        let mut enc = mente_smt::encode(&module, 0);
+        assert!(enc.cut_past_bound && !enc.cut_at_lacked);
+        let silent: Vec<Vec<usize>> = groups(&enc, |_| true)
+            .into_iter()
+            .filter(|g| enc.query(g).is_none())
+            .collect();
+        assert!(!silent.is_empty());
+        for g in &silent {
+            assert!(g.iter().all(|&k| !enc.sites[k].beyond_bound));
+            assert_eq!(unqueried(&enc, g), Unqueried::BeyondBound);
+        }
+        // With no path cut anywhere, a check no input fails stays unreachable; with a path cut
+        // at a construct the encoding lacks, it is cut off there.
+        enc.cut_past_bound = false;
+        assert_eq!(unqueried(&enc, &silent[0]), Unqueried::Unreachable);
+        enc.cut_at_lacked = true;
+        assert_eq!(unqueried(&enc, &silent[0]), Unqueried::BeyondLacked);
     }
 
     /// Each construct the encoding lacks where a path reaches it is one of `UNENCODED`, and

@@ -325,6 +325,11 @@ pub struct Encoding {
     /// Some path of the inputs is cut off: by a loop or a call past the bounds, or by a
     /// construct the encoding lacks.
     pub cut: T,
+    /// Some path is cut off past the bounds, anywhere in the function, before or after any of
+    /// its sites: a check whose sites never fail is unreachable only where no path is cut.
+    pub cut_past_bound: bool,
+    /// Some path is cut off at a construct the encoding lacks, anywhere in the function.
+    pub cut_at_lacked: bool,
     /// The run of the inputs returns, on a path the encoding follows, without a trap.
     pub returns: T,
     /// The value it returns, where the function has one.
