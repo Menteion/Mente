@@ -68,8 +68,8 @@ jobs:
           status=0
           target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out || status=$?
           # Every part capped by lines and by bytes, the whole by bytes, each cut said: GitHub refuses a
-          # step summary past 1024k (.github/scripts/fuzz-summary.sh).
-          bash .github/scripts/fuzz-summary.sh fuzz-out "mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)" "$status" >> "$GITHUB_STEP_SUMMARY"
+          # step summary past 1024k (.github/scripts/fuzz-summary.mjs).
+          node .github/scripts/fuzz-summary.mjs fuzz-out "mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)" "$status" >> "$GITHUB_STEP_SUMMARY"
           # The floor of work done: a campaign that ran no case found nothing because it looked
           # at nothing.
           runs=$(sed -n -E 's/^runs: ([0-9]+)$/\1/p' fuzz-out/summary.txt 2>/dev/null || true)

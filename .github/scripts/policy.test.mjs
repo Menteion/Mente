@@ -33,7 +33,7 @@ import { fileURLToPath } from "node:url";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
-import { ALARM_AUTHOR, ALARM_LABEL, ALARM_OWNER, errorLines, failureBody, keepAlarm, verdict as alarmVerdict } from "./lib/nightly-alarm.mjs";
+import { ALARM_AUTHOR, ALARM_LABEL, ALARM_OWNER, NIGHTLIES, alarmMarker, detailsBody, errorLines, failingJobs, failureBody, keepAlarm, keepRunning, verdict as alarmVerdict } from "./lib/nightly-alarm.mjs";
 import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
@@ -45,7 +45,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 70;
+const FLOOR = 71;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1283,9 +1283,9 @@ const PINNED_FILES = new Map([
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
-  [".github/scripts/fuzz-summary.sh", "860c9bdb55166d9cd78910caf93a641e18a6da620e0eb88fbd5bd00d1a93a260"],
-  [".github/scripts/nightly-alarm.mjs", "16e7861235fa6dae782dc10db207a539225e218e7876737eefb95e5c218cf226"],
-  [".github/scripts/lib/nightly-alarm.mjs", "6c72d0e40d6952fd18f5863802051ed4c76c65f15341da366ea6cffdacaebde3"],
+  [".github/scripts/fuzz-summary.mjs", "e3265e708b8b8d29918fcf4badd5a37d8c7c921dd55e6e5865849e472f268a92"],
+  [".github/scripts/nightly-alarm.mjs", "e6453d61e6ae0c22b121f666cc350611a30f9037f64bc5014b09786e36ba4c96"],
+  [".github/scripts/lib/nightly-alarm.mjs", "16efcd649c535cb54f6c8b5eea6413c4174a41be73f227bf931de417dd1354da"],
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
@@ -1296,7 +1296,7 @@ const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "7cb541bfd1d6fe737a7c10cae37d416837761bee073670018df6449493521609"],
+  [".github/scripts/policy-run.test.mjs", "4d7b21a64d228297db154d0dff4ea39142e1ac27f9ce39a97a61919237ee85a3"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -3997,33 +3997,48 @@ check("every workflow that runs on a schedule raises its one alarm, and no other
 });
 
 check("the nightly alarm keeps one issue per workflow: it opens it, comments on it and closes it", async () => {
-  // A stand-in for GitHub's issues, as .github/scripts/nightly-alarm.mjs reaches them.
+  // A stand-in for GitHub's issues, as .github/scripts/nightly-alarm.mjs reaches them. `lost` makes
+  // the next creation fail after it made the issue, as an answer lost on the way would; `fail`, before
+  // it made anything.
   const github = () => {
     const issues = [];
     const comments = [];
     let next = 1;
+    const state = { lost: 0, fail: 0 };
     const api = {
-      openIssues: async () => issues.filter((i) => i.state === "open").map((i) => ({ number: i.number, title: i.title, user: { login: i.user } })),
+      openIssues: async () => issues.filter((i) => i.state === "open").map((i) => ({ number: i.number, title: i.title, body: i.body, user: { login: i.user } })),
       create: async ({ title, body, labels, assignees }) => {
+        if (state.fail > 0) {
+          state.fail--;
+          throw new Error("502: nothing made");
+        }
         const i = { number: next++, title, body, labels, assignees, state: "open", user: ALARM_AUTHOR };
         issues.push(i);
+        if (state.lost > 0) {
+          state.lost--;
+          throw new Error("502: the answer was lost");
+        }
         return { number: i.number };
       },
       comment: async (n, body) => void comments.push({ n, body }),
       close: async (n) => void (issues.find((i) => i.number === n).state = "closed"),
     };
-    return { issues, comments, api };
+    return { issues, comments, api, state };
   };
+  const FUZZ = ".github/workflows/fuzz-nightly.yml";
   const g = github();
-  const run = (v, body = "it failed") => keepAlarm({ verdict: v, workflow: "Fuzz, nightly", sha: "a".repeat(40), runUrl: "https://example.invalid/run", body, api: g.api });
+  const run = (v, body = "it failed", name = "Fuzz, nightly") => keepAlarm({ verdict: v, file: FUZZ, name, sha: "a".repeat(40), runUrl: "https://example.invalid/run", body, api: g.api });
   assert.deepEqual(await run("success"), { action: "nothing", closed: [] }, "a green run with no issue open");
   const first = await run("failure", "first");
   assert.equal(first.action, "opened");
-  assert.deepEqual(g.issues.map((i) => [i.title, i.labels, i.assignees, i.state, i.body]), [["Nightly: Fuzz, nightly failing", [ALARM_LABEL], [ALARM_OWNER], "open", "first"]]);
+  assert.deepEqual(g.issues.map((i) => [i.title, i.labels, i.assignees, i.state, i.body]), [["Nightly: Fuzz, nightly failing", [ALARM_LABEL], [ALARM_OWNER], "open", `${alarmMarker(FUZZ)}\nfirst`]]);
   const second = await run("failure", "second");
   assert.equal(second.action, "commented");
   assert.equal(g.issues.length, 1, "a later failure opened a second issue");
   assert.deepEqual(g.comments.at(-1), { n: first.issue, body: "second" });
+  // The workflow renamed: its file is the same, and so is its issue (the review of 4ae3c27).
+  const renamed = await run("failure", "renamed", "Fuzz, every night");
+  assert.deepEqual([renamed.action, renamed.issue, g.issues.length], ["commented", first.issue, 1], "a renamed workflow opened a second issue");
   const green = await run("success");
   assert.deepEqual(green, { action: "closed", closed: [first.issue] });
   assert.equal(g.comments.at(-1).body, `Green again at ${"a".repeat(40)}: https://example.invalid/run`);
@@ -4031,34 +4046,88 @@ check("the nightly alarm keeps one issue per workflow: it opens it, comments on 
   const again = await run("failure", "again");
   assert.equal(again.action, "opened", "a failure after the issue closed opens a new one");
   assert.equal(g.issues.filter((i) => i.state === "open").length, 1);
-  // Never two open: of two open issues of the title, the oldest is kept and the other closed.
+  // A creation whose answer was lost made the issue all the same: read again, never made twice.
+  const lost = github();
+  lost.state.lost = 1;
+  const once = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "d".repeat(40), runUrl: "u", body: "x", api: lost.api });
+  assert.deepEqual([once.action, once.issue, lost.issues.length], ["opened", 1, 1], "a lost answer made a second issue");
+  // A creation that failed and made nothing is tried once more.
+  const flaky = github();
+  flaky.state.fail = 1;
+  const retried = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "d".repeat(40), runUrl: "u", body: "x", api: flaky.api });
+  assert.deepEqual([retried.action, retried.issue, flaky.issues.length], ["opened", 1, 1], "a creation that failed once left the night without an issue");
+  // Never two open: of two open issues of the workflow, the oldest is kept and the other closed.
   const two = github();
-  for (const body of ["x", "y"]) await two.api.create({ title: "Nightly: Fuzz, nightly failing", body, labels: [], assignees: [] });
-  const kept = await keepAlarm({ verdict: "failure", workflow: "Fuzz, nightly", sha: "b".repeat(40), runUrl: "u", body: "z", api: two.api });
+  for (const body of ["x", "y"]) await two.api.create({ title: "anything", body: `${alarmMarker(FUZZ)}\n${body}`, labels: [], assignees: [] });
+  const kept = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "b".repeat(40), runUrl: "u", body: "z", api: two.api });
   assert.deepEqual([kept.issue, kept.closedDuplicates], [1, [2]]);
   assert.deepEqual(two.issues.map((i) => i.state), ["open", "closed"]);
-  // An issue of the title opened by someone else, and the alarm of another workflow, are no
-  // alarm's of this one: left alone.
+  // Anyone's issue that holds the marker, an issue of the title without it, and the alarm of another
+  // workflow, are no alarm's of this one: left alone.
   const others = github();
-  others.issues.push({ number: 7, title: "Nightly: Fuzz, nightly failing", state: "open", user: "someone" });
-  others.issues.push({ number: 8, title: "Nightly: Mutants, full run failing", state: "open", user: ALARM_AUTHOR });
-  const own = await keepAlarm({ verdict: "failure", workflow: "Fuzz, nightly", sha: "c".repeat(40), runUrl: "u", body: "w", api: others.api });
+  others.issues.push({ number: 7, title: "Nightly: Fuzz, nightly failing", body: alarmMarker(FUZZ), state: "open", user: "someone" });
+  others.issues.push({ number: 8, title: "Nightly: Fuzz, nightly failing", body: "no marker", state: "open", user: ALARM_AUTHOR });
+  others.issues.push({ number: 9, title: "Nightly: Mutants, full run failing", body: alarmMarker(".github/workflows/mutants-full.yml"), state: "open", user: ALARM_AUTHOR });
+  const own = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "c".repeat(40), runUrl: "u", body: "w", api: others.api });
   assert.equal(own.action, "opened");
   assert.deepEqual(others.comments, []);
-  assert.deepEqual(await keepAlarm({ verdict: "success", workflow: "Generated programs, nightly", sha: "c".repeat(40), runUrl: "u", body: "", api: others.api }), { action: "nothing", closed: [] });
+  await assert.rejects(() => keepAlarm({ verdict: "maybe", file: FUZZ, name: "x", sha: "s", runUrl: "u", body: "", api: g.api }), /no verdict the alarm knows/);
+  // A nightly that has not run within its period, or never, opens its own issue, unless one is open;
+  // one that ran in time does not.
+  const now = Date.parse("2026-11-21T12:00:00Z");
+  const runs = new Map([
+    [".github/workflows/generated-nightly.yml", "2026-11-20T09:00:00Z"],
+    [".github/workflows/mutants-full.yml", null],
+  ]);
+  const stale = github();
+  const latestRun = async (file) => (runs.has(file) ? runs.get(file) : "2026-11-21T11:00:00Z");
+  const opened = await keepRunning({ now, api: { ...stale.api, latestRun } });
+  assert.deepEqual(stale.issues.map((i) => [i.title, i.body]), [
+    ["Nightly: generated-nightly.yml has not run", `${alarmMarker(".github/workflows/generated-nightly.yml")}\n.github/workflows/generated-nightly.yml has not run within 26 hours: its last scheduled run was at 2026-11-20T09:00:00Z.`],
+    ["Nightly: mutants-full.yml has not run", `${alarmMarker(".github/workflows/mutants-full.yml")}\n.github/workflows/mutants-full.yml has not run within 192 hours: it has no scheduled run.`],
+  ]);
+  assert.deepEqual(opened, [1, 2]);
+  assert.deepEqual(await keepRunning({ now, api: { ...stale.api, latestRun } }), [], "a nightly already alarmed opened a second issue");
+  assert.deepEqual(await keepRunning({ now, api: { ...github().api, latestRun: async () => "2026-11-21T00:00:00Z" } }), [], "nightlies that ran in time opened an issue");
   // A run's verdict, from its jobs' results: green only when every job succeeded; no job, a job of
   // no result, a cancellation, a skip and a failure are each a failure.
   assert.equal(alarmVerdict({ fuzz: { result: "success" } }).verdict, "success");
   for (const needs of [{ fuzz: { result: "failure" } }, { full: { result: "cancelled" } }, { paths: { result: "skipped" } }, { fuzz: { result: "success" }, full: { result: "failure" } }, {}, null, { fuzz: {} }]) {
     assert.equal(alarmVerdict(needs).verdict, "failure", JSON.stringify(needs));
   }
-  await assert.rejects(() => keepAlarm({ verdict: "maybe", workflow: "x", sha: "s", runUrl: "u", body: "", api: g.api }), /no verdict the alarm knows/);
+  // The first comment names the jobs from the run's own results; a job's name cannot open code.
+  assert.equal(failureBody({ runUrl: "u", sha: "s", failing: [{ job: "fu`zz", result: "cancelled" }] }), "The scheduled run u failed, at s.\n\n- `fu'zz`: cancelled");
+  // The details name the failing jobs: completed, neither passed nor skipped; the alarm's own job,
+  // still running, is none of them (the review of 4ae3c27).
+  assert.deepEqual(failingJobs([{ name: "a", status: "completed", conclusion: "failure" }, { name: "b", status: "completed", conclusion: "success" }, { name: "c", status: "completed", conclusion: "skipped" }, { name: "Nightly alarm (Fuzz)", status: "in_progress", conclusion: null }, { name: "d", status: "completed", conclusion: "timed_out" }]).map((j) => j.name), ["a", "d"]);
   // The error lines of a log, and a comment no line of a log can leave its fence in.
   assert.deepEqual(errorLines("2026-11-21T00:00:00.0Z ##[error]boom\nok\n##[error]  second  \n"), ["boom", "second"]);
   assert.equal(errorLines(Array.from({ length: 9 }, (_, k) => `##[error]e${k}`).join("\n")).length, 5);
-  const body = failureBody({ runUrl: "u", sha: "s", jobs: [{ name: "fuzz", result: "failure", errors: ["````", "@someone ping"] }] });
+  const body = detailsBody({ runUrl: "u", jobs: [{ name: "fuzz", result: "failure", errors: ["````", "@someone ping"] }] });
   const opening = /\n(`{5,})text\n/.exec(body);
   assert.ok(opening && body.endsWith(opening[1]), `a log's own fence closed the comment's: ${body}`);
+});
+
+check("the nightly alarm knows each nightly workflow and its schedule", () => {
+  // NIGHTLIES holds every workflow that runs on a schedule, each with its period and the slack the
+  // alarm gives it: a cron of every day, 24 hours and 2; of one day of the week, 168 and 24.
+  const scheduled = workflows().filter((w) => "schedule" in triggers(w.doc));
+  const period = (cron) => {
+    const fields = String(cron).trim().split(/\s+/);
+    assert.equal(fields.length, 5, `a cron of another form: ${cron}`);
+    const [, , day, month, weekday] = fields;
+    if (day === "*" && month === "*" && weekday === "*") return 24 + 2;
+    if (day === "*" && month === "*" && /^[0-6]$/.test(weekday)) return 7 * 24 + 24;
+    throw new Error(`a schedule the alarm has no period for: ${cron}`);
+  };
+  const expected = new Map(
+    scheduled.map((w) => {
+      const crons = triggers(w.doc).schedule.map((s) => s.cron);
+      assert.equal(crons.length, 1, `${w.file} runs on ${crons.length} schedules`);
+      return [`${WORKFLOWS}/${w.file}`, period(crons[0])];
+    }),
+  );
+  assert.deepEqual(new Map([...NIGHTLIES].sort()), new Map([...expected].sort()), "NIGHTLIES in lib/nightly-alarm.mjs is not the workflows that run on a schedule, with their periods");
 });
 
 check("the site is published only by hand, from main's own definition, of a tag on main", () => {
