@@ -83,29 +83,59 @@ export function acquireSlot(label, { pollMs = 2000, say = (line) => console.erro
   }
 }
 
-/// The command line that runs `run` under `limits`: through capped.ps1 on Windows, as it is
-/// elsewhere.
+/// Windows PowerShell, by its path in System32, which runs capped.ps1: the Store's pwsh, started in
+/// a job, takes every process it starts out of it (the review of 8f03074).
+export const WINDOWS_POWERSHELL = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+
+/// How capped.ps1 runs `run` under `limits`: Windows PowerShell on the script, and the command, the
+/// limits and this process's id as JSON in one variable, MENTE_CAPPED, never as arguments, which
+/// PowerShell's parser would change (the review of 8f03074: `--skip=a::b` arrived as two arguments,
+/// and `--%` vanished). The script ends the command when this process ends.
 export function capped(run, limits) {
-  if (!WINDOWS) return [...run];
-  return ["pwsh", "-NoProfile", "-NonInteractive", "-File", CAPPED, "-ProcessGB", String(limits.processGB), "-JobGB", String(limits.jobGB), "-Minutes", String(limits.minutes), "--", ...run];
+  const call = { command: run, processGB: limits.processGB, jobGB: limits.jobGB, minutes: limits.minutes, parent: process.pid };
+  return { cmd: WINDOWS_POWERSHELL, args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", CAPPED], env: { MENTE_CAPPED: JSON.stringify(call) } };
+}
+
+/// Whether `dir` lies in a checkout of this repository: it or a parent holds Cargo.toml and this
+/// very tool.
+export function inMente(dir) {
+  for (let at = path.resolve(dir); ; at = path.dirname(at)) {
+    if (fs.existsSync(path.join(at, "Cargo.toml")) && fs.existsSync(path.join(at, "tools", "capped.ps1"))) return true;
+    if (path.dirname(at) === at) return false;
+  }
 }
 
 /// Runs `run` under `limits`, its output this process's, at the slot's share of the cores, in
-/// `cwd`; returns its status, 1 when it could not start.
-export function runCapped(run, limits, { cwd } = {}) {
-  const [cmd, ...args] = capped(run, limits);
-  const env = { ...process.env, CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS };
-  const r = spawnSync(cmd, args, { stdio: "inherit", env, cwd });
+/// `cwd`; returns its status, 1 when it could not start. With `menteOnly`, a command whose
+/// directory lies outside a checkout of this repository runs untouched, its environment as given:
+/// cargo's runner for every project of the machine. Off Windows every command runs unbounded, and
+/// says so.
+export function runCapped(run, limits, { cwd, menteOnly = false } = {}) {
+  let spawned;
+  if (menteOnly && !inMente(cwd ?? process.cwd())) {
+    spawned = { cmd: run[0], args: run.slice(1), env: process.env };
+  } else if (!WINDOWS) {
+    console.error("local-limits: no job object off Windows: the command runs unbounded");
+    spawned = { cmd: run[0], args: run.slice(1), env: { ...process.env, CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS } };
+  } else {
+    const { cmd, args, env } = capped(run, limits);
+    spawned = { cmd, args, env: { ...process.env, CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS, ...env } };
+  }
+  const r = spawnSync(spawned.cmd, spawned.args, { stdio: "inherit", env: spawned.env, cwd });
   if (r.error) console.error(`local-limits: ${run[0]} did not start: ${r.error.message}`);
   return r.status ?? 1;
 }
 
-/// Reads `--minutes N` from the front of `args`, if it is there: the arguments left, and the limits.
+/// The most minutes `--minutes` may give a run.
+export const MAX_MINUTES = 60;
+
+/// Reads `--minutes N` from the front of `args`, if it is there: the arguments left, and the
+/// limits. N is above 0 and at most MAX_MINUTES.
 export function minutesFrom(args, limits) {
   if (args[0] !== "--minutes") return { args, limits };
   const minutes = Number(args[1]);
-  if (!(minutes > 0)) {
-    console.error(`local-limits: --minutes takes a number above 0, not ${args[1]}`);
+  if (!(minutes > 0 && minutes <= MAX_MINUTES)) {
+    console.error(`local-limits: --minutes takes a number above 0 and at most ${MAX_MINUTES}, not ${args[1]}`);
     process.exit(2);
   }
   return { args: args.slice(2), limits: { ...limits, minutes } };

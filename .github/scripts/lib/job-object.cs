@@ -74,6 +74,7 @@ public static class JobLimits {
   const uint ProcessTerminate = 0x0001;
   const uint ProcessSetQuota = 0x0100;
   const uint ProcessQueryLimitedInformation = 0x1000;
+  const uint Synchronize = 0x00100000;
   const uint MessageProcessMemoryLimit = 9;
   const uint MessageJobMemoryLimit = 10;
   static readonly IntPtr InvalidHandle = new IntPtr(-1);
@@ -140,7 +141,7 @@ public static class JobLimits {
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern uint ResumeThread(IntPtr thread);
   [DllImport("kernel32.dll", SetLastError = true)]
-  static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  static extern uint WaitForMultipleObjects(uint count, IntPtr[] handles, bool all, uint milliseconds);
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool GetExitCodeProcess(IntPtr process, out uint code);
   [DllImport("kernel32.dll", SetLastError = true)]
@@ -172,9 +173,16 @@ public static class JobLimits {
   // created suspended, put in the job, then let go, so that every process it starts is born in the
   // job, whose processes may not break away from it, even where this process's own job would let
   // them (a shell of the desktop app is in such a job). It has this process's standard handles,
-  // directory and environment. Returns its status, or null when it was still running after
-  // `milliseconds`: the caller ends the job then.
-  public static uint? Run(IntPtr job, string application, string commandLine, uint milliseconds) {
+  // directory and environment. Returns its status, with `end` "exit"; or, with every process of the
+  // job ended, `end` "time" when it was still running after `milliseconds`, or "parent" when
+  // `parent`, the process that started this one, ended first (the review of 8f03074: a killed slot
+  // holder left its build running, its slot already free).
+  public static uint Run(IntPtr job, string application, string commandLine, uint milliseconds, int parent, out string end) {
+    IntPtr watched = OpenProcess(Synchronize, false, parent);
+    if (watched == IntPtr.Zero) {
+      end = "parent";
+      return 1;
+    }
     var startup = new StartupInfo();
     startup.Size = Marshal.SizeOf(typeof(StartupInfo));
     startup.Flags = UseStdHandles;
@@ -191,7 +199,14 @@ public static class JobLimits {
     }
     Check(ResumeThread(info.Thread) != uint.MaxValue, "ResumeThread");
     CloseHandle(info.Thread);
-    if (WaitForSingleObject(info.Process, milliseconds) == WaitTimeout) return null;
+    uint woke = WaitForMultipleObjects(2, new[] { info.Process, watched }, false, milliseconds);
+    if (woke == WaitTimeout || woke == 1) {
+      end = woke == 1 ? "parent" : "time";
+      Check(TerminateJobObject(job, 1), "TerminateJobObject");
+      return 1;
+    }
+    Check(woke == 0, "WaitForMultipleObjects");
+    end = "exit";
     uint code;
     Check(GetExitCodeProcess(info.Process, out code), "GetExitCodeProcess");
     CloseHandle(info.Process);

@@ -9,7 +9,7 @@
     "benchmark": "^benchmark/",
     "harness": "^benchmark/harness/",
     "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/",
-    "local limits": "^tools/(local-limits(\\.test)?\\.mjs|capped\\.ps1|cargo\\.mjs|mn\\.mjs)$|^\\.github/scripts/(job-limits\\.ps1|lib/job-object\\.cs)$",
+    "local limits": "^tools/(local-limits(\\.test)?\\.mjs|capped\\.(ps1|mjs)|cargo\\.mjs|mn\\.mjs|raw-build(-guard)?\\.mjs)$|^\\.github/scripts/(job-limits\\.ps1|lib/job-object\\.cs)$",
     "generator": "^compiler/mente-cli/src/mir_run/"
   },
   "checks": [

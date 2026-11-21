@@ -38,7 +38,7 @@ import { SANDBOX_PROGRAM, deletedRegexes, evidence, exactRegex, expected, missin
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
-import { CARGO_BUILDS, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../tools/raw-build.mjs";
+import { CARGO_HARMLESS, decide as rawBuildDecide, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../tools/raw-build.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1281,7 +1281,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/limits.sh", "ff5fb294d3365b4c5240a4b9f86042d3c9d2767e0c6e5e1fa0adceea359fdee9"],
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
-  [".github/scripts/lib/job-object.cs", "cf59a22d9ca836f8897539eeebf08c2e543069902ef809acb022afb0f5a0eb3a"],
+  [".github/scripts/lib/job-object.cs", "aa78b142be7db5de8cf53593b6a5eaf9c62f378a85d4584ec341476345bec908"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
@@ -3758,9 +3758,11 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
 });
 
 /// The local limits' files: the module that defines them, the job object's script and the type it
-/// shares with CI, the entry points, and their proofs (tools/local-limits.mjs).
-const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/cargo.mjs", "tools/mn.mjs", "tools/local-limits.test.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
-/// The most the local limits may give: builds at once, and GB committed by a process and by a tree.
+/// shares with CI, the entry points, cargo's runner, the raw-build hook, and their proofs
+/// (tools/local-limits.mjs).
+const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/capped.mjs", "tools/cargo.mjs", "tools/mn.mjs", "tools/raw-build.mjs", "tools/raw-build-guard.mjs", "tools/local-limits.test.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
+/// The most the local limits may give: builds at once, GB committed by a process and by a tree, and
+/// minutes, those --minutes may ask for among them.
 const LOCAL_CEILING = { slots: 2, processGB: 8, jobGB: 16, minutes: 60 };
 
 /// The arguments of each call of `name` in `toks`, each argument its tokens, split at the commas of
@@ -3787,17 +3789,24 @@ function callArguments(toks, name) {
   return calls;
 }
 
+/// Whether `toks` hold `seq`, a run of token values, anywhere.
+const holds = (toks, seq) => toks.some((t, i) => seq.every((v, k) => toks[i + k]?.v === v));
+
 /// What keeps the quick checks from running every command in a build slot and under the local
-/// limits, from the texts of tools/quick.mjs (`quick`), tools/local-limits.mjs (`limits`) and
-/// tools/capped.ps1 (`capped`), and the quick map (`map`):
+/// limits, from the texts of tools/quick.mjs (`quick`), tools/local-limits.mjs (`limits`),
+/// tools/capped.ps1 (`capped`), tools/mn.mjs (`mn`) and tools/cargo.mjs (`cargo`), and the quick
+/// map (`map`):
 /// - quick.mjs starts no process but git's and runCapped's: it imports nothing else that could, it
 ///   calls execFileSync only on "git", it takes a slot, and runs each check by runCapped with BUILD;
-/// - local-limits.mjs gives no more than LOCAL_CEILING, and runs a command only through
-///   capped(), which names capped.ps1 with the three limits;
-/// - capped.ps1 starts a command on Windows only through the job object's Run, after Confine, and
-///   runs one untouched only off Windows or, with -MenteOnly, outside a checkout of this repository;
+/// - local-limits.mjs gives no more than LOCAL_CEILING, --minutes included; it starts capped.ps1 by
+///   Windows PowerShell's path in System32, never pwsh, and hands it the command as JSON in
+///   MENTE_CAPPED, never as arguments (the review of 8f03074); it starts one process, and a command
+///   untouched only off Windows or, with menteOnly, outside a checkout of this repository;
+/// - capped.ps1 reads its call from MENTE_CAPPED alone, and starts the command only through the job
+///   object's Run, after Confine;
+/// - mn.mjs and cargo.mjs hold their slot from before their first run to after their last;
 /// - the quick map runs the proofs for a change to any file of LOCAL_LIMITS.
-export function localLimitsProblems({ quick, limits, capped, map }) {
+export function localLimitsProblems({ quick, limits, capped, mn, cargo, map }) {
   const problems = [];
   const q = jsTokens(quick);
   const allowed = new Set(["node:child_process", "node:fs", "./local-limits.mjs"]);
@@ -3831,36 +3840,39 @@ export function localLimitsProblems({ quick, limits, capped, map }) {
       if (!(v > 0 && v <= LOCAL_CEILING[key])) problems.push(`tools/local-limits.mjs gives ${set}.${key} ${v}, past ${LOCAL_CEILING[key]}`);
     }
   }
-  const spawns = callArguments(l, "spawnSync");
-  if (spawns.length !== 1 || spawns[0][0]?.map((t) => t.v).join(" ") !== "cmd" || spawns[0][1]?.map((t) => t.v).join(" ") !== "args") problems.push("tools/local-limits.mjs starts a process other than the one runCapped starts");
-  const destructured = ["[", "cmd", ",", ".", ".", ".", "args", "]", "=", "capped", "("];
-  if (!l.some((t, i) => destructured.every((v, k) => l[i + k]?.v === v))) {
-    problems.push("tools/local-limits.mjs runs a command other than capped() gives");
-  }
+  const most = number("MAX_MINUTES", null);
+  if (!(most > 0 && most <= LOCAL_CEILING.minutes)) problems.push(`tools/local-limits.mjs lets --minutes ask for ${most}, past ${LOCAL_CEILING.minutes}`);
+  if (!holds(l, ["minutes", "<", "=", "MAX_MINUTES"])) problems.push("tools/local-limits.mjs does not hold --minutes to MAX_MINUTES");
+  if (l.some((t) => /pwsh/i.test(t.v))) problems.push("tools/local-limits.mjs names pwsh, which takes the processes it starts out of the job");
   const strings = new Set(l.filter((t) => t.t === "str").map((t) => t.v));
-  for (const s of ["capped.ps1", "-ProcessGB", "-JobGB", "-Minutes", "--"]) if (!strings.has(s)) problems.push(`tools/local-limits.mjs does not name ${s} in the command capped() gives`);
+  for (const s of ["System32", "WindowsPowerShell", "v1.0", "powershell.exe", "capped.ps1", "-File"]) if (!strings.has(s)) problems.push(`tools/local-limits.mjs does not name ${s} in the way it starts capped.ps1`);
+  if (!holds(l, ["MENTE_CAPPED", ":", "JSON", ".", "stringify", "(", "call", ")"]) || !holds(l, ["command", ":", "run"])) problems.push("tools/local-limits.mjs does not hand capped.ps1 the command as JSON in MENTE_CAPPED");
+  const at = l.findIndex((t, i) => t.v === "args" && l[i + 1]?.v === ":" && l[i + 2]?.v === "[");
+  let close = at;
+  while (close >= 0 && close < l.length && l[close].v !== "]") close++;
+  if (at < 0 || l.slice(at + 3, close).some((t) => !(t.t === "str" || t.v === "CAPPED" || t.v === ","))) problems.push("tools/local-limits.mjs hands capped.ps1 arguments past its own options, which PowerShell's parser would change");
+  const spawns = callArguments(l, "spawnSync");
+  if (spawns.length !== 1 || spawns[0][0]?.map((t) => t.v).join("") !== "spawned.cmd" || spawns[0][1]?.map((t) => t.v).join("") !== "spawned.args") problems.push("tools/local-limits.mjs starts a process other than the one runCapped chose");
+  if (!holds(l, ["const", "{", "cmd", ",", "args", ",", "env", "}", "=", "capped", "(", "run", ",", "limits", ")"])) problems.push("tools/local-limits.mjs runs a command other than capped() gives");
+  const untouched = [...limits.matchAll(/spawned = \{ cmd: run\[0\]/g)].length;
+  const gated = [...limits.matchAll(/(?:if|else if) \(([^\n]*)\) \{\n(?:\s*console\.error\([^\n]*\);\n)?\s*spawned = \{ cmd: run\[0\]/g)].map((m) => m[1]);
+  if (gated.length !== untouched || gated.some((c) => !["menteOnly && !inMente(cwd ?? process.cwd())", "!WINDOWS"].includes(c))) problems.push("tools/local-limits.mjs runs a command untouched where it should bound it");
 
   const code = capped.split(/\r?\n/).filter((line) => !/^\s*#/.test(line)).join("\n");
   const confine = code.indexOf("[JobLimits]::Confine(");
   const run = code.indexOf("[JobLimits]::Run(");
   if (!/Add-Type -Path \(Join-Path \$PSScriptRoot '\.\.\/\.github\/scripts\/lib\/job-object\.cs'\)/.test(code)) problems.push("tools/capped.ps1 does not load the job object CI's Windows jobs use");
   if (confine < 0 || run < 0 || run < confine) problems.push("tools/capped.ps1 does not start the command in the job, after setting the job up");
-  if (/Start-Process|Diagnostics\.Process\]::Start|Invoke-Expression|\biex\b/.test(code)) problems.push("tools/capped.ps1 starts a process outside the job object's Run");
-  // The one untouched run lies in the block of that one condition: from its brace to the brace
-  // that closes it.
-  const untouched = [...code.matchAll(/^\s*& \$program @rest$/gm)];
-  const gate = "if (-not $IsWindows -or ($menteOnly -and -not (Test-InMente))) {";
-  const open = code.indexOf(gate);
-  let close = -1;
-  for (let i = open + gate.length, depth = 1; open >= 0 && i < code.length; i++) {
-    if (code[i] === "{") depth++;
-    if (code[i] === "}" && --depth === 0) {
-      close = i;
-      break;
-    }
-  }
-  if (untouched.length !== 1 || close < 0 || untouched[0].index < open || untouched[0].index > close) {
-    problems.push("tools/capped.ps1 runs a command untouched where it should bound it");
+  if (/Start-Process|Diagnostics\.Process\]::Start|Invoke-Expression|\biex\b|&\s*\$|pwsh/i.test(code)) problems.push("tools/capped.ps1 starts a process outside the job object's Run");
+  if (!code.includes("$env:MENTE_CAPPED") || /\$args\b/i.test(code)) problems.push("tools/capped.ps1 reads its call from somewhere other than MENTE_CAPPED");
+
+  for (const [file, text] of [["tools/mn.mjs", mn], ["tools/cargo.mjs", cargo]]) {
+    const t = jsTokens(text);
+    const calls = (name, dotted) => t.map((x, i) => (x.t === "id" && x.v === name && t[i + 1]?.v === "(" && (t[i - 1]?.v === ".") === dotted ? i : -1)).filter((i) => i >= 0);
+    const slot = calls("acquireSlot", false);
+    const ran = calls("runCapped", false);
+    const released = calls("release", true);
+    if (slot.length !== 1 || ran.length === 0 || slot[0] > ran[0] || released.length === 0 || released.some((r) => r < ran.at(-1))) problems.push(`${file} does not hold its slot from before its first run to after its last`);
   }
 
   const proofs = (map.checks ?? []).filter((c) => Array.isArray(c.run) && c.run.join(" ") === "node --test tools/local-limits.test.mjs");
@@ -3874,24 +3886,32 @@ check("the quick checks run every command in one of the machine's build slots, u
   // test at once, and the machine reset: nothing bounded a local process. tools/quick.mjs runs each
   // check in a Windows job object that bounds each process's memory, the tree's and the time, in one
   // of two build slots for the machine (tools/local-limits.mjs). Read as text, never run.
-  const texts = { quick: read("tools/quick.mjs"), limits: read("tools/local-limits.mjs"), capped: read("tools/capped.ps1"), map: JSON.parse(read(QUICK_MAP)) };
+  const texts = { quick: read("tools/quick.mjs"), limits: read("tools/local-limits.mjs"), capped: read("tools/capped.ps1"), mn: read("tools/mn.mjs"), cargo: read("tools/cargo.mjs"), map: JSON.parse(read(QUICK_MAP)) };
   for (const f of LOCAL_LIMITS) assert.ok(tracked().has(f), `${f} is not in the repository`);
   assert.deepEqual(localLimitsProblems(texts), []);
   // Planted, one at a time: each must be refused.
   const plants = [
     ["quick", 'import { execFileSync } from "node:child_process";', 'import { execFileSync, spawnSync } from "node:child_process";', "a direct spawnSync"],
-    ["quick", '  results.push([check.name, runCapped(check.run, BUILD) === 0]);', "  results.push([check.name, runCapped(check.run, { processGB: 64, jobGB: 64, minutes: 600 }) === 0]);", "other limits"],
-    ["quick", 'const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);', "const slot = { release() {} };", "no slot"],
+    ["quick", "  results.push([check.name, runCapped(check.run, BUILD) === 0]);", "  results.push([check.name, runCapped(check.run, { processGB: 64, jobGB: 64, minutes: 600 }) === 0]);", "other limits"],
+    ["quick", "const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);", "const slot = { release() {} };", "no slot"],
     ["quick", 'execFileSync("git", args', 'execFileSync("cargo", args', "execFileSync on cargo"],
     ["quick", 'import { BUILD, acquireSlot, runCapped } from "./local-limits.mjs";', 'import { BUILD, acquireSlot, runCapped } from "./local-limits.mjs";\nimport { run } from "./other.mjs";', "another module"],
     ["limits", "export const SLOTS = 2;", "export const SLOTS = 4;", "four slots"],
     ["limits", "export const BUILD = Object.freeze({ processGB: 8,", "export const BUILD = Object.freeze({ processGB: 64,", "64 GB a process"],
     ["limits", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 80, minutes: 5 });", "80 GB a probe's tree"],
-    ["limits", "  const [cmd, ...args] = capped(run, limits);", "  const [cmd, ...args] = run;", "no capped()"],
-    ["limits", '"-ProcessGB", String(limits.processGB), ', "", "no process limit named"],
-    ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds)", "$status = (Start-Process $application -PassThru -Wait).ExitCode", "Start-Process"],
+    ["limits", "export const MAX_MINUTES = 60;", "export const MAX_MINUTES = 600;", "600 minutes"],
+    ["limits", "  if (!(minutes > 0 && minutes <= MAX_MINUTES)) {", "  if (!(minutes > 0)) {", "--minutes with no ceiling"],
+    ["limits", 'export const WINDOWS_POWERSHELL = path.join(process.env.SystemRoot || "C:\\\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");', 'export const WINDOWS_POWERSHELL = "pwsh";', "the Store's pwsh"],
+    ["limits", '"-File", CAPPED]', '"-File", CAPPED, ...run]', "the command as arguments"],
+    ["limits", "  const { cmd, args, env } = capped(run, limits);", "  const { cmd, args, env } = { cmd: run[0], args: run.slice(1), env: {} };", "no capped()"],
+    ["limits", "  if (menteOnly && !inMente(cwd ?? process.cwd())) {", "  if (true) {", "always untouched"],
+    ["limits", "  const r = spawnSync(spawned.cmd, spawned.args, { stdio: \"inherit\", env: spawned.env, cwd });", "  spawnSync(run[0], run.slice(1));\n  const r = spawnSync(spawned.cmd, spawned.args, { stdio: \"inherit\", env: spawned.env, cwd });", "a second process"],
+    ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds, [int]$call.parent, [ref] $end)", "$status = (Start-Process $application -PassThru -Wait).ExitCode", "Start-Process"],
+    ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds, [int]$call.parent, [ref] $end)", "& $program @rest; $status = $LASTEXITCODE", "the call operator"],
     ["capped", "Add-Type -Path (Join-Path $PSScriptRoot '../.github/scripts/lib/job-object.cs')", "Add-Type -Path (Join-Path $PSScriptRoot 'other.cs')", "another job object"],
-    ["capped", "if (-not $IsWindows -or ($menteOnly -and -not (Test-InMente))) {", "if ($true) {", "always untouched"],
+    ["capped", "  $call = $env:MENTE_CAPPED | ConvertFrom-Json", "  $call = $args | ConvertFrom-Json", "the call from its arguments"],
+    ["mn", 'let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });', 'let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });\nslot.release();', "the probe's slot let go before its run"],
+    ["cargo", 'const slot = acquireSlot(`cargo ${args.join(" ")}`);', "const slot = { release() {} };", "cargo with no slot"],
   ];
   for (const [part, from, to, what] of plants) {
     assert.equal(texts[part].split(from).length, 2, `the plant "${what}" finds no place in ${part}`);
@@ -3954,14 +3974,46 @@ check("the raw-build guard refuses a build outside the local limits and names th
     ["ls target/debug/", null],
     ["grep -r cargo test.txt", null],
     ["echo cargo test", null],
-    ["cargo testing-tool", null],
+    // The review of 8f03074: forms the regular expressions missed, each now read as a command.
+    ["cmd /c cargo test", "node tools/cargo.mjs test"],
+    ["cargo -q test", "node tools/cargo.mjs -q test"],
+    ["cargo --locked test", "node tools/cargo.mjs --locked test"],
+    ["foreach ($x in 1..2) { cargo test }", "node tools/cargo.mjs test"],
+    ["timeout 600 cargo test", "node tools/cargo.mjs test"],
+    ["env cargo test", "node tools/cargo.mjs test"],
+    ["Cargo test", "node tools/cargo.mjs test"],
+    ["cargo llvm-cov", "node tools/cargo.mjs llvm-cov"],
+    ["cargo fix", "node tools/cargo.mjs fix"],
+    ['bash -c "cargo build"', "node tools/cargo.mjs build"],
+    ["cargo test 2>&1 | tail -5", "node tools/cargo.mjs test 2>&1"],
+    // A cargo command not known as harmless is refused, so a new one is too.
+    ["cargo testing-tool", "node tools/cargo.mjs testing-tool"],
+    // And what the regular expressions refused wrongly: a heredoc's body and a comment.
+    ["git commit -F - <<'EOF'\ncargo test passes now\nEOF", null],
+    ["cat <<-EOF > notes.txt\n\tcargo build\n\tEOF", null],
+    ["# then cargo test", null],
+    ["echo done # cargo test", null],
+    ["echo done # then; cargo test", null],
+    ["cargo -q fmt --check", null],
+    ["cargo --locked metadata --format-version 1", null],
+    ["$m = @'\ncargo test\n'@\ngit commit -m $m", null],
+    ["cargo --version", null],
+    ["cargo", null],
   ];
   const wrong = cases.filter(([command, instead]) => (rawBuildRefusal(command)?.instead ?? null) !== instead).map(([command, instead]) => `${command}: ${rawBuildRefusal(command)?.instead ?? null}, not ${instead}`);
   assert.deepEqual(wrong, []);
   // The words a session reads name the command found and the one to run.
   const planted = rawBuildRefusal("cargo test");
   assert.match(rawBuildMessage(planted), /^"cargo test" would run outside the local limits\. Run this instead: node tools\/cargo\.mjs test\n/);
-  for (const name of ["build", "test", "run", "clippy", "nextest", "check"]) assert.ok(CARGO_BUILDS.includes(name), `the guard lets cargo ${name} through`);
+  for (const name of ["build", "test", "run", "clippy", "nextest", "check", "llvm-cov", "fix", "bench", "doc", "mutants"]) assert.ok(!CARGO_HARMLESS.includes(name), `the guard lets cargo ${name} through`);
+  // The hook fails closed: an event it cannot read, or one with no command, refuses the command.
+  for (const input of ["not json", "", '{"tool_input":{"command":42}}', "{}"]) {
+    const answer = rawBuildDecide(input);
+    assert.equal(answer.status, 2, `the hook lets a command through on ${JSON.stringify(input)}`);
+    assert.match(answer.words, /^the raw-build guard /);
+  }
+  assert.deepEqual(rawBuildDecide(JSON.stringify({ tool_input: { command: "node tools/cargo.mjs test" } })), { status: 0, words: "" });
+  assert.equal(rawBuildDecide(JSON.stringify({ tool_input: { command: "cargo test" } })).status, 2);
   // The project's settings, which every checkout and every session of it reads, run the guard
   // before each Bash and PowerShell command (Norman, 2026-11-22).
   const settings = JSON.parse(read(GUARD_SETTINGS));
