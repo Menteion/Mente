@@ -275,6 +275,53 @@ fn test_fuzz_replay_reports_each_failure_once() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A found failure replays on the edit seed its record beside it names, as `mn fuzz` writes the
+/// record, and says so, where edits 0 to 3 never meet the seed it was found with; a record that
+/// names no edit seed is refused, never replayed on other edits.
+#[test]
+fn test_fuzz_replay_takes_the_recorded_edit_seed() {
+    let dir = scratch("replay-edit");
+    let seeds = dir.join("seeds");
+    let found = seeds.join("found.mn");
+    fs::write(&found, "module m\n// fuzz-plant\n").unwrap();
+    fs::write(seeds.join("found.txt"), "phase: planted\nedit seed: 4242\n").unwrap();
+    let run = mn(
+        &["fuzz", "--replay", found.to_str().unwrap()],
+        Some("panic"),
+    );
+    let printed = text(&run.stdout);
+    assert_eq!(
+        run.status.code(),
+        Some(1),
+        "{}{}",
+        printed,
+        text(&run.stderr)
+    );
+    assert!(
+        printed.contains("found.mn: replayed on its recorded edit seed 4242"),
+        "{}",
+        printed
+    );
+    assert_eq!(
+        printed.matches("panic in planted").count(),
+        1,
+        "{}",
+        printed
+    );
+    fs::write(seeds.join("found.txt"), "phase: planted\n").unwrap();
+    let run = mn(
+        &["fuzz", "--replay", found.to_str().unwrap()],
+        Some("panic"),
+    );
+    assert_eq!(run.status.code(), Some(2), "{}", text(&run.stdout));
+    assert!(
+        text(&run.stderr).contains("with no line `edit seed: N`"),
+        "{}",
+        text(&run.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Jobs share the runs and the seeds, a campaign without runs goes on for its seconds, and a
 /// corpus without seeds is a usage error.
 #[test]

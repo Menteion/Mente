@@ -2346,13 +2346,17 @@ fn slug(failure: &Failure) -> String {
     format!("{}-{}-{:08x}", phase, failure.kind.name(), hash)
 }
 
+/// The line of a failure's record that names the edit seed it was found with, which
+/// [`replay_edits`] reads back: the incremental phase edits its input by that seed alone.
+const EDIT_SEED: &str = "edit seed: ";
+
 /// Writes a failure's minimized input, its description and its original input to `out`.
 fn write_found(out: &Path, opts: &Options, found: &Found) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {}", out.display(), e))?;
     let name = slug(&found.failure);
     let f = &found.failure;
     let about = format!(
-        "phase: {}\nkind: {}\nmessage: {}\nkey: {}\nfound by: mn fuzz --seed {} --jobs {}, job {}, run {}\nedit seed: {}\ninput: {} bytes, minimized to {} bytes\nreplay: mn fuzz --replay {}.mn\n",
+        "phase: {}\nkind: {}\nmessage: {}\nkey: {}\nfound by: mn fuzz --seed {} --jobs {}, job {}, run {}\n{}{}\ninput: {} bytes, minimized to {} bytes\nreplay: mn fuzz --replay {}.mn\n",
         f.phase,
         f.kind.name(),
         f.message,
@@ -2361,6 +2365,7 @@ fn write_found(out: &Path, opts: &Options, found: &Found) -> Result<(), String> 
         opts.jobs,
         found.job,
         found.run,
+        EDIT_SEED,
         found.edit,
         found.original.len(),
         found.minimized.len(),
@@ -2586,8 +2591,41 @@ fn summary(total: &Tally, seconds: f64, restarts: usize, found: &[Found]) -> Str
     out
 }
 
-/// Runs each file under `paths` through every phase, with a few edits, and prints each
-/// failure. A file that hangs is not run again with the next edit, which would only hang too.
+/// The edit seed the record beside `path` gives, `<name>.txt` as [`write_found`] writes it
+/// beside `<name>.mn` and `<name>.orig.mn`, so that a failure the incremental phase met on that
+/// edit replays on it; none for a file with no record, such as a seed of a corpus. A record that
+/// names no edit seed is refused, never replayed on other edits.
+fn replay_edits(path: &Path) -> Result<Option<u64>, String> {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = file
+        .strip_suffix(".orig.mn")
+        .or_else(|| file.strip_suffix(".mn"))
+        .unwrap_or(&file);
+    let record = path.with_file_name(format!("{}.txt", name));
+    if !record.is_file() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&record).map_err(|e| format!("{}: {}", record.display(), e))?;
+    text.lines()
+        .find_map(|l| l.strip_prefix(EDIT_SEED))
+        .and_then(|seed| seed.trim().parse().ok())
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "{}: a failure's record with no line `{}N`, so its input cannot be replayed on the edit it was found with",
+                record.display(),
+                EDIT_SEED
+            )
+        })
+}
+
+/// Runs each file under `paths` through every phase and prints each failure: a found failure on
+/// the edit seed its record gives ([`replay_edits`]), any other file with the edits 0 to 3. A
+/// file that hangs is not run again with the next edit, which would only hang too.
 fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
     let files = seed_corpus(paths);
     if files.is_empty() {
@@ -2598,7 +2636,22 @@ fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
     let mut failed = 0;
     for (path, text) in &files {
         let mut seen = Vec::new();
-        for edit in 0..4 {
+        let edits: Vec<u64> = match replay_edits(path) {
+            Ok(Some(edit)) => {
+                println!(
+                    "{}: replayed on its recorded edit seed {}",
+                    path.display(),
+                    edit
+                );
+                vec![edit]
+            }
+            Ok(None) => (0..4).collect(),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                return 2;
+            }
+        };
+        for edit in edits {
             let case = Case {
                 text: text.clone(),
                 edit,
@@ -3518,6 +3571,54 @@ mod tests {
         assert_eq!(normalize("fn without a colon"), "fn without a colon");
         assert_eq!(normalize("v1 v22"), "v# v#");
         assert_eq!(normalize("`unclosed 7"), "`_`");
+    }
+
+    /// A found failure's record names the edit seed it was found with, and the replay reads that
+    /// seed back from beside the minimized input and the original alike; a file with no record
+    /// has none, and a record without one is refused (the nightly triage of 2026-11-21, where
+    /// three incremental failures replayed clean on edits 0 to 3 and failed on their own).
+    #[test]
+    fn test_a_found_failure_replays_on_its_recorded_edit_seed() {
+        let out = std::env::temp_dir().join(format!("mente-fuzz-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let opts = Options {
+            seed: 3,
+            runs: Some(1),
+            seconds: 0,
+            jobs: 1,
+            out: out.clone(),
+            phases: phases(None),
+            shallow: true,
+        };
+        let edit = 0xDEAD_BEEF_1234_5678;
+        let found = Found {
+            failure: Failure {
+                phase: "incremental".into(),
+                kind: Kind::Panic,
+                message: "a panic".into(),
+            },
+            minimized: "module m\n".into(),
+            original: "module m\npub fn f() -> u8 = 1\n".into(),
+            job: 0,
+            run: 9,
+            edit,
+        };
+        write_found(&out, &opts, &found).unwrap();
+        let name = slug(&found.failure);
+        for file in [format!("{}.mn", name), format!("{}.orig.mn", name)] {
+            assert_eq!(replay_edits(&out.join(&file)), Ok(Some(edit)), "{}", file);
+        }
+        std::fs::write(out.join("seed.mn"), "module m\n").unwrap();
+        assert_eq!(replay_edits(&out.join("seed.mn")), Ok(None));
+        std::fs::write(out.join("bare.mn"), "module m\n").unwrap();
+        std::fs::write(out.join("bare.txt"), "phase: incremental\n").unwrap();
+        let refused = replay_edits(&out.join("bare.mn")).unwrap_err();
+        assert!(
+            refused.contains("with no line `edit seed: N`"),
+            "{}",
+            refused
+        );
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// A campaign without a number of runs goes on until its deadline, and no further.
