@@ -20,9 +20,9 @@ use std::collections::BTreeSet;
 
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
-    Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, ContractKind, Else, ExprId,
-    ExprKind, FnSyntax, PatternKind, Payload, Refinement, StmtId, StmtKind, Tree, TypeId, TypeKind,
-    UnaryOp,
+    Arg, Arm, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, Contract, ContractKind, Else,
+    ExprId, ExprKind, FnSyntax, Param, PatternKind, Payload, Refinement, StmtId, StmtKind, Tree,
+    TypeId, TypeKind, UnaryOp,
 };
 use mente_syntax::{Attr, Span};
 
@@ -155,16 +155,51 @@ pub struct Report {
     pub variables: usize,
 }
 
-/// What a caller's check reads of a function: its parameters' and result's types with their
-/// refinements, and its contract clauses. A session checks a caller again when it changes.
+/// What a caller's check reads of a function: each parameter's mode, name and type with its
+/// refinement, the result's type with its refinement, and each contract clause with its kind,
+/// which decides whether the call proves it, assumes it or counts it as a measure. A session
+/// checks a caller again when it changes. Each part of the syntax is named, so that a part
+/// added to it is placed here or left out on purpose: the function's name, which callers
+/// resolve on their own, and its body, which no caller reads.
 pub fn header(f: &FnSyntax) -> String {
-    let t = &f.tree;
-    let params: Vec<String> = f.params.iter().map(|p| t.render_type(p.ty)).collect();
-    let clauses: Vec<String> = f.contracts.iter().map(|c| t.render_expr(c.expr)).collect();
+    let FnSyntax {
+        name: _,
+        name_span: _,
+        params,
+        result,
+        contracts,
+        body: _,
+        tree: t,
+    } = f;
+    let params: Vec<String> = params
+        .iter()
+        .map(|p| {
+            let Param {
+                is_mut,
+                name,
+                name_span: _,
+                ty,
+            } = p;
+            let mode = if *is_mut { "mut " } else { "" };
+            format!("{}{}: {}", mode, name, t.render_type(*ty))
+        })
+        .collect();
+    let clauses: Vec<String> = contracts
+        .iter()
+        .map(|c| {
+            let Contract { kind, expr } = c;
+            let kind = match kind {
+                ContractKind::Requires => "requires",
+                ContractKind::Ensures => "ensures",
+                ContractKind::Decreases => "decreases",
+            };
+            format!("({} {})", kind, t.render_expr(*expr))
+        })
+        .collect();
     format!(
         "({}) {} ({})",
-        params.join(" "),
-        f.result.map_or(String::new(), |r| t.render_type(r)),
+        params.join(", "),
+        result.map_or(String::new(), |r| t.render_type(r)),
         clauses.join(" ")
     )
 }
@@ -9421,7 +9456,33 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
             .remove(0)
             .syntax
             .unwrap();
-        assert_eq!(header(&f), "(u8[0..3] [2]bool) u8 ((> x 0) (< result 9))");
+        assert_eq!(
+            header(&f),
+            "(mut x: u8[0..3], ys: [2]bool) u8 ((requires (> x 0)) (ensures (< result 9)))"
+        );
+        // Each part a caller reads changes it, a clause's kind with its text unchanged among them.
+        let of = |src: &str| {
+            let text = module(src);
+            let m = mente_syntax::parse_module(&text).unwrap();
+            header(
+                &mente_syntax::parse_bodies(&text, &m)
+                    .remove(0)
+                    .syntax
+                    .unwrap(),
+            )
+        };
+        let base = "pub fn f(x: u8, y: u8) -> u8\n  requires x > 0\n= x";
+        for edit in [
+            base.replace("requires", "ensures"),
+            base.replace("requires", "decreases"),
+            base.replace("(x: u8", "(mut x: u8"),
+            base.replace("y: u8)", "z: u8)"),
+            base.replace("y: u8)", "y: u8[0..9])"),
+            base.replace("-> u8", "-> u16"),
+        ] {
+            assert_ne!(of(&edit), of(base), "{}", edit);
+        }
+        assert_eq!(of(&base.replace("= x", "= y")), of(base));
         let text = module("pub fn g() {\n}");
         let m = mente_syntax::parse_module(&text).unwrap();
         let g = mente_syntax::parse_bodies(&text, &m)
