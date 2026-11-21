@@ -6,8 +6,9 @@
 //
 // It is a reading aid, not the wall: it reads the command's text, split into simple commands by a
 // small tokenizer of bash and PowerShell, and refuses the common forms. The wall is cargo's runner
-// on the laptop, which runs every test binary cargo starts under the limits however cargo was
-// started (tools/capped.mjs; the review of 8f03074). Comments, heredoc bodies, here-strings and
+// on the laptop, tools/capped.mjs, which runs every test binary cargo starts under the limits
+// however cargo was started, and which the tools refuse to run without (requireRunner in
+// tools/local-limits.mjs; the review of 8f03074). Comments, heredoc bodies, here-strings and
 // quoted text are no command to it, and a cargo command it does not know as harmless is refused.
 // The workflow policy loads it and tests it, so this module starts no process and reads nothing.
 

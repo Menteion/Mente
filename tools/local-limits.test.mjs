@@ -186,6 +186,53 @@ test("when a parent that is not node ends, the wrapper ends the command too", { 
   assert.ok(gone, "the command outlived the PowerShell that started its wrapper by 10 s");
 });
 
+test("the tools refuse to run until cargo's runner is the capped one, and name the lines to add", { skip }, () => {
+  // The review of round 4: CLAUDE.md called cargo's runner the wall, which nothing set or checked.
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "cargo-home-"));
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER"));
+  const cargo = () => spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home }, encoding: "utf8", timeout: 60000 });
+  const none = cargo();
+  assert.equal(none.status, 2, `${none.stdout}${none.stderr}`);
+  assert.match(none.stderr, /\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*\/tools\/capped\.mjs", "--mente-only", "--"\]/);
+  assert.ok(none.stderr.includes(path.join(home, "config.toml")), none.stderr);
+  for (const [runner, what] of [
+    ['["node", "C:/nowhere/tools/capped.mjs", "--mente-only", "--"]', "a capped.mjs that does not exist"],
+    ['["node", "' + path.join(HERE, "capped.mjs").replace(/\\/g, "/") + '", "--"]', "no --mente-only"],
+    ['"wine"', "another runner"],
+  ]) {
+    fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ${runner}\n`);
+    assert.equal(cargo().status, 2, `the tools ran with ${what}`);
+  }
+  // The capped runner, but for another target: cargo would not use it here.
+  fs.writeFileSync(path.join(home, "config.toml"), `[target.aarch64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
+  assert.equal(cargo().status, 2, "the tools ran with the capped runner set for another target");
+  fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
+  const held = cargo();
+  assert.equal(held.status, 0, `${held.stdout}${held.stderr}`);
+  assert.match(held.stdout, /^cargo \d/);
+  // The variable cargo reads before every file: the capped runner by it alone is held, and another
+  // runner by it is refused whatever the file says, as cargo would run that one.
+  const variable = (value, config) => {
+    fs.writeFileSync(path.join(home, "config.toml"), config);
+    return spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home, CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: value }, encoding: "utf8", timeout: 60000 }).status;
+  };
+  const capped = `node ${path.join(HERE, "capped.mjs").replace(/\\/g, "/")} --mente-only --`;
+  assert.equal(variable(capped, ""), 0, "the capped runner set by CARGO_TARGET_..._RUNNER was refused");
+  const good = `[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`;
+  assert.equal(variable("wine", good), 2, "another runner set by CARGO_TARGET_..._RUNNER passed over a capped one in the file");
+});
+
+test("the hook's command refuses when the guard cannot load", () => {
+  // The review of round 4: a guard that fails to load exits 1, which Claude Code lets pass.
+  const command = JSON.parse(fs.readFileSync(path.join(ROOT, ".claude", "settings.json"), "utf8")).hooks.PreToolUse[0].hooks[0].command;
+  const nowhere = fs.mkdtempSync(path.join(os.tmpdir(), "no-guard-"));
+  const run = (dir, input) => spawnSync("bash", ["-c", command], { env: { ...process.env, CLAUDE_PROJECT_DIR: dir.replace(/\\/g, "/") }, input, encoding: "utf8", timeout: 30000 });
+  const event = JSON.stringify({ tool_input: { command: "node tools/cargo.mjs test" } });
+  assert.equal(run(nowhere, event).status, 2, "a guard that cannot load let the command through");
+  assert.equal(run(ROOT, event).status, 0, "the guard refused a capped command");
+  assert.equal(run(ROOT, JSON.stringify({ tool_input: { command: "cargo test" } })).status, 2, "the guard let a raw cargo test through");
+});
+
 test("a run longer than the ceiling of minutes is refused before it starts", { skip }, () => {
   const r = spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--minutes", "61", "--version"], { cwd: ROOT, encoding: "utf8", timeout: 60000 });
   assert.equal(r.status, 2, `${r.stdout}${r.stderr}`);

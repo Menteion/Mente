@@ -3806,6 +3806,8 @@ const holds = (toks, seq) => toks.some((t, i) => seq.every((v, k) => toks[i + k]
 /// - capped.ps1 reads its call from MENTE_CAPPED alone, and starts the command only through the job
 ///   object's Run, after Confine;
 /// - mn.mjs and cargo.mjs hold their slot from before their first run to after their last;
+/// - quick.mjs, cargo.mjs and mn.mjs require cargo's runner to be tools/capped.mjs before they take
+///   a slot, as local-limits.mjs's requireRunner reads it (the review of round 4);
 /// - the quick map runs the proofs for a change to any file of LOCAL_LIMITS.
 export function localLimitsProblems({ quick, limits, capped, mn, cargo, map }) {
   const problems = [];
@@ -3867,6 +3869,16 @@ export function localLimitsProblems({ quick, limits, capped, mn, cargo, map }) {
   if (/Start-Process|Diagnostics\.Process\]::Start|Invoke-Expression|\biex\b|&\s*\$|pwsh/i.test(code)) problems.push("tools/capped.ps1 starts a process outside the job object's Run");
   if (!code.includes("$env:MENTE_CAPPED") || /\$args\b/i.test(code)) problems.push("tools/capped.ps1 reads its call from somewhere other than MENTE_CAPPED");
 
+  for (const [file, text] of [["tools/quick.mjs", quick], ["tools/mn.mjs", mn], ["tools/cargo.mjs", cargo]]) {
+    const t = jsTokens(text);
+    const first = (name) => t.findIndex((x, i) => x.t === "id" && x.v === name && t[i + 1]?.v === "(" && t[i - 1]?.v !== ".");
+    const required = first("requireRunner");
+    if (required < 0 || required > first("acquireSlot")) problems.push(`${file} does not require cargo's runner before it takes a slot`);
+  }
+  for (const s of ["capped.mjs", "x86_64-pc-windows-msvc", "config.toml"]) if (!strings.has(s)) problems.push(`tools/local-limits.mjs does not name ${s} in the runner it requires`);
+  // The line it tells the laptop to add, and what it takes for that runner, both with --mente-only.
+  if (!/^export const runnerLine = [^\n]*"capped\.mjs"[^\n]*, "--mente-only", "--"\]`;$/m.test(limits)) problems.push("tools/local-limits.mjs tells the laptop to add a runner line other than tools/capped.mjs --mente-only --");
+  if (!holds(l, ["words", "[", "2", "]", "=", "=", "=", "--mente-only"]) || !holds(l, ["words", "[", "3", "]", "=", "=", "=", "--"])) problems.push("tools/local-limits.mjs takes a runner without --mente-only -- for the capped one");
   for (const [file, text] of [["tools/mn.mjs", mn], ["tools/cargo.mjs", cargo]]) {
     const t = jsTokens(text);
     const calls = (name, dotted) => t.map((x, i) => (x.t === "id" && x.v === name && t[i + 1]?.v === "(" && (t[i - 1]?.v === ".") === dotted ? i : -1)).filter((i) => i >= 0);
@@ -3899,7 +3911,7 @@ check("the quick checks run every command in one of the machine's build slots, u
     ["quick", "  results.push([check.name, runCapped(check.run, BUILD) === 0]);", "  results.push([check.name, runCapped(check.run, { processGB: 64, jobGB: 64, minutes: 600 }) === 0]);", "other limits"],
     ["quick", "const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);", "const slot = { release() {} };", "no slot"],
     ["quick", 'execFileSync("git", args', 'execFileSync("cargo", args', "execFileSync on cargo"],
-    ["quick", 'import { BUILD, acquireSlot, runCapped } from "./local-limits.mjs";', 'import { BUILD, acquireSlot, runCapped } from "./local-limits.mjs";\nimport { run } from "./other.mjs";', "another module"],
+    ["quick", 'import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";', 'import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";\nimport { run } from "./other.mjs";', "another module"],
     ["limits", "export const SLOTS = 2;", "export const SLOTS = 4;", "four slots"],
     ["limits", "export const BUILD = Object.freeze({ processGB: 8,", "export const BUILD = Object.freeze({ processGB: 64,", "64 GB a process"],
     ["limits", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 80, minutes: 5 });", "80 GB a probe's tree"],
@@ -3916,6 +3928,10 @@ check("the quick checks run every command in one of the machine's build slots, u
     ["capped", "  $call = $env:MENTE_CAPPED | ConvertFrom-Json", "  $call = $args | ConvertFrom-Json", "the call from its arguments"],
     ["mn", 'let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });', 'let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });\nslot.release();', "the probe's slot let go before its run"],
     ["cargo", 'const slot = acquireSlot(`cargo ${args.join(" ")}`);', "const slot = { release() {} };", "cargo with no slot"],
+    ["quick", "if (!requireRunner()) process.exit(2);\n", "", "quick.mjs with no runner required"],
+    ["cargo", "if (!requireRunner()) process.exit(2);\n", "", "cargo.mjs with no runner required"],
+    ["mn", "if (!requireRunner()) process.exit(2);\n", "", "mn.mjs with no runner required"],
+    ["limits", '"--mente-only", "--"]`;', '"--"]`;', "a runner line without --mente-only"],
   ];
   for (const [part, from, to, what] of plants) {
     assert.equal(texts[part].split(from).length, 2, `the plant "${what}" finds no place in ${part}`);
@@ -3927,7 +3943,8 @@ check("the quick checks run every command in one of the machine's build slots, u
 
 /// The project's settings, and the command they run the guard by.
 const GUARD_SETTINGS = ".claude/settings.json";
-const GUARD_COMMAND = 'node "$CLAUDE_PROJECT_DIR/tools/raw-build-guard.mjs"';
+// `|| exit 2`: a guard that fails to load exits 1, which Claude Code lets pass; this refuses.
+const GUARD_COMMAND = 'node "$CLAUDE_PROJECT_DIR/tools/raw-build-guard.mjs" || exit 2';
 
 /// What keeps `settings`, the project's Claude Code settings as parsed, from running the guard
 /// before every Bash and PowerShell command: a PreToolUse hook whose matcher takes both tools'

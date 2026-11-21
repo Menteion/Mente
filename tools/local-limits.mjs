@@ -126,6 +126,93 @@ export function runCapped(run, limits, { cwd, menteOnly = false } = {}) {
   return r.status ?? 1;
 }
 
+/// The target cargo builds for on the laptop, whose runner the tools require.
+export const RUNNER_TARGET = "x86_64-pc-windows-msvc";
+
+/// The main checkout of this repository, whose tools/capped.mjs cargo's runner names: the directory
+/// a worktree's .git file points into, or `root` itself.
+export function mainCheckout(root = path.resolve(HERE, "..")) {
+  try {
+    const dotgit = path.join(root, ".git");
+    if (fs.statSync(dotgit).isFile()) {
+      const at = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotgit, "utf8"))?.[1];
+      const main = at ? path.resolve(root, at).replace(/[\\/]\.git[\\/]worktrees[\\/][^\\/]+$/, "") : null;
+      if (main && main !== path.resolve(root, at)) return main;
+    }
+  } catch {
+    // A checkout whose .git cannot be read is taken as the main one.
+  }
+  return root;
+}
+
+/// The line cargo's configuration needs under [target.<RUNNER_TARGET>].
+export const runnerLine = (main = mainCheckout()) => `runner = ["node", ${JSON.stringify(path.join(main, "tools", "capped.mjs").replace(/\\/g, "/"))}, "--mente-only", "--"]`;
+
+/// The runner a configuration file's text names for RUNNER_TARGET, its words, or null: under the
+/// table [target.<RUNNER_TARGET>], or as the dotted key before any table.
+export function runnerIn(text) {
+  let table = "";
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.replace(/^\s+|\s+$/g, "");
+    const header = /^\[\s*([^\]]+?)\s*\]$/.exec(line);
+    if (header) {
+      table = header[1].replace(/["']/g, "");
+      continue;
+    }
+    const key = /^([A-Za-z0-9_.\-"']+)\s*=\s*(.+)$/.exec(line);
+    if (!key) continue;
+    const name = `${table ? `${table}.` : ""}${key[1].replace(/["']/g, "")}`;
+    if (name !== `target.${RUNNER_TARGET}.runner`) continue;
+    const value = key[2].replace(/\s+#.*$/, "");
+    try {
+      const parsed = JSON.parse(value.replace(/'([^']*)'/g, (_, s) => JSON.stringify(s)));
+      return Array.isArray(parsed) ? parsed.map(String) : String(parsed).trim().split(/\s+/);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/// The runner cargo uses for RUNNER_TARGET from `cwd`: CARGO_TARGET_<TARGET>_RUNNER, or the first
+/// configuration file that names one, as cargo reads them, from `cwd` up and then CARGO_HOME.
+export function cargoRunner(cwd = process.cwd(), env = process.env) {
+  const variable = env[`CARGO_TARGET_${RUNNER_TARGET.toUpperCase().replace(/-/g, "_")}_RUNNER`];
+  if (variable) return variable.trim().split(/\s+/);
+  const files = [];
+  for (let at = path.resolve(cwd); ; at = path.dirname(at)) {
+    files.push(path.join(at, ".cargo", "config.toml"), path.join(at, ".cargo", "config"));
+    if (path.dirname(at) === at) break;
+  }
+  const home = env.CARGO_HOME || path.join(os.homedir(), ".cargo");
+  files.push(path.join(home, "config.toml"), path.join(home, "config"));
+  for (const file of files) {
+    let text;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const words = runnerIn(text);
+    if (words) return words;
+  }
+  return null;
+}
+
+/// Whether cargo, on this laptop, runs every test binary and program it starts through
+/// tools/capped.mjs, however it was started: the tools refuse to run until it does, and say which
+/// lines to add where (the review of round 4: CLAUDE.md claimed a runner nothing set or checked).
+/// Off Windows, where no job object bounds anything, it holds.
+export function requireRunner({ cwd = process.cwd(), env = process.env, say = (line) => console.error(line) } = {}) {
+  if (!WINDOWS) return true;
+  const words = cargoRunner(cwd, env);
+  const held = Array.isArray(words) && words.length === 4 && /^node(\.exe)?$/i.test(path.basename(words[0])) && /[\\/]tools[\\/]capped\.mjs$/.test(words[1]) && fs.existsSync(words[1]) && words[2] === "--mente-only" && words[3] === "--";
+  if (held) return true;
+  const home = env.CARGO_HOME || path.join(os.homedir(), ".cargo");
+  say(`local-limits: cargo's runner on this laptop is ${words ? JSON.stringify(words) : "not set"}, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Add these two lines to ${path.join(home, "config.toml")}:\n\n[target.${RUNNER_TARGET}]\n${runnerLine()}\n`);
+  return false;
+}
+
 /// The most minutes `--minutes` may give a run.
 export const MAX_MINUTES = 60;
 

@@ -21,7 +21,7 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { BUILD, acquireSlot, runCapped } from "./local-limits.mjs";
+import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";
 
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).split(/\r?\n/).filter(Boolean);
 
@@ -62,6 +62,7 @@ if (process.argv.includes("--list")) {
   for (const check of due) console.log(`  ${check.name}: ${check.run.join(" ")}`);
   process.exit(0);
 }
+if (!requireRunner()) process.exit(2);
 const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);
 const results = [];
 for (const check of due) {
