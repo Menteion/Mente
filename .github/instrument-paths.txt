@@ -77,6 +77,8 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .github/workflows/fuzz.yml
+# The summary of its run, every part capped.
+.github/scripts/fuzz-summary.mjs
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
