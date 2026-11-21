@@ -91,7 +91,7 @@ date: 2026-11-04
 3. `Specified` **RVSDG canonicalization and Equality Saturation (`E-Graphs`)**:
    - A rewrite pass performs non-destructive algebraic rewrites directly over the `SoA` arrays (e.g., folding identity additions while preserving `ValueLattice` bounds), avoiding phase-ordering cliffs. Neither RVSDG structure nor an e-graph exists yet.
 4. **In-memory `MIR` mutation prover**:
-   - `Implemented`: `run_in_memory_mutation_gate` flips `Add` ↔ `Sub`, `AddSatQ16` ↔ `SubSatQ16` and `CmpGe` ↔ `CmpLt`, swaps the arms of each `SelectBranchless`, and counts the mutants that the supplied `(inputs, expected)` vectors kill. `mn test --mutate` runs it on one hand-written region with two vectors.
+   - `Implemented`: `run_in_memory_mutation_gate` turns `Add` and `Sub`, `AddSatQ16` and `SubSatQ16`, and `CmpGe` and `CmpLt` into each other, swaps the arms of each `SelectBranchless`, and counts the mutants that the supplied `(inputs, expected)` vectors kill. `mn test --mutate` runs it on one hand-written region with two vectors.
      <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_mutation_gate_counts_survivors" min="1" reason="The gate counts each mutant and the ones the vectors kill" -->
      <!-- @assert-count target="compiler/mente-mir/src/lib.rs" symbol="fn test_branchless_integrate_cell_mir_and_mutation_prover" min="1" reason="The demo region's four mutants are all killed" -->
      <!-- @assert-count target="compiler/mente-cli/tests/cli.rs" symbol="fn test_mn_test_mutate_runs_the_demo_gate" min="1" reason="mn test --mutate runs the gate on the demo region" -->

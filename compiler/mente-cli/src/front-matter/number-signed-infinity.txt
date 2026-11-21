@@ -1,0 +1,8 @@
+fields date area note
+expect refused
+input
+---
+date: 2026-11-14
+area: checker
+note: +.INF
+---
