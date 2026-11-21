@@ -458,11 +458,11 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 }
 
 /// The minimized failures whose fixes have not landed yet, which still fail on the edit seed
-/// their records name (`test_fuzz_pending_regressions_still_fail`): the three incremental
-/// failures of the nightly runs of 2026-11-15 and 2026-11-17, root causes 4, 5 and 7 of the
-/// triage of 2026-11-21. A fix removes its file's name here, and the file joins the main test.
-const PENDING: [&str; 3] = [
-    "incremental-clause-kind-changed-by-an-edit.mn",
+/// their records name (`test_fuzz_pending_regressions_still_fail`): the incremental failures of
+/// the nightly run of 2026-11-15, root causes 4 and 5 of the triage of 2026-11-21. A fix removes
+/// its file's name here, and the file joins the main test, as root cause 7's did with pull
+/// request 186.
+const PENDING: [&str; 2] = [
     "incremental-layout-byte-range-past-usize.mn",
     "incremental-struct-cycle-made-by-an-edit.mn",
 ];
