@@ -1013,10 +1013,12 @@ check("the fuzz summary stays under GitHub's limit for a step's summary, reads b
     const out = path.join(dir, "fuzz-out");
     fs.mkdirSync(out);
     const put = (name, text, input) => {
-      fs.writeFileSync(path.join(out, `${name}.txt`), text);
+      fs.writeFileSync(path.join(out, `${name}.found`), text);
       fs.writeFileSync(path.join(out, `${name}.mn`), input);
     };
     fs.writeFileSync(path.join(out, "summary.txt"), "runs: 1234\nfailures: 306\n");
+    // A text file beside the records, sorted first, is no failure: a record is `<name>.found`.
+    fs.writeFileSync(path.join(out, "00notes.txt"), "not a record\n");
     put("0small", "a crash of mn check\n", "fn main() -> i32 {\n  0\n}\n");
     const big = 3 * 1024 * 1024;
     put("1big", "the interpreter and native code disagree\n", "x".repeat(big));
@@ -1033,7 +1035,8 @@ check("the fuzz summary stays under GitHub's limit for a step's summary, reads b
     const text = r.stdout.toString("utf8");
     assert.ok(bytes < 600 * 1024, `the summary is ${bytes} bytes, past its own cap and one part (GitHub's is 1024k)`);
     assert.ok(text.startsWith("## mn fuzz --seed 1\n~~~~~~~~text\nruns: 1234\nfailures: 306\n~~~~~~~~\n"), text.slice(0, 200));
-    assert.ok(text.includes("### 0small.txt\n~~~~~~~~text\na crash of mn check\n~~~~~~~~\nminimized input:\n~~~~~~~~text\nfn main() -> i32 {\n  0\n}\n~~~~~~~~\n"), "the small failure is not shown whole, or is said to be cut");
+    assert.ok(!text.includes("00notes.txt") && !text.includes("### summary"), "a file that is no record was shown as a failure");
+    assert.ok(text.includes("### 0small.found\n~~~~~~~~text\na crash of mn check\n~~~~~~~~\nminimized input:\n~~~~~~~~text\nfn main() -> i32 {\n  0\n}\n~~~~~~~~\n"), "the small failure is not shown whole, or is said to be cut");
     assert.ok(text.includes(`--- cut here: ${big - 4096} of its ${big} bytes are past 40 lines or 4096 bytes, and in the run's artifact`), "the 3 MB input's cut is not said");
     // A character the cap would split is left out whole, and its two bytes counted.
     assert.ok(text.includes(`${"x".repeat(4095)}\n--- cut here: 2 of its 4097 bytes`), "a character was split at the cut, or its bytes miscounted");

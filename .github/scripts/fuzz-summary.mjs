@@ -108,7 +108,7 @@ const summary = path.join(out, "summary.txt");
 if (fs.existsSync(summary)) show(summary);
 else say(`no summary: mn fuzz exited with ${status}`);
 const failures = (fs.existsSync(out) ? fs.readdirSync(out) : [])
-  .filter((f) => f.endsWith(".txt") && f !== "summary.txt" && fs.statSync(path.join(out, f)).isFile())
+  .filter((f) => f.endsWith(".found") && fs.statSync(path.join(out, f)).isFile())
   .sort();
 for (const [k, f] of failures.entries()) {
   if (say.written() >= TOTAL_BYTES) {
@@ -118,7 +118,7 @@ for (const [k, f] of failures.entries()) {
   say(`### ${f}`);
   show(path.join(out, f));
   say("minimized input:");
-  const input = path.join(out, f.replace(/\.txt$/, ".mn"));
+  const input = path.join(out, f.replace(/\.found$/, ".mn"));
   if (fs.existsSync(input)) show(input);
   else say("(none)");
 }

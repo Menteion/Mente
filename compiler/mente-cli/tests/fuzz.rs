@@ -1,8 +1,9 @@
 //! `mn fuzz` end to end: the worker process isolates a planted panic, stack overflow and hang,
 //! and the fuzzer classifies, minimizes and writes each one; and every crash the fuzzer found,
 //! minimized under `tests/fuzz`, replays through every phase without a failure once its fix
-//! lands. A file whose fix has not landed is listed in `PENDING` and replayed by its own
-//! ignored test, so that the main test stays green and each fix turns one test on.
+//! lands, on the edit seed its record names. A file whose fix has not landed is listed in
+//! `PENDING` and must still fail, so that the main test stays green and each fix moves its file
+//! into it.
 
 // These helpers are test code: a failed setup step is a failed test.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -38,8 +39,7 @@ fn the_failure(out: &Path) -> (String, String) {
         .unwrap()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "txt"))
-        .filter(|p| p.file_name().is_some_and(|n| n != "summary.txt"))
+        .filter(|p| p.extension().is_some_and(|x| x == "found"))
         .collect();
     assert_eq!(
         about.len(),
@@ -275,6 +275,121 @@ fn test_fuzz_replay_reports_each_failure_once() {
     let _ = fs::remove_dir_all(&dir);
 }
 
+/// A found failure replays on the edit seed its record names, and on it alone: the planted
+/// failure `edit` fires only on edit seed 4242424242, which the edits 0 to 3 of a file with no
+/// record, or of a record whose seed is lost, never meet.
+#[test]
+fn test_fuzz_replay_takes_the_recorded_edit_seed() {
+    let dir = scratch("replay-edit");
+    let seeds = dir.join("seeds");
+    let found = seeds.join("found.mn");
+    fs::write(&found, "module m\n// fuzz-plant\n").unwrap();
+    let replay = || {
+        let run = mn(&["fuzz", "--replay", found.to_str().unwrap()], Some("edit"));
+        (run.status.code(), text(&run.stdout), text(&run.stderr))
+    };
+    fs::write(
+        seeds.join("found.found"),
+        "mn fuzz found\nphase: planted\nedit seed: 4242424242\n",
+    )
+    .unwrap();
+    let (code, printed, stderr) = replay();
+    assert_eq!(code, Some(1), "{}{}", printed, stderr);
+    assert!(
+        printed.contains("found.mn: replayed on its recorded edit seed 4242424242"),
+        "{}",
+        printed
+    );
+    assert_eq!(
+        printed
+            .matches("found.mn: panic in planted: a planted panic on edit seed 4242424242 [at ")
+            .count(),
+        1,
+        "{}",
+        printed
+    );
+    // The same input with no record, or with its seed lost, replays on the edits 0 to 3.
+    fs::write(
+        seeds.join("found.found"),
+        "mn fuzz found\nphase: planted\nedit seed: unknown\n",
+    )
+    .unwrap();
+    let (code, printed, stderr) = replay();
+    assert_eq!(code, Some(0), "{}{}", printed, stderr);
+    assert!(
+        printed.contains(
+            "found.mn: its record names no edit seed, so it is replayed on the edits 0 to 3"
+        ),
+        "{}",
+        printed
+    );
+    fs::remove_file(seeds.join("found.found")).unwrap();
+    let (code, printed, stderr) = replay();
+    assert_eq!(code, Some(0), "{}{}", printed, stderr);
+    assert!(
+        printed.contains("1 file(s), 0 with a failure, 0 with a bad record"),
+        "{}",
+        printed
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// A bad record is reported, with what to write, and its file left out, while every other file
+/// of the replay runs; the exit shows a failure and a bad record apart, and both together.
+#[test]
+fn test_fuzz_replay_goes_on_past_a_bad_record() {
+    let dir = scratch("replay-bad");
+    let seeds = dir.join("seeds");
+    fs::write(seeds.join("a.mn"), "module m\n// fuzz-plant\n").unwrap();
+    fs::write(
+        seeds.join("a.found"),
+        "mn fuzz found\nedit seed: 4242424242\n",
+    )
+    .unwrap();
+    fs::write(seeds.join("b.mn"), "module m\n// fuzz-plant\n").unwrap();
+    fs::write(seeds.join("c.mn"), "module m\npub fn f() -> u8 = 7\n").unwrap();
+    let replay = |b: &str| {
+        fs::write(seeds.join("b.found"), b).unwrap();
+        let run = mn(&["fuzz", "--replay", seeds.to_str().unwrap()], Some("edit"));
+        (run.status.code(), text(&run.stdout))
+    };
+    let (code, printed) = replay("mn fuzz found\nedit seed: -1\n");
+    assert_eq!(code, Some(3), "{}", printed);
+    assert!(
+        printed.contains("a.mn: panic in planted: a planted panic on edit seed 4242424242"),
+        "{}",
+        printed
+    );
+    assert!(
+        printed.contains("bad record: ")
+            && printed.contains("b.found: the edit seed `-1` is not a decimal number from 0 to 18446744073709551615; write the seed as mn fuzz wrote it, or `unknown` where it is lost"),
+        "{}",
+        printed
+    );
+    assert!(
+        printed.contains("3 file(s), 1 with a failure, 1 with a bad record"),
+        "{}",
+        printed
+    );
+    // A bad record alone, and a failure alone.
+    fs::remove_file(seeds.join("a.found")).unwrap();
+    let (code, printed) = replay("mn fuzz found\nphase: planted\n");
+    assert_eq!(code, Some(2), "{}", printed);
+    assert!(
+        printed.contains("b.found: no `edit seed:` field"),
+        "{}",
+        printed
+    );
+    let (code, printed) = replay("mn fuzz found\nedit seed: 4242424242\n");
+    assert_eq!(code, Some(1), "{}", printed);
+    assert!(
+        printed.contains("3 file(s), 1 with a failure, 0 with a bad record"),
+        "{}",
+        printed
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
 /// Jobs share the runs and the seeds, a campaign without runs goes on for its seconds, and a
 /// corpus without seeds is a usage error.
 #[test]
@@ -342,10 +457,15 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-/// The minimized crashes whose fixes have not landed yet, each replayed by its own ignored
-/// test below. A fix removes its file's name here and its test, and the file joins the main
-/// test.
-const PENDING: [&str; 0] = [];
+/// The minimized failures whose fixes have not landed yet, which still fail on the edit seed
+/// their records name (`test_fuzz_pending_regressions_still_fail`): the incremental failures of
+/// the nightly run of 2026-11-15, root causes 4 and 5 of the triage of 2026-11-21. A fix removes
+/// its file's name here, and the file joins the main test, as root cause 7's did with pull
+/// request 186.
+const PENDING: [&str; 2] = [
+    "incremental-layout-byte-range-past-usize.mn",
+    "incremental-struct-cycle-made-by-an-edit.mn",
+];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -372,13 +492,37 @@ fn replay(files: &[PathBuf]) {
     );
 }
 
-/// Every minimized crash in `tests/fuzz` whose fix has landed replays without a failure.
+/// Every minimized crash in `tests/fuzz` whose fix has landed replays without a failure. A
+/// regression of the incremental phase, whose failure depends on the edit it was found with,
+/// carries its record, `<name>.found`, which names that edit seed, or `unknown` where it was
+/// lost; any other file there is a regression or a record of one.
 #[test]
 fn test_fuzz_regressions_replay_without_a_failure() {
     let mut files = Vec::new();
     for entry in fs::read_dir(regressions()).unwrap().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        assert!(name.ends_with(".mn"), "{} is not a .mn file", name);
+        if let Some(stem) = name.strip_suffix(".found") {
+            assert!(
+                regressions().join(format!("{}.mn", stem)).is_file(),
+                "{} is the record of no regression: remove it, or add the regression it records",
+                name
+            );
+            continue;
+        }
+        assert!(
+            name.ends_with(".mn"),
+            "{} is neither a regression, a .mn file, nor the record of one, a .found file",
+            name
+        );
+        if name.starts_with("incremental-") {
+            let record = format!("{}.found", name.trim_end_matches(".mn"));
+            assert!(
+                regressions().join(&record).is_file(),
+                "{} has no record: write {} as mn fuzz wrote it, with the edit seed the failure was found with, or `edit seed: unknown` where it is lost",
+                name,
+                record
+            );
+        }
         if !PENDING.contains(&name.as_str()) {
             files.push(entry.path());
         }
@@ -391,6 +535,31 @@ fn test_fuzz_regressions_replay_without_a_failure() {
         );
     }
     replay(&files);
+}
+
+/// Each pending regression still fails, on the edit seed its record names: its record
+/// reproduces it, and the fix that lands makes this test fail until the file leaves `PENDING`.
+#[test]
+fn test_fuzz_pending_regressions_still_fail() {
+    for name in PENDING {
+        let file = regressions().join(name);
+        let run = mn(&["fuzz", "--replay", file.to_str().unwrap()], None);
+        let printed = text(&run.stdout);
+        assert_eq!(
+            run.status.code(),
+            Some(1),
+            "{} replays without a failure: its fix has landed, so remove it from PENDING\n{}{}",
+            name,
+            printed,
+            text(&run.stderr)
+        );
+        assert!(
+            printed.contains(": replayed on its recorded edit seed ")
+                && printed.contains(" in incremental: "),
+            "{}",
+            printed
+        );
+    }
 }
 
 /// Found by `mn fuzz`: an array type of 2^32 elements or more checked, but did not lower ("an

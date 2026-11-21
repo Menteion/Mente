@@ -93,6 +93,10 @@ const REFERENCE_ARRAY: u128 = 256;
 /// The text a planted failure waits for (`MENTE_FUZZ_PLANT`).
 pub const PLANT_MARK: &str = "fuzz-plant";
 
+/// The one edit seed the planted failure `MENTE_FUZZ_PLANT=edit` waits for, beside the mark:
+/// outside the edits 0 to 3 a file with no record replays on, so that only its own seed meets it.
+pub const PLANT_EDIT: u64 = 4_242_424_242;
+
 /// The directories of the seed corpus, from the repository's root.
 const SEED_DIRS: [&str; 6] = [
     "examples",
@@ -972,8 +976,9 @@ pub struct Phases {
     pub stack: usize,
     /// Whether a module that checks gets an object for each target.
     pub objects: bool,
-    /// A phase of the fuzzer's own tests, run right after the lexer.
-    pub plant: Option<fn(&str)>,
+    /// A phase of the fuzzer's own tests, run right after the lexer, on the input and its edit
+    /// seed.
+    pub plant: Option<fn(&str, u64)>,
 }
 
 impl Default for Phases {
@@ -1084,7 +1089,7 @@ impl Phases {
     fn all(&self, src: &str, edit: u64, run: &mut Run) {
         run.phase("lex", || mente_syntax::lex(src));
         if let Some(plant) = self.plant {
-            run.phase("planted", || plant(src));
+            run.phase("planted", || plant(src, edit));
         }
         run.stable("dump-tokens", || mente_syntax::dump_tokens(src));
         run.phase("split-items", || mente_syntax::split_items(src));
@@ -1660,22 +1665,30 @@ fn last_panic() -> String {
 }
 
 /// The planted failures `MENTE_FUZZ_PLANT` names.
-fn plant_from_env() -> Option<fn(&str)> {
+fn plant_from_env() -> Option<fn(&str, u64)> {
     match std::env::var("MENTE_FUZZ_PLANT").ok()?.as_str() {
         "panic" => Some(plant_panic),
+        "edit" => Some(plant_edit),
         "overflow" => Some(plant_overflow),
         "hang" => Some(plant_hang),
         _ => None,
     }
 }
 
-fn plant_panic(src: &str) {
+fn plant_panic(src: &str, _edit: u64) {
     if src.contains(PLANT_MARK) {
         panic!("a planted panic");
     }
 }
 
-fn plant_overflow(src: &str) {
+/// A panic on the mark under one edit seed alone, [`PLANT_EDIT`].
+fn plant_edit(src: &str, edit: u64) {
+    if src.contains(PLANT_MARK) && edit == PLANT_EDIT {
+        panic!("a planted panic on edit seed {}", edit);
+    }
+}
+
+fn plant_overflow(src: &str, _edit: u64) {
     if src.contains(PLANT_MARK) {
         std::hint::black_box(descend([0; 64]));
     }
@@ -1690,7 +1703,7 @@ fn descend(frame: [u64; 64]) -> u64 {
     descend(frame).wrapping_add(frame[1])
 }
 
-fn plant_hang(src: &str) {
+fn plant_hang(src: &str, _edit: u64) {
     if src.contains(PLANT_MARK) {
         loop {
             std::thread::sleep(Duration::from_millis(50));
@@ -2346,32 +2359,107 @@ fn slug(failure: &Failure) -> String {
     format!("{}-{}-{:08x}", phase, failure.kind.name(), hash)
 }
 
-/// Writes a failure's minimized input, its description and its original input to `out`.
+/// The extension of a failure's record, `<name>.found` beside `<name>.mn` and
+/// `<name>.orig.mn`: a name no other file of a corpus or a campaign's output takes.
+const RECORD: &str = "found";
+
+/// A record's first line, which tells it from any other text.
+const RECORD_HEAD: &str = "mn fuzz found";
+
+/// The field of a record that names the edit seed its failure was found with, which
+/// [`replay_edits`] reads back: the incremental phase edits its input by that seed alone. Its
+/// value is a decimal `u64`, or [`UNKNOWN`] for a failure found before records named it.
+const EDIT_SEED: &str = "edit seed:";
+
+/// The edit seed of a record that cannot name it.
+const UNKNOWN: &str = "unknown";
+
+/// A record's text on one line: `\\` for a backslash, `\n` and `\r` for line breaks.
+fn escaped(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
+/// Whether `text` names a commit as a record writes it: 40 hexadecimal digits.
+fn is_commit(text: &str) -> bool {
+    text.len() == 40 && text.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The commit the compiler was built from, as far as this process can tell ([`commit_of`]):
+/// the runner's `GITHUB_SHA`, or the commit git names in the directory of the running `mn`.
+fn compiler_commit() -> String {
+    let dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf));
+    let git = dir.and_then(|d| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .map(|o| (o.status.success(), o.stdout))
+    });
+    commit_of(std::env::var("GITHUB_SHA").ok(), git)
+}
+
+/// The first of `github_sha` and git's output, when git succeeded, that names a commit
+/// ([`is_commit`]); [`UNKNOWN`] when neither does.
+fn commit_of(github_sha: Option<String>, git: Option<(bool, Vec<u8>)>) -> String {
+    if let Some(sha) = github_sha.filter(|s| is_commit(s)) {
+        return sha;
+    }
+    match git {
+        Some((true, out)) => {
+            let sha = String::from_utf8_lossy(&out).trim().to_string();
+            if is_commit(&sha) {
+                sha
+            } else {
+                UNKNOWN.to_string()
+            }
+        }
+        _ => UNKNOWN.to_string(),
+    }
+}
+
+/// A failure's record, as [`write_found`] writes it: its fixed fields one a line, the key and
+/// the message escaped onto one line each and last, so that no message can add a field.
+fn record(opts: &Options, found: &Found, name: &str, commit: &str) -> String {
+    let f = &found.failure;
+    format!(
+        "{}\nphase: {}\nkind: {}\n{} {}\nfound by: mn fuzz --seed {} --jobs {} --phase-seconds {} --stack-kib {}, job {}, run {}\ncompiler: {}\ninput: {} bytes, minimized to {} bytes\nreplay: mn fuzz --replay {}.mn\nkey: {}\nmessage: {}\n",
+        RECORD_HEAD,
+        f.phase,
+        f.kind.name(),
+        EDIT_SEED,
+        found.edit,
+        opts.seed,
+        opts.jobs,
+        opts.phases.budget.as_secs(),
+        opts.phases.stack >> 10,
+        found.job,
+        found.run,
+        commit,
+        found.original.len(),
+        found.minimized.len(),
+        name,
+        escaped(&f.key()),
+        escaped(&f.message)
+    )
+}
+
+/// Writes a failure's minimized input, its record and its original input to `out`.
 fn write_found(out: &Path, opts: &Options, found: &Found) -> Result<(), String> {
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {}", out.display(), e))?;
     let name = slug(&found.failure);
-    let f = &found.failure;
-    let about = format!(
-        "phase: {}\nkind: {}\nmessage: {}\nkey: {}\nfound by: mn fuzz --seed {} --jobs {}, job {}, run {}\nedit seed: {}\ninput: {} bytes, minimized to {} bytes\nreplay: mn fuzz --replay {}.mn\n",
-        f.phase,
-        f.kind.name(),
-        f.message,
-        f.key(),
-        opts.seed,
-        opts.jobs,
-        found.job,
-        found.run,
-        found.edit,
-        found.original.len(),
-        found.minimized.len(),
-        name
-    );
+    let about = record(opts, found, &name, &compiler_commit());
     let write = |file: String, text: &str| {
         let path = out.join(file);
         std::fs::write(&path, text).map_err(|e| format!("{}: {}", path.display(), e))
     };
     write(format!("{}.mn", name), &found.minimized)?;
-    write(format!("{}.txt", name), &about)?;
+    write(format!("{}.{}", name, RECORD), &about)?;
     if found.original.len() <= MAX_NESTED {
         write(format!("{}.orig.mn", name), &found.original)?;
     }
@@ -2586,8 +2674,114 @@ fn summary(total: &Tally, seconds: f64, restarts: usize, found: &[Found]) -> Str
     out
 }
 
-/// Runs each file under `paths` through every phase, with a few edits, and prints each
-/// failure. A file that hangs is not run again with the next edit, which would only hang too.
+/// What a record says of the edits its input replays on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Recorded {
+    /// The edit seed the failure was found with.
+    Seed(u64),
+    /// A failure found before records named its seed: the edits 0 to 3.
+    Unknown,
+}
+
+/// The record of the input at `path`, `<name>.found` beside `<name>.mn` or `<name>.orig.mn`.
+fn record_of(path: &Path) -> PathBuf {
+    let file = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name = file
+        .strip_suffix(".orig.mn")
+        .or_else(|| file.strip_suffix(".mn"))
+        .unwrap_or(&file);
+    path.with_file_name(format!("{}.{}", name, RECORD))
+}
+
+/// What the record `text` of the file `shown` says of its edits, read strictly: its first line
+/// [`RECORD_HEAD`], and one [`EDIT_SEED`] field, a decimal `u64` or [`UNKNOWN`]. Each refusal
+/// says what to write instead.
+fn read_record(shown: &str, text: &str) -> Result<Recorded, String> {
+    let mut lines = text.lines();
+    if lines.next() != Some(RECORD_HEAD) {
+        return Err(format!(
+            "{}: not a record of mn fuzz, whose first line is `{}`; write the record mn fuzz wrote, or rename a file that is no record",
+            shown, RECORD_HEAD
+        ));
+    }
+    let seeds: Vec<&str> = lines.filter_map(|l| l.strip_prefix(EDIT_SEED)).collect();
+    let value = match seeds.as_slice() {
+        [one] => one.trim(),
+        [] => {
+            return Err(format!(
+                "{}: no `{}` field; write the edit seed the failure was found with, or `{} {}` where it is lost, to replay on the edits 0 to 3",
+                shown, EDIT_SEED, EDIT_SEED, UNKNOWN
+            ))
+        }
+        many => {
+            return Err(format!(
+                "{}: `{}` is given {} times; keep the one the failure was found with",
+                shown,
+                EDIT_SEED,
+                many.len()
+            ))
+        }
+    };
+    if value == UNKNOWN {
+        return Ok(Recorded::Unknown);
+    }
+    match value.parse::<u64>() {
+        Ok(seed) if !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()) => {
+            Ok(Recorded::Seed(seed))
+        }
+        _ => Err(format!(
+            "{}: the edit seed `{}` is not a decimal number from 0 to {}; write the seed as mn fuzz wrote it, or `{}` where it is lost",
+            shown,
+            value,
+            u64::MAX,
+            UNKNOWN
+        )),
+    }
+}
+
+/// What the record beside `path` says of its edits ([`read_record`]); none for a file with no
+/// record, such as a seed of a corpus, which replays on the edits 0 to 3.
+fn replay_edits(path: &Path) -> Result<Option<Recorded>, String> {
+    let record = record_of(path);
+    if !record.is_file() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&record).map_err(|e| format!("{}: {}", record.display(), e))?;
+    read_record(&record.display().to_string(), &text).map(Some)
+}
+
+/// The edits a file replays on: its record's seed alone, or the edits 0 to 3; and the line that
+/// says why, where its record decides.
+fn edits_of(path: &Path) -> Result<(Vec<u64>, Option<String>), String> {
+    Ok(match replay_edits(path)? {
+        Some(Recorded::Seed(edit)) => (
+            vec![edit],
+            Some(format!(
+                "{}: replayed on its recorded edit seed {}",
+                path.display(),
+                edit
+            )),
+        ),
+        Some(Recorded::Unknown) => (
+            (0..4).collect(),
+            Some(format!(
+                "{}: its record names no edit seed, so it is replayed on the edits 0 to 3",
+                path.display()
+            )),
+        ),
+        None => ((0..4).collect(), None),
+    })
+}
+
+/// Runs each file under `paths` through every phase and prints each failure: a found failure on
+/// the edit seed its record gives ([`edits_of`]), any other file with the edits 0 to 3. A file
+/// that hangs is not run again with the next edit, which would only hang too. A bad record is
+/// reported and its file left out, and the rest replay. Exits 1 when a file fails, 2 when a
+/// record is bad, and 3 when both.
 fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
     let files = seed_corpus(paths);
     if files.is_empty() {
@@ -2596,9 +2790,23 @@ fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
     }
     let mut worker = Worker::new(exe.to_path_buf(), phases);
     let mut failed = 0;
+    let mut bad = 0;
     for (path, text) in &files {
         let mut seen = Vec::new();
-        for edit in 0..4 {
+        let edits = match edits_of(path) {
+            Ok((edits, why)) => {
+                if let Some(why) = why {
+                    println!("{}", why);
+                }
+                edits
+            }
+            Err(e) => {
+                println!("bad record: {}", e);
+                bad += 1;
+                continue;
+            }
+        };
+        for edit in edits {
             let case = Case {
                 text: text.clone(),
                 edit,
@@ -2632,11 +2840,17 @@ fn replay_files(exe: &Path, phases: &Phases, paths: &[PathBuf]) -> i32 {
         failed += usize::from(!seen.is_empty());
     }
     println!(
-        "mn fuzz --replay: {} file(s), {} with a failure",
+        "mn fuzz --replay: {} file(s), {} with a failure, {} with a bad record",
         files.len(),
-        failed
+        failed,
+        bad
     );
-    i32::from(failed > 0)
+    match (failed > 0, bad > 0) {
+        (false, false) => 0,
+        (true, false) => 1,
+        (false, true) => 2,
+        (true, true) => 3,
+    }
 }
 
 #[cfg(test)]
@@ -2645,7 +2859,7 @@ mod tests {
 
     const SEED: &str = "module m\n\npub fn add(a: i32, b: i32) -> i32 = a + b\n\npub fn pick(c: bool, x: u8) -> u8 {\n  if c {\n    x\n  } else {\n    0\n  }\n}\n";
 
-    fn phases(plant: Option<fn(&str)>) -> Phases {
+    fn phases(plant: Option<fn(&str, u64)>) -> Phases {
         Phases {
             objects: false,
             plant,
@@ -2776,7 +2990,7 @@ mod tests {
         assert_eq!(all, "abc");
     }
 
-    fn planted_panic(src: &str) {
+    fn planted_panic(src: &str, _edit: u64) {
         if src.contains("340282366920938463463374607431768211455") {
             panic!("planted: u128's maximum");
         }
@@ -2836,7 +3050,7 @@ mod tests {
             std::fs::read_to_string(out.join(format!("{}.mn", name))).unwrap(),
             f.minimized
         );
-        let about = std::fs::read_to_string(out.join(format!("{}.txt", name))).unwrap();
+        let about = std::fs::read_to_string(out.join(format!("{}.found", name))).unwrap();
         assert!(
             about.contains("phase: planted") && about.contains("kind: panic"),
             "{}",
@@ -3518,6 +3732,176 @@ mod tests {
         assert_eq!(normalize("fn without a colon"), "fn without a colon");
         assert_eq!(normalize("v1 v22"), "v# v#");
         assert_eq!(normalize("`unclosed 7"), "`_`");
+    }
+
+    /// A found failure's record names the edit seed it was found with, and the replay reads that
+    /// seed back from beside the minimized input and the original alike (the nightly triage of
+    /// 2026-11-21, where three incremental failures replayed clean on edits 0 to 3 and failed on
+    /// their own). The record is `<name>.found`, its first line its own, its fields fixed, its key
+    /// and message escaped and last, so a message cannot name a seed; and it is read strictly, each
+    /// refusal saying what to write.
+    #[test]
+    fn test_a_found_failure_replays_on_its_recorded_edit_seed() {
+        let out = std::env::temp_dir().join(format!("mente-fuzz-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let opts = Options {
+            seed: 3,
+            runs: Some(1),
+            seconds: 0,
+            jobs: 1,
+            out: out.clone(),
+            phases: Phases {
+                budget: Duration::from_secs(7),
+                stack: 512 << 10,
+                ..phases(None)
+            },
+            shallow: true,
+        };
+        let edit = 0xDEAD_BEEF_1234_5678;
+        let found = Found {
+            failure: Failure {
+                phase: "incremental".into(),
+                kind: Kind::Panic,
+                message: "a panic\nedit seed: 7\\n".into(),
+            },
+            minimized: "module m\n".into(),
+            original: "module m\npub fn f() -> u8 = 1\n".into(),
+            job: 0,
+            run: 9,
+            edit,
+        };
+        write_found(&out, &opts, &found).unwrap();
+        let name = slug(&found.failure);
+        let text = std::fs::read_to_string(out.join(format!("{}.found", name))).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "mn fuzz found", "{}", text);
+        assert_eq!(lines[3], format!("edit seed: {}", edit), "{}", text);
+        assert_eq!(
+            lines[4],
+            "found by: mn fuzz --seed 3 --jobs 1 --phase-seconds 7 --stack-kib 512, job 0, run 9",
+            "{}",
+            text
+        );
+        assert!(lines[5].starts_with("compiler: "), "{}", text);
+        assert_eq!(
+            *lines.last().unwrap(),
+            r"message: a panic\nedit seed: 7\\n",
+            "{}",
+            text
+        );
+        assert_eq!(lines.len(), 10, "{}", text);
+        assert!(!out.join(format!("{}.txt", name)).exists());
+        for file in [format!("{}.mn", name), format!("{}.orig.mn", name)] {
+            let (edits, why) = edits_of(&out.join(&file)).unwrap();
+            assert_eq!(edits, vec![edit], "{}", file);
+            assert!(why
+                .unwrap()
+                .ends_with(&format!(": replayed on its recorded edit seed {}", edit)));
+        }
+        // A seed of a corpus has no record; a `.txt` beside a file is none.
+        std::fs::write(out.join("seed.mn"), "module m\n").unwrap();
+        std::fs::write(out.join("seed.txt"), "mn fuzz found\nedit seed: 9\n").unwrap();
+        assert_eq!(edits_of(&out.join("seed.mn")), Ok(((0..4).collect(), None)));
+        // A record that cannot name its seed says so, and replays on the edits 0 to 3.
+        std::fs::write(out.join("lost.mn"), "module m\n").unwrap();
+        std::fs::write(
+            out.join("lost.found"),
+            "mn fuzz found\nedit seed: unknown\n",
+        )
+        .unwrap();
+        let (edits, why) = edits_of(&out.join("lost.mn")).unwrap();
+        assert_eq!(edits, vec![0, 1, 2, 3]);
+        assert!(why
+            .unwrap()
+            .ends_with("its record names no edit seed, so it is replayed on the edits 0 to 3"));
+        let read = |text: &str| read_record("r.found", text);
+        assert_eq!(
+            read("mn fuzz found\nedit seed: 007\n"),
+            Ok(Recorded::Seed(7))
+        );
+        assert_eq!(
+            read(&format!("mn fuzz found\nedit seed: {}\n", u64::MAX)),
+            Ok(Recorded::Seed(u64::MAX))
+        );
+        for (text, says) in [
+            (
+                "phase: incremental\nedit seed: 4\n",
+                "r.found: not a record of mn fuzz, whose first line is `mn fuzz found`; write the record mn fuzz wrote, or rename a file that is no record",
+            ),
+            (
+                "mn fuzz found\nphase: incremental\n",
+                "r.found: no `edit seed:` field; write the edit seed the failure was found with, or `edit seed: unknown` where it is lost, to replay on the edits 0 to 3",
+            ),
+            (
+                "mn fuzz found\nedit seed: 4\nedit seed: 4\n",
+                "r.found: `edit seed:` is given 2 times; keep the one the failure was found with",
+            ),
+        ] {
+            assert_eq!(read(text), Err(says.to_string()), "{}", text);
+        }
+        for bad in [
+            "-1",
+            "0x10",
+            "18446744073709551616",
+            "+5",
+            "",
+            "4 2",
+            "unknown!",
+        ] {
+            assert_eq!(
+                read(&format!("mn fuzz found\nedit seed: {}\n", bad)),
+                Err(format!(
+                    "r.found: the edit seed `{}` is not a decimal number from 0 to 18446744073709551615; write the seed as mn fuzz wrote it, or `unknown` where it is lost",
+                    bad
+                )),
+                "{}",
+                bad
+            );
+        }
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A record names the commit the compiler was built from: the runner's `GITHUB_SHA` when it
+    /// is one, else what git printed when it succeeded and printed one, else `unknown`; and the
+    /// process names one or says it cannot.
+    #[test]
+    fn test_a_record_names_the_compiler_commit_or_says_it_is_unknown() {
+        let a = "0123456789abcdef0123456789ABCDEF01234567".to_string();
+        let b = "fedcba9876543210fedcba9876543210fedcba98".to_string();
+        let git = |ok: bool, out: &str| Some((ok, out.as_bytes().to_vec()));
+        assert_eq!(commit_of(Some(a.clone()), git(true, &b)), a);
+        for runner in [
+            None,
+            Some(a[..39].to_string()),
+            Some(format!("{}0", a)),
+            Some("z".repeat(40)),
+            Some(String::new()),
+        ] {
+            assert_eq!(
+                commit_of(runner.clone(), git(true, &format!("{}\n", b))),
+                b,
+                "{:?}",
+                runner
+            );
+            assert_eq!(
+                commit_of(runner.clone(), git(false, &b)),
+                UNKNOWN,
+                "{:?}",
+                runner
+            );
+            assert_eq!(commit_of(runner.clone(), None), UNKNOWN, "{:?}", runner);
+            for out in ["fatal: not a git repository", "", &b[..39], &"g".repeat(40)] {
+                assert_eq!(
+                    commit_of(runner.clone(), git(true, out)),
+                    UNKNOWN,
+                    "{:?} {}",
+                    runner,
+                    out
+                );
+            }
+        }
+        let here = compiler_commit();
+        assert!(is_commit(&here) || here == UNKNOWN, "{}", here);
     }
 
     /// A campaign without a number of runs goes on until its deadline, and no further.
