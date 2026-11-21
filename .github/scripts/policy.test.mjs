@@ -1299,7 +1299,7 @@ const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "4a063502dbf7ecc735f0f95252093bde207ec5f3f43e6131708e127c7013eb9a"],
+  [".github/scripts/policy-run.test.mjs", "957afa3d0ef5f14ee4880e38589a46acf8e694b1b943e05c07f83b8a3e4bd1e8"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
