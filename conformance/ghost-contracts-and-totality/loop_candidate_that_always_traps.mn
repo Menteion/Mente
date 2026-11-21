@@ -1,0 +1,13 @@
+// expect: E0508
+module conformance
+// A narrowing that always traps in a loop's condition is E0508, as it is outside a loop; as a
+// candidate it is true nowhere, so it leaves the loop's head its state.
+fn take(x: u8) -> u8 = x
+
+pub fn always() -> u8 {
+  var i: u8 = 0
+  while take(300) == 0 and i < 1 {
+    i += 1
+  }
+  i
+}

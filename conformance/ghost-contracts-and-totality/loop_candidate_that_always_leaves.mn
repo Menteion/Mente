@@ -1,0 +1,16 @@
+// expect: E0502
+module conformance
+// A guard of a loop's body whose condition always leaves by `break` is a candidate true nowhere,
+// so it leaves the loop's head, and the loop's exit, a state: there `i` is 1, from the `break` of
+// the first round, which `u8[0..1]` does not hold.
+pub fn f(x: u8) -> u8 {
+  var i: u8 = 0
+  while i < 3 {
+    i = i + 1
+    guard (if x > 1 { break } else { break }) else {
+      return 7
+    }
+  }
+  val y: u8[0..1] = i
+  y
+}

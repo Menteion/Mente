@@ -1867,6 +1867,9 @@ struct Fx<'a> {
     count: usize,
     report: Report,
     recording: bool,
+    /// The obligations decided unproven so far, recorded or not: a loop's candidate holds only
+    /// where evaluating it adds none ([`Fx::refute_cand`]).
+    unproven: usize,
     loops: Vec<Frame>,
     /// The bindings in scope, in declaration order, for valuations.
     scope: Vec<usize>,
@@ -1892,7 +1895,8 @@ struct Fx<'a> {
     /// The loop whose header, its condition and measures at the head of a round, is being
     /// read.
     head_of: Option<StmtId>,
-    loop_memo: Vec<(StmtId, Octagon, Octagon)>,
+    /// With each, the obligations its analysis left unproven.
+    loop_memo: Vec<(StmtId, Octagon, Octagon, usize)>,
     /// The passes over a loop's body, for the test that keeps them linear in nesting.
     passes: usize,
     /// The `match` arm written as an expression being checked, before which a `guard` goes
@@ -2222,6 +2226,7 @@ impl<'a> Fx<'a> {
             count: n.0,
             report: Report::default(),
             recording: true,
+            unproven: 0,
             loops: Vec::new(),
             scope: Vec::new(),
             stmt: None,
@@ -2938,6 +2943,9 @@ impl<'a> Fx<'a> {
     }
 
     fn record_check(&mut self, o: Obligation, paths: impl FnOnce(&mut Self) -> Vec<Path>) {
+        if !o.proven {
+            self.unproven += 1;
+        }
         if !self.recording {
             return;
         }
@@ -5763,9 +5771,25 @@ impl<'a> Fx<'a> {
         }
     }
 
+    /// A state in which candidate `c` does not hold, or `None` where it holds wherever `st`
+    /// does. A candidate holds only where evaluating it cannot trap and gives `true`
+    /// (`ghost-contracts-and-totality.md`, item 2, "Facts at a loop head"): every check it makes
+    /// is proven in `st` itself, before the facts its evaluation leaves, that a divisor was not
+    /// 0 or that a narrowed value fit, are added; and an evaluation that ends with no state of
+    /// one that had some, one that always traps or leaves by `break` or `return`, is no proof.
+    /// Otherwise those facts would prove the candidate's own checks once it is assumed at the
+    /// head, and an empty head every check in the loop and after it. `st` itself is the state in
+    /// which it fails then.
     fn refute_cand(&mut self, st: &Octagon, c: Cand) -> Option<Octagon> {
         let mut s = st.clone();
+        // The candidates of a loop inside `c` are judged by their own count, not this one.
+        let outer = std::mem::replace(&mut self.unproven, 0);
         let k = self.cand(&mut s, c);
+        let may_trap = self.unproven > 0;
+        self.unproven = outer;
+        if may_trap || (s.is_empty() && !st.is_empty()) {
+            return Some(st.clone());
+        }
         self.refute(&s, &k)
     }
 
@@ -6261,14 +6285,21 @@ impl<'a> Fx<'a> {
         body: BlockId,
     ) {
         // Outside the recording pass nothing is recorded, so a loop met again with the same
-        // entry state leaves the state it left before.
+        // entry state leaves the state it left before, and counts again the obligations it
+        // left unproven, which a candidate around it reads.
         if !self.recording {
-            if let Some((_, _, exit)) = self.loop_memo.iter().find(|(k, e, _)| *k == s && e == st) {
+            if let Some((_, _, exit, unproven)) = self
+                .loop_memo
+                .iter()
+                .find(|(k, e, _, _)| *k == s && e == st)
+            {
                 *st = exit.clone();
+                self.unproven += unproven;
                 return;
             }
         }
         let entry = (!self.recording).then(|| st.clone());
+        let unproven = self.unproven;
         let mut changed = Vec::new();
         self.changed_stmt(s, &mut changed);
         // Candidates come only from the loop's text: the written invariants first, then the
@@ -6414,7 +6445,8 @@ impl<'a> Fx<'a> {
         self.heads.pop();
         *st = exit;
         if let Some(entry) = entry {
-            self.loop_memo.push((s, entry, st.clone()));
+            let left = self.unproven - unproven;
+            self.loop_memo.push((s, entry, st.clone(), left));
         }
     }
 
@@ -6504,6 +6536,15 @@ mod tests {
 
     /// The passes over loop bodies Tier 1 makes in the module's last function.
     fn passes(src: &str) -> usize {
+        with_fx(src, |fx, st| {
+            let mut st = st.clone();
+            fx.body(&mut st);
+            fx.passes
+        })
+    }
+
+    /// `f` on Tier 1's analysis of the module's last function, routed, and its entry state.
+    fn with_fx<T>(src: &str, run: impl FnOnce(&mut Fx<'_>, &Octagon) -> T) -> T {
         let text = module(src);
         let m = mente_syntax::parse_module(&text).unwrap();
         let parsed = mente_syntax::parse_bodies(&text, &m);
@@ -6531,8 +6572,7 @@ mod tests {
         fx.route();
         let mut st = Octagon::new(fx.count);
         fx.entry(&mut st);
-        fx.body(&mut st);
-        fx.passes
+        run(&mut fx, &st)
     }
 
     #[test]
@@ -7470,6 +7510,121 @@ mod tests {
             );
             assert_eq!(codes(&src), ["E0502"], "{}", changes);
         }
+    }
+
+    /// A loop's candidate holds only where evaluating it cannot trap (`ghost-contracts-and-
+    /// totality.md`, item 2): the facts its evaluation leaves, a divisor that is not 0 or a
+    /// narrowed value that fits, never prove its own checks, and one that always traps leaves
+    /// the head its state. The nightly's generated programs found both as wrong proofs
+    /// (2026-11-16 to 11-21).
+    #[test]
+    fn test_a_candidate_holds_only_where_it_cannot_trap() {
+        let take = "fn take(x: u8) -> u8 = x\n";
+        let checks = |params: &str, body: &str| -> Vec<(ObligationKind, bool)> {
+            let src = format!(
+                "{}pub fn f({}) -> u8 {{\n  var i: u8 = 0\n{}\n  i\n}}",
+                take, params, body
+            );
+            obligations(&src)
+                .into_iter()
+                .map(|(k, _, proven)| (k, proven))
+                .collect()
+        };
+        // `7 % d` traps where `d` is 0, so as a conjunct of the condition, first or last, or as a
+        // guard of the body it does not hold on entry, and its divisor stays a run-time check.
+        for body in [
+            "  while i < 1 and 7 % d < 9 {\n    i += 1\n  }",
+            "  while 7 % d < 9 and i < 1 {\n    i += 1\n  }",
+            "  while i < 1 {\n    guard 7 % d >= 0 else {\n      return 9\n    }\n    i += 1\n  }",
+        ] {
+            let found = checks("d: u8", body);
+            assert!(
+                found.contains(&(ObligationKind::Divisor, false)),
+                "{}",
+                body
+            );
+            // Where the refinement rules out 0, the candidate holds and its divisor is proven.
+            let found = checks("d: u8[1..=5]", body);
+            assert!(
+                found.iter().all(|(_, proven)| *proven),
+                "{}: {:?}",
+                body,
+                found
+            );
+        }
+        // One true on entry that a round breaks is dropped: the head's `d >= 1` came from the
+        // candidate alone, and the round makes `d` 0.
+        let broken = "  var d: u8 = 5\n  while 7 % d < 9 {\n    d -= 1\n    i = d\n  }";
+        assert!(checks("", broken).contains(&(ObligationKind::Divisor, false)));
+        // One true on entry and after every round is kept, with the facts its evaluation leaves:
+        // `d >= 1` at the head proves the divisor of the next round.
+        let kept =
+            "  var d: u8 = 5\n  while i < 3 and 7 % d < 9 {\n    i += 1\n    d = d / 2 + 1\n  }";
+        let found = checks("", kept);
+        assert!(
+            found.contains(&(ObligationKind::Divisor, true)),
+            "{:?}",
+            found
+        );
+        assert!(
+            !found.contains(&(ObligationKind::Divisor, false)),
+            "{:?}",
+            found
+        );
+        // A narrowing clamps what it narrows, which proves nothing of the narrowing itself.
+        let narrowed = checks(
+            "d: u8",
+            "  while i < 1 and take(d + 250) < 255 {\n    i += 1\n  }",
+        );
+        assert!(
+            narrowed.contains(&(ObligationKind::Range, false)),
+            "{:?}",
+            narrowed
+        );
+        // A narrowing that always traps is `E0508`, as it is outside a loop, not a head with no
+        // state in which every check counts as proven.
+        let always = format!(
+            "{}pub fn f() -> u8 {{\n  var i: u8 = 0\n  while take(300) == 0 and i < 1 {{\n    i += 1\n  }}\n  i\n}}",
+            take
+        );
+        assert_eq!(codes(&always), ["E0508"]);
+        // A call that never returns leaves no state either; the exit, where `n > 9` is false
+        // and the call is never made, keeps the state of the entry, so `m + 1` stays a check.
+        let never = "fn never(x: u8) -> u8\n  ensures result > 200 and result < 100\n= todo(\"never\")\npub fn f(d: u8, n: u8, m: u8) -> u8 {\n  var i: u8 = 0\n  while n > 9 and never(d) == i {\n    i += 1\n  }\n  val y: u8 = m + 1\n  y\n}";
+        let found: Vec<(ObligationKind, bool)> = obligations(never)
+            .into_iter()
+            .map(|(k, _, proven)| (k, proven))
+            .collect();
+        assert!(
+            found.contains(&(ObligationKind::Range, false)),
+            "{:?}",
+            found
+        );
+        // So does a guard whose condition always leaves by `break`: the loop's exit, from the
+        // `break` of its first round, has `i` at 1, which `u8[0..1]` does not hold.
+        let leaves = "pub fn f(x: u8) -> u8 {\n  var i: u8 = 0\n  while i < 3 {\n    i = i + 1\n    guard (if x > 1 { break } else { break }) else {\n      return 7\n    }\n  }\n  val y: u8[0..1] = i\n  y\n}";
+        assert_eq!(codes(leaves), ["E0502"]);
+        assert_eq!(codes(&leaves.replace("u8[0..1]", "u8[0..4]")), NONE);
+    }
+
+    /// A loop met again with the same entry state outside the recording pass leaves the state it
+    /// left before and counts again the obligations it left unproven, which a candidate around
+    /// it reads: otherwise a candidate that meets it twice would hold the second time.
+    #[test]
+    fn test_a_loop_met_again_counts_its_unproven_obligations_again() {
+        let src = "pub fn f(d: u8) -> u8 {\n  var i: u8 = 0\n  while i < 3 {\n    i += 7 % d\n  }\n  i\n}";
+        with_fx(src, |fx, st| {
+            fx.recording = false;
+            let mut first = st.clone();
+            fx.body(&mut first);
+            let (once, passes) = (fx.unproven, fx.passes);
+            assert!(once > 0);
+            let mut again = st.clone();
+            fx.body(&mut again);
+            assert_eq!(fx.passes, passes, "the loop is met again from its memo");
+            assert_eq!(fx.unproven, 2 * once);
+            assert!(first == again);
+        });
     }
 
     #[test]

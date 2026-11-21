@@ -1,0 +1,42 @@
+// expect: pass
+module conformance
+// A loop's candidate holds only where evaluating it cannot trap (spec item 2, "Facts at a loop
+// head"): `7 % d` as a conjunct of the condition or a guard of the body, and the narrowing of
+// `d + 250` into `take`'s parameter, stay run-time checks, which trap where `d` is 0 or above 5.
+// The nightly's generated programs found each proven from the facts of its own evaluation.
+fn take(x: u8) -> u8 = x
+
+pub fn rem(d: u8) -> u8 {
+  var i: u8 = 0
+  while i < 1 and 7 % d < 9 {
+    i += 1
+  }
+  i
+}
+
+pub fn guarded(d: u8) -> u8 {
+  var i: u8 = 0
+  while i < 1 {
+    guard 7 % d >= 0 else {
+      return 9
+    }
+    i += 1
+  }
+  i
+}
+
+pub fn narrow(d: u8) -> u8 {
+  var i: u8 = 0
+  while i < 1 and take(d + 250) < 255 {
+    i += 1
+  }
+  i
+}
+
+pub fn broken() -> u8 {
+  var d: u8 = 5
+  while 7 % d < 9 {
+    d -= 1
+  }
+  d
+}

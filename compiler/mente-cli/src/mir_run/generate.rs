@@ -1198,6 +1198,9 @@ struct Gen {
     cost: u64,
     no_calls: bool,
     names: usize,
+    /// The stream of the rules added to a function's body since the first, so that one leaves
+    /// what every other rule writes as it was: each attempt at a body has its own.
+    rules: Rng,
 }
 
 impl Gen {
@@ -1228,6 +1231,7 @@ impl Gen {
             cost: 0,
             no_calls: false,
             names: 0,
+            rules: Rng::new(seed),
         }
     }
 
@@ -4747,6 +4751,26 @@ impl Gen {
         if let Some(more) = more {
             cond = E::bin(Op::And, cond, more);
         }
+        // Now and then a candidate that can trap, in the condition or as a guard of the body.
+        let mut first = Vec::new();
+        if let Some(trapping) = self.trapping_candidate() {
+            if self.rules.chance(50) {
+                cond = E::bin(Op::And, cond, trapping);
+            } else {
+                let leave = if self.rules.chance(50) {
+                    S::Continue
+                } else {
+                    S::Break
+                };
+                first.push(S::Guard(
+                    trapping,
+                    Block {
+                        stmts: vec![leave],
+                        tail: None,
+                    },
+                ));
+            }
+        }
         let mut clauses = Vec::new();
         let invariant = self.mode == Mode::Refined && self.rng.chance(50);
         if self.mode == Mode::Refined {
@@ -4799,7 +4823,8 @@ impl Gen {
             most.sub(one).map(|hi| R { lo: Num::ZERO, hi })
         }
         .filter(|r| r.lo <= r.hi);
-        let body = self.block(depth + 1, None, vec![step], None);
+        first.insert(0, step);
+        let body = self.block(depth + 1, None, first, None);
         self.binds[id].known = Some(R {
             lo: Num::ZERO,
             hi: most,
@@ -4809,6 +4834,42 @@ impl Gen {
         self.safe.truncate(saved);
         out.push(S::While(cond, clauses, body));
         out
+    }
+
+    /// Now and then `k % x < k + 1` over an integer binding `x` in scope that nothing guards,
+    /// no loop's counter: true wherever it does not trap, and trapping where `x` is 0. As a
+    /// loop's candidate it holds only where its divisor is proven not 0 without it
+    /// (`ghost-contracts-and-totality.md`, item 2, "Facts at a loop head"); the nightly runs
+    /// found Tier 1 proving such a divisor from the candidate itself. None for a binding known
+    /// to be 0, whose remainder would always trap.
+    fn trapping_candidate(&mut self) -> Option<E> {
+        if !self.rules.chance(15) {
+            return None;
+        }
+        let ids: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| {
+                let b = &self.binds[id];
+                match b.ty {
+                    Ty::Int(t) => {
+                        b.kind != Kind::Counter && self.known_range(id, t) != R::point(Num::ZERO)
+                    }
+                    _ => false,
+                }
+            })
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let id = ids[self.rules.below(ids.len() as u64) as usize];
+        let k = 1 + self.rules.below(9);
+        let x = self.read(id);
+        Some(E::bin(
+            Op::Lt,
+            E::bin(Op::Rem, E::Lit(k.to_string()), x),
+            E::Lit((k + 1).to_string()),
+        ))
     }
 
     fn guard_statement(&mut self) -> Vec<S> {
@@ -5014,6 +5075,7 @@ impl Gen {
         // The body, of this attempt: another attempt has another body under the same signature.
         let attempt = self.attempts.get(index).copied().unwrap_or(0);
         self.rng = stream(self.seed, index, 1 + u64::from(attempt));
+        self.rules = stream(self.seed, index, (1 << 32) + u64::from(attempt));
         let mut first = Vec::new();
         if self.recursion.is_some() {
             let leave = S::Return(ret.as_ref().map(|t| self.default_of(t, ret_range)));
