@@ -25,6 +25,9 @@ env:
   CARGO_MUTANTS_VERSION: "27.1.0"
   # The nextest profile that stops a test running too long (.config/nextest.toml).
   NEXTEST_PROFILE: mutants
+  # The types nested as a DAG and as a long chain run in CI's x86-64 Linux tests alone, not under
+  # each mutant (test_types_nested_as_a_dag_or_a_long_chain_pass_every_phase).
+  MENTE_NESTED_TYPES: skip
 
 jobs:
   in-diff:

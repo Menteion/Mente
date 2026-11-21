@@ -657,6 +657,9 @@ const SLOW_TESTS = [
   ["mente-cli", "mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar"],
   ["mente-interp", "tests::test_a_program_tier1_proves_never_trips_its_checks"],
   ["mente-cli", "mir_run::tests::test_native_code_runs_each_construct_as_the_reference_interpreter_does"],
+  // Types nested as a DAG and as a long chain through every phase, on x86-64 Linux alone: 27.8 s
+  // on its first run (pull request 198).
+  ["mente-cli", "mir_run::differential::tests::test_types_nested_as_a_dag_or_a_long_chain_pass_every_phase"],
 ];
 /// The tests that run work on more than one thread at once (compiler/mente-threads),
 /// which the override of the group `all-cores` runs alone, each taking every test thread, so that
@@ -1354,9 +1357,9 @@ const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
-  ["mutants.yml#in-diff", "6b54eaf7d853b04bf84a06306bee5d6d0195bf17477bd7e2c6be4ceeaf9526ad"],
-  ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
+  ["ci.yml#rust", "698f149e63f5c7e920c95754385d062f9eff4cdd620e5f91281dd53c2267ea4f"],
+  ["mutants.yml#in-diff", "d15b7d91aa034dfd983e3dfeb3ccbf653f98fb03ba0ac2382dcd3a6efe992e23"],
+  ["mutants-full.yml#full", "64472a569730b103a3072c512f3406333e1d02bba05d7465cd42f204078041e2"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "9c0ef19d2e7875847856480e78182e4fe4c72b715bf88782376851bc4c47d408"],
@@ -1371,7 +1374,7 @@ const PINNED_JOBS = new Map([
   // The nightly alarms, each with its workflow's triggers (Norman, 2026-11-21).
   ["fuzz-nightly.yml#alarm", "3873cebb627ff350058b72ed6a16297ebd92eff8155306ccc271157ce359d652"],
   ["generated-nightly.yml#alarm", "362bd08920cd3c3830502a91997feda6e45cb81604fcdf9bbe596e16e8ceb946"],
-  ["mutants-full.yml#alarm", "8a51983d7460cf13ca3777d62b7b3237ec381a8b8d1d8b83bcb91373bd166052"],
+  ["mutants-full.yml#alarm", "3c2e6d0914d6574bbd48d6a179ccbf5d626d76ce85b1c6c04727cd3df80a891d"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.

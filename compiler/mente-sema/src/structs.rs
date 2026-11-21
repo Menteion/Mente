@@ -26,6 +26,7 @@ use mente_syntax::tree::{
 use mente_syntax::{ItemDecl, ModuleFile, ParsedEnum, ParsedStruct, Span};
 
 use crate::names::closest;
+use crate::type_walk::{TypeWalk, Via};
 use crate::types::{Int, IntTy, Ty, INT_TYPES};
 
 /// The most bytes a value may hold: it is kept in one piece, in one stack slot, whose size
@@ -161,6 +162,13 @@ impl EnumDef {
     pub fn variant_names(&self) -> Vec<String> {
         self.variants.iter().map(|v| v.name.clone()).collect()
     }
+}
+
+/// A struct or an enum of a module, by its position among the declarations of its kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Decl {
+    Struct(usize),
+    Enum(usize),
 }
 
 /// The structs and enums of a module, and the names of its other type declarations.
@@ -529,18 +537,24 @@ pub fn declare(
         }
         errors.extend(found);
     }
-    let graph = Graph::of(&structs);
-    for (node, d) in self_containing(&structs, &graph) {
+    // One walk over the declarations finds the cycles and the order of the layouts: the types
+    // a value holds first.
+    let (found, order) = {
+        let walk = TypeWalk::new(&structs);
+        (self_containing(&structs, walk.cycles()), walk.order())
+    };
+    for (node, d) in found {
         match node {
-            Node::Struct(i) => structs.defs[i].ok = false,
-            Node::Enum(i) => structs.enums[i].ok = false,
+            Decl::Struct(i) => structs.defs[i].ok = false,
+            Decl::Enum(i) => structs.enums[i].ok = false,
         }
         errors.push(d);
     }
-    // Layouts in the order of their dependencies: the types a value holds first.
-    let mut state = vec![Visit::New; graph.nodes.len()];
-    for k in 0..graph.nodes.len() {
-        layout(&mut structs, &graph, k, &mut state, &mut errors);
+    for d in order {
+        match d {
+            Decl::Struct(i) => struct_layout(&mut structs, i, &mut errors),
+            Decl::Enum(i) => enum_layout(&mut structs, i, &mut errors),
+        }
     }
     errors.sort_by_key(|d| d.primary.start);
     (structs, errors)
@@ -576,125 +590,34 @@ pub fn clashes<'a>(
     errors
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Visit {
-    New,
-    Open,
-    Done,
-}
-
-/// A struct or an enum of the module, by its position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Node {
-    Struct(usize),
-    Enum(usize),
-}
-
-/// Where one type holds another in place: a struct's field, or a field of an enum's variant.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Via {
-    variant: Option<usize>,
-    field: usize,
-}
-
-/// The structs and enums of a module as nodes, structs first, each with the types its fields
-/// hold in place, by node: an edge for each, in the order of its fields and variants.
-struct Graph {
-    nodes: Vec<Node>,
-    edges: Vec<Vec<(Via, usize)>>,
-}
-
-impl Graph {
-    fn of(structs: &Structs) -> Graph {
-        let s = structs.defs.len();
-        let mut nodes: Vec<Node> = (0..s).map(Node::Struct).collect();
-        nodes.extend((0..structs.enums.len()).map(Node::Enum));
-        let node_of = |name: &str| {
-            structs
-                .position(name)
-                .or_else(|| structs.enum_position(name).map(|e| s + e))
-        };
-        let targets = |fields: &[FieldDef], variant: Option<usize>| -> Vec<(Via, usize)> {
-            fields
-                .iter()
-                .enumerate()
-                .flat_map(|(k, f)| {
-                    held(&f.ty)
-                        .into_iter()
-                        .filter_map(|n| node_of(&n))
-                        .map(|j| (Via { variant, field: k }, j))
-                        .collect::<Vec<_>>()
-                })
-                .collect()
-        };
-        let edges = nodes
-            .iter()
-            .map(|n| match *n {
-                Node::Struct(i) => targets(&structs.defs[i].fields, None),
-                Node::Enum(i) => structs.enums[i]
-                    .variants
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(v, var)| targets(&var.fields, Some(v)))
-                    .collect(),
-            })
-            .collect();
-        Graph { nodes, edges }
-    }
-}
-
-/// The name of a node and where it is declared.
-fn node_name(structs: &Structs, n: Node) -> (&str, Span) {
+/// The name of a declaration and where it is declared.
+fn node_name(structs: &Structs, n: Decl) -> (&str, Span) {
     match n {
-        Node::Struct(i) => (&structs.defs[i].name, structs.defs[i].syntax.name_span),
-        Node::Enum(i) => (&structs.enums[i].name, structs.enums[i].syntax.name_span),
+        Decl::Struct(i) => (&structs.defs[i].name, structs.defs[i].syntax.name_span),
+        Decl::Enum(i) => (&structs.enums[i].name, structs.enums[i].syntax.name_span),
     }
 }
 
-/// The name of the field `via` names in node `n`, and where it is declared.
-fn via_field(structs: &Structs, n: Node, via: Via) -> (&str, Span) {
+/// The name of the field `via` names in declaration `n`, and where it is declared.
+fn via_field(structs: &Structs, n: Decl, via: Via) -> (&str, Span) {
     match (n, via.variant) {
-        (Node::Struct(i), _) => {
+        (Decl::Struct(i), _) => {
             let f = &structs.defs[i].syntax.fields[via.field];
             (&f.name, f.name_span)
         }
-        (Node::Enum(i), Some(v)) => {
+        (Decl::Enum(i), Some(v)) => {
             let f = &structs.enums[i].syntax.variants[v].fields[via.field];
             (&f.name, f.name_span)
         }
-        (Node::Enum(i), None) => (&structs.enums[i].name, structs.enums[i].syntax.name_span),
+        (Decl::Enum(i), None) => (&structs.enums[i].name, structs.enums[i].syntax.name_span),
     }
 }
 
-/// The name of the variant `via` names in node `n`, when it is an enum's.
-fn via_variant(structs: &Structs, n: Node, via: Via) -> Option<&str> {
+/// The name of the variant `via` names in declaration `n`, when it is an enum's.
+fn via_variant(structs: &Structs, n: Decl, via: Via) -> Option<&str> {
     match (n, via.variant) {
-        (Node::Enum(i), Some(v)) => Some(&structs.enums[i].variants[v].name),
+        (Decl::Enum(i), Some(v)) => Some(&structs.enums[i].variants[v].name),
         _ => None,
-    }
-}
-
-/// Gives node `k` its layout, after those of the types its fields hold, and reports a value too
-/// large to keep in one piece (`E0223`): the innermost array type of a field that is, or else
-/// the struct or the enum.
-fn layout(
-    structs: &mut Structs,
-    graph: &Graph,
-    k: usize,
-    state: &mut [Visit],
-    errors: &mut Vec<Diagnostic>,
-) {
-    if state[k] != Visit::New {
-        return;
-    }
-    state[k] = Visit::Open;
-    for &(_, d) in &graph.edges[k] {
-        layout(structs, graph, d, state, errors);
-    }
-    state[k] = Visit::Done;
-    match graph.nodes[k] {
-        Node::Struct(i) => struct_layout(structs, i, errors),
-        Node::Enum(i) => enum_layout(structs, i, errors),
     }
 }
 
@@ -830,15 +753,6 @@ fn within(root: TypeId, t: TypeId, tree: &Tree) -> bool {
             | TypeKind::Enum(_)
             | TypeKind::Error => false,
         }
-}
-
-/// The structs and enums a value of `t` holds in place: `t` itself, or its arrays' elements.
-fn held(t: &Ty) -> Vec<String> {
-    match t {
-        Ty::Struct(name) | Ty::Enum(name) => vec![name.clone()],
-        Ty::Array(_, elem) => held(elem),
-        Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Any => Vec::new(),
-    }
 }
 
 /// The checks of one declaration's fields: each type is one M2 has, each refinement bound a
@@ -1034,68 +948,36 @@ pub fn unknown_type(structs: &Structs, n: &str, span: Span) -> Option<Diagnostic
 }
 
 /// Each struct or enum that contains itself, directly or through other structs, enums and
-/// arrays (`E0225`), once for each cycle, at the first of its types to be declared.
-fn self_containing(structs: &Structs, graph: &Graph) -> Vec<(Node, Diagnostic)> {
-    let mut found = Vec::new();
-    let mut state = vec![Visit::New; graph.nodes.len()];
-    // The path of the search: each node with the edge it was left by.
-    let mut path: Vec<(usize, Via)> = Vec::new();
-    for root in 0..graph.nodes.len() {
-        visit(root, graph, &mut state, &mut path, &mut found, structs);
-    }
+/// arrays (`E0225`), once for each cycle the type walk closed (`TypeWalk::cycles`), at the first
+/// of its types to be declared.
+fn self_containing(structs: &Structs, cycles: &[Vec<(Decl, Via)>]) -> Vec<(Decl, Diagnostic)> {
+    let mut found: Vec<(Decl, Diagnostic)> = cycles
+        .iter()
+        .map(|cycle| {
+            let first = cycle
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (n, _))| node_name(structs, *n).1.start)
+                .map_or(0, |(k, _)| k);
+            let ordered: Vec<(Decl, Via)> = cycle[first..]
+                .iter()
+                .chain(&cycle[..first])
+                .copied()
+                .collect();
+            (ordered[0].0, cycle_diagnostic(structs, &ordered))
+        })
+        .collect();
     found.sort_by_key(|(n, _)| node_name(structs, *n).1.start);
     found
 }
 
-/// A depth-first search over the types, in the order of their declarations and fields. Each
-/// field that leads back to a type still open on the search's path closes a cycle, which is
-/// reported once, so that two cycles through one type are two errors.
-fn visit(
-    i: usize,
-    graph: &Graph,
-    state: &mut [Visit],
-    path: &mut Vec<(usize, Via)>,
-    found: &mut Vec<(Node, Diagnostic)>,
-    structs: &Structs,
-) {
-    if state[i] != Visit::New {
-        return;
-    }
-    state[i] = Visit::Open;
-    for &(via, j) in &graph.edges[i] {
-        path.push((i, via));
-        match state[j] {
-            Visit::Open => {
-                let start = path.iter().position(|(s, _)| *s == j).unwrap_or(0);
-                let cycle: Vec<(usize, Via)> = path[start..].to_vec();
-                // Reported at the type of the cycle declared first.
-                let first = cycle
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, (s, _))| node_name(structs, graph.nodes[*s]).1.start)
-                    .map_or(0, |(k, _)| k);
-                let ordered: Vec<(Node, Via)> = cycle[first..]
-                    .iter()
-                    .chain(&cycle[..first])
-                    .map(|(s, v)| (graph.nodes[*s], *v))
-                    .collect();
-                found.push((ordered[0].0, cycle_diagnostic(structs, &ordered)));
-            }
-            Visit::New => visit(j, graph, state, path, found, structs),
-            Visit::Done => {}
-        }
-        path.pop();
-    }
-    state[i] = Visit::Done;
-}
-
 /// `E0225` for a cycle of types, each with the field that holds the next.
-fn cycle_diagnostic(structs: &Structs, cycle: &[(Node, Via)]) -> Diagnostic {
+fn cycle_diagnostic(structs: &Structs, cycle: &[(Decl, Via)]) -> Diagnostic {
     let (first, via) = cycle[0];
     let (first_name, first_span) = node_name(structs, first);
     let (_, field_span) = via_field(structs, first, via);
     // How a type holds the next: "its field `f`", or "the field `f` of its variant `V`".
-    let through = |n: Node, v: Via| {
+    let through = |n: Decl, v: Via| {
         let (f, _) = via_field(structs, n, v);
         match via_variant(structs, n, v) {
             Some(var) => format!("the field `{}` of its variant `{}`", f, var),

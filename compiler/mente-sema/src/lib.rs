@@ -21,6 +21,7 @@ pub mod names;
 pub mod octagon;
 pub mod structs;
 pub mod tier1;
+pub mod type_walk;
 pub mod types;
 pub mod wide;
 

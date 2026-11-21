@@ -32,7 +32,9 @@ use std::panic;
 
 use mente_interp::{Int, Shown, Value};
 use mente_sema::structs::Structs;
+use mente_sema::type_walk::{Facts, Measure, TypeWalk};
 use mente_sema::CheckedModule;
+use mente_syntax::body::NESTING_LIMIT;
 use mente_syntax::diagnostics::Diagnostic;
 use mente_syntax::tree::{AssignOp, Bound, ExprKind, StmtKind, Tree, TypeId, TypeKind};
 use mente_syntax::Span;
@@ -6266,7 +6268,8 @@ fn always_traps(
         max_steps: 200_000,
         ..mente_interp::Limits::default()
     };
-    let Some(params) = parameters(kept, name, limits.max_array) else {
+    let walk = TypeWalk::new(&kept.structs);
+    let Some(params) = parameters(kept, (&walk, &walk.measures()), name, limits.max_array) else {
         return out;
     };
     let body = &program.functions[k].1;
@@ -6410,32 +6413,6 @@ enum Domain {
     Enum(String, Vec<(String, Vec<(String, Domain)>)>),
 }
 
-impl Domain {
-    /// The values an argument of this domain is built of, itself, each element and each field
-    /// counted one each: `[4294967295][0]u8` holds 4,294,967,296, though none is a scalar.
-    fn values(&self) -> u128 {
-        match self {
-            Domain::Int(..) | Domain::Bool => 1,
-            Domain::Array(n, elem) => u128::from(*n)
-                .saturating_mul(elem.values())
-                .saturating_add(1),
-            Domain::Struct(_, fields) => fields
-                .iter()
-                .fold(1, |sum, (_, f)| sum.saturating_add(f.values())),
-            // The variant with the most values, its tag counted.
-            Domain::Enum(_, variants) => variants
-                .iter()
-                .map(|(_, fields)| {
-                    fields
-                        .iter()
-                        .fold(1, |sum: u128, (_, f)| sum.saturating_add(f.values()))
-                })
-                .max()
-                .unwrap_or(1),
-        }
-    }
-}
-
 fn domain(tree: &Tree, t: TypeId, structs: &Structs) -> Option<Domain> {
     Some(match &tree.ty(t).kind {
         TypeKind::Int { name, refinement } => Domain::Int(
@@ -6516,40 +6493,64 @@ pub fn calls_within(
         })
         .collect();
     let mut rng = Rng::new(seed ^ 0xA5A5_5A5A_C3C3_3C3C);
+    let walk = TypeWalk::new(&module.structs);
+    let measures = walk.measures();
     let mut out = Vec::new();
     for name in &module.names {
         if !public.contains(name) {
             continue;
         }
-        for args in arguments_of(module, name, &mut rng, plan, most).unwrap_or_default() {
+        for args in
+            arguments_of(module, (&walk, &measures), name, &mut rng, plan, most).unwrap_or_default()
+        {
             out.push((name.clone(), args));
         }
     }
     out
 }
 
-/// The argument lists `plan` gives function `name` of `module`; none for a function without a
-/// body, one with a parameter whose type the generator has no values of, or one whose arguments
-/// hold more than `most` values, which the reference interpreter could not hold.
+/// The measures of a module's declarations, which the type walk works out once for each
+/// (`mente_sema::type_walk`).
+type Measured<'a, 's> = (&'a TypeWalk<'s>, &'a Facts<Measure>);
+
+/// The argument lists `plan` gives function `name` of `module`, whose declarations' measures
+/// are `measured`; none for a function without a body, one with a parameter whose type the
+/// generator has no values of, or one whose arguments hold more than `most` values, which the
+/// reference interpreter could not hold, or nest past the levels the parser holds.
 fn arguments_of(
     module: &CheckedModule,
+    measured: Measured,
     name: &str,
     rng: &mut Rng,
     plan: CallPlan,
     most: u128,
 ) -> Option<Vec<Vec<(bool, Value)>>> {
-    Some(function_calls(&parameters(module, name, most)?, rng, plan))
+    Some(function_calls(
+        &parameters(module, measured, name, most)?,
+        rng,
+        plan,
+    ))
 }
 
 /// The parameters of function `name` of `module`, each with its name, whether it is `mut`, and
 /// the values it takes; none as [`arguments_of`] has none.
 fn parameters(
     module: &CheckedModule,
+    (walk, measures): Measured,
     name: &str,
     most: u128,
 ) -> Option<Vec<(String, bool, Domain)>> {
     let f = module.functions.get(module.index(name)?)?.as_ref()?;
     let tree = &f.syntax.tree;
+    // Each parameter's measure comes first, from its declarations', so that the domain of one
+    // past `most` values or nodes, or past the levels the parser holds, is never built.
+    let fits = |t: TypeId| {
+        walk.measure_of(measures, &mente_sema::types::Ty::of(tree, t))
+            .is_some_and(|m| m.values <= most && m.nodes <= most && m.levels <= NESTING_LIMIT)
+    };
+    if !f.syntax.params.iter().all(|p| fits(p.ty)) {
+        return None;
+    }
     let params: Vec<(String, bool, Domain)> = f
         .syntax
         .params
@@ -6562,9 +6563,6 @@ fn parameters(
             ))
         })
         .collect::<Option<_>>()?;
-    if params.iter().any(|(_, _, d)| d.values() > most) {
-        return None;
-    }
     Some(params)
 }
 
@@ -6825,6 +6823,49 @@ fn binds_nothing(p: &str) -> bool {
 
 mod tests {
     use super::*;
+
+    /// A function whose argument holds more values than a run holds, or whose domain takes more
+    /// nodes, is left out by the measures of its parameters' types, its domain never built, and
+    /// one at exactly that is called; so is one whose argument nests as deep as the parser holds,
+    /// and one past that is left out, since its domain and its value are built by recursion a
+    /// level at a time. Building the domain of a DAG of structs forty deep before asking its size
+    /// filled a laptop's memory (2026-11-22).
+    #[test]
+    fn test_arguments_past_what_a_run_holds_are_left_out_by_their_measures() {
+        let called = |text: &str, name: &str, most: u128| {
+            let module = mente_sema::check_program_without_proofs(text).unwrap();
+            let walk = TypeWalk::new(&module.structs);
+            parameters(&module, (&walk, &walk.measures()), name, most).is_some()
+        };
+        // A DAG of structs, each holding two of the one before it, twelve deep: `S0` holds 2
+        // values, and each level one and twice the one below.
+        let mut text = String::from("module m\nstruct S0 {\n  a: u8\n}\n");
+        for k in 1..12 {
+            text.push_str(&format!(
+                "struct S{k} {{\n  l: S{p}\n  r: S{p}\n}}\n",
+                p = k - 1
+            ));
+        }
+        // An array of no `A` holds one value, but its domain still builds `A`'s: 4 nodes.
+        text.push_str("pub fn f(s: S11) -> u8 = 0\nstruct A {\n  xs: [3]u8\n}\npub fn h(xs: [0]A) -> u8 = 0\n");
+        let values = 3 * (1u128 << 11) - 1;
+        assert!(!called(&text, "f", values - 1));
+        assert!(called(&text, "f", values));
+        assert!(!called(&text, "h", 3));
+        assert!(called(&text, "h", 4));
+        // A chain of structs, each holding the one before it, a value `levels` deep.
+        let chain = |levels: usize| {
+            let mut text = String::from("module m\nstruct C1 {\n  x: u8\n}\n");
+            for k in 2..levels {
+                text.push_str(&format!("struct C{k} {{\n  x: C{}\n}}\n", k - 1));
+            }
+            text.push_str(&format!("pub fn f(c: C{}) -> u8 = 0\n", levels - 1));
+            text
+        };
+        let deepest = NESTING_LIMIT as usize;
+        assert!(called(&chain(deepest), "f", u128::MAX));
+        assert!(!called(&chain(deepest + 1), "f", u128::MAX));
+    }
 
     /// A module of one function `f`, as a generated program.
     fn written(body: &str) -> Program {

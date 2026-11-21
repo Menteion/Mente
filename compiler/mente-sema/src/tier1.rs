@@ -32,6 +32,8 @@ use crate::check::Typing;
 use crate::literals;
 use crate::names::{BindingKind, Resolution};
 use crate::octagon::{Exact, Octagon, Term, BIG, INF, RELATIONAL_LIMIT};
+use crate::structs::Decl;
+use crate::type_walk::{Facts, Field, Fold, TypeWalk};
 use crate::types::{Int, IntTy, Ty, I64, INT_TYPES, USIZE};
 
 pub mod smt;
@@ -1528,91 +1530,102 @@ type PathVal = (Vec<String>, Val);
 /// declared shape: an integer field, and each scalar path of a struct field, in the order of
 /// the declaration. Each takes one of `room`, which they are taken from only when they all fit.
 /// `None` when there are more than `room`, and for a struct that contains itself, which no value
-/// has (`E0225`).
+/// has (`E0225`). `counts` holds the number of each struct's paths ([`path_counts`]).
 fn scalar_paths(
     structs: &crate::structs::Structs,
+    counts: &Facts<usize>,
     name: &str,
     room: &mut usize,
 ) -> Option<Vec<(Vec<String>, Shape)>> {
-    scalar_paths_counted(structs, name, room, &mut 0)
+    scalar_paths_counted(structs, counts, name, room, &mut 0)
 }
 
-/// How far [`path_count`] has counted a struct's scalar paths.
-#[derive(Clone, Copy, Debug)]
-enum Count {
-    Unseen,
-    /// Being counted: a struct met again here contains itself.
-    Open,
-    /// Counted, saturating; `None` for a struct that contains itself or reaches one that does.
-    Done(Option<usize>),
+/// The number of scalar paths of each struct of `structs`, saturating, worked out once by the
+/// type walk (`type_walk`): an integer field one, a struct field its struct's, and an array or any
+/// other field none; none for a struct that contains itself or holds one that does, or that names
+/// a struct the module does not declare. However many paths structs nested level by level double
+/// to, the count takes a step per declaration and per node of each field's type, and nests no
+/// deeper on the host's stack however long a chain of structs is.
+fn path_counts(structs: &crate::structs::Structs) -> Facts<usize> {
+    TypeWalk::new(structs).fold(&mut PathCount)
 }
 
-/// [`scalar_paths`], adding to `visits` each struct it enters. Each struct's paths are counted
-/// once, by its index, so counting takes a step per struct and per field whatever the number
-/// of paths, which structs nested level by level double at each level, with fields of integers
-/// or of none. The walk that lists the paths enters only a struct that has some, so it takes at
-/// most a step per level of nesting for each path it lists, and lists none past the room.
+/// The fold of [`path_counts`]: an integer is one path, an array none, since a path goes
+/// through no element, and a struct the sum of its fields'; an enum is none, since a path goes
+/// through no variant.
+struct PathCount;
+
+impl Fold for PathCount {
+    type Fact = usize;
+
+    fn leaf(&mut self, t: &Ty) -> Option<usize> {
+        Some(match t {
+            Ty::Int(_) => 1,
+            Ty::Bool | Ty::Array(..) | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => 0,
+        })
+    }
+
+    fn array(&mut self, _: u128, _: usize) -> Option<usize> {
+        Some(0)
+    }
+
+    fn decl(&mut self, d: Decl, variants: &[Vec<Field<'_, usize>>]) -> Option<usize> {
+        match d {
+            Decl::Enum(_) => Some(0),
+            Decl::Struct(_) => variants
+                .iter()
+                .flatten()
+                .try_fold(0usize, |n, f| f.fact.map(|k| n.saturating_add(k))),
+        }
+    }
+}
+
+/// [`scalar_paths`], adding to `visits` each struct the listing enters. It enters only a struct
+/// that has some paths, so it takes at most a step per level of nesting for each path it lists,
+/// and lists none past the room. The listing is a walk of its own, not a fold: what it makes is
+/// the paths themselves, each a step per level, which the room bounds before it starts.
 fn scalar_paths_counted(
     structs: &crate::structs::Structs,
+    counts: &Facts<usize>,
     name: &str,
     room: &mut usize,
     visits: &mut usize,
 ) -> Option<Vec<(Vec<String>, Shape)>> {
     let at = structs.position(name)?;
-    let mut counts = vec![Count::Unseen; structs.defs.len()];
-    let n = path_count(structs, at, &mut counts, visits)?;
+    let n = *counts.of(Decl::Struct(at))?;
     let left = room.checked_sub(n)?;
     let mut out = Vec::new();
-    list_paths(structs, at, &counts, &mut Vec::new(), &mut out, visits);
+    list_paths(structs, at, counts, &mut out, visits);
     *room = left;
     Some(out)
 }
 
-/// The number of scalar paths of the struct at `at` in `structs.defs`, saturating, each struct
-/// counted once in `counts`; `None` when it contains itself or reaches one that does, or names
-/// a struct the module does not declare.
-fn path_count(
-    structs: &crate::structs::Structs,
-    at: usize,
-    counts: &mut [Count],
-    visits: &mut usize,
-) -> Option<usize> {
-    match counts[at] {
-        Count::Done(n) => return n,
-        Count::Open => return None,
-        Count::Unseen => {}
-    }
-    *visits = visits.saturating_add(1);
-    counts[at] = Count::Open;
-    let def = &structs.defs[at];
-    let mut n = Some(0usize);
-    for f in &def.fields {
-        let k = match Fx::declared_shape(def.tree(), f.decl) {
-            Shape::Int { .. } => Some(1),
-            Shape::Struct(inner) => structs
-                .position(&inner)
-                .and_then(|i| path_count(structs, i, counts, visits)),
-            Shape::Array(..) | Shape::Other => Some(0),
-        };
-        n = n.zip(k).map(|(a, b)| a.saturating_add(b));
-    }
-    counts[at] = Count::Done(n);
-    n
-}
-
-/// Pushes to `out` the scalar paths of the struct at `at`, under the field names `prefix`,
-/// entering only the struct fields that have some, as `counts` holds them.
+/// Pushes to `out` the scalar paths of the struct at `at`, entering only the struct fields that
+/// have some, as `counts` holds them, with a stack of its own, so that a chain of structs, each
+/// holding the one before it, nests no deeper on the host's stack however long it is: one level
+/// of the host's stack for each struct overflowed a thread's 2 MiB at a chain of 3,000
+/// (2026-11-22).
 fn list_paths(
     structs: &crate::structs::Structs,
     at: usize,
-    counts: &[Count],
-    prefix: &mut Vec<String>,
+    counts: &Facts<usize>,
     out: &mut Vec<(Vec<String>, Shape)>,
     visits: &mut usize,
 ) {
     *visits = visits.saturating_add(1);
-    let def = &structs.defs[at];
-    for f in &def.fields {
+    // The structs entered, the outermost first, each with the fields it has taken; and the
+    // names of the fields entered, one for each struct below the outermost.
+    let mut stack: Vec<(usize, usize)> = vec![(at, 0)];
+    let mut prefix: Vec<String> = Vec::new();
+    while let Some(&(s, k)) = stack.last() {
+        let def = &structs.defs[s];
+        let Some(f) = def.fields.get(k) else {
+            stack.pop();
+            prefix.pop();
+            continue;
+        };
+        let top = stack.len() - 1;
+        stack[top].1 = k + 1;
         match Fx::declared_shape(def.tree(), f.decl) {
             shape @ Shape::Int { .. } => {
                 let mut names = prefix.clone();
@@ -1623,13 +1636,10 @@ fn list_paths(
                 let Some(i) = structs.position(&inner) else {
                     continue;
                 };
-                match counts[i] {
-                    Count::Done(Some(0)) | Count::Done(None) | Count::Open | Count::Unseen => {}
-                    Count::Done(Some(_)) => {
-                        prefix.push(f.name.clone());
-                        list_paths(structs, i, counts, prefix, out, visits);
-                        prefix.pop();
-                    }
+                if counts.of(Decl::Struct(i)).is_some_and(|&n| n > 0) {
+                    *visits = visits.saturating_add(1);
+                    prefix.push(f.name.clone());
+                    stack.push((i, 0));
                 }
             }
             Shape::Array(..) | Shape::Other => {}
@@ -2463,6 +2473,17 @@ impl<'a> Fx<'a> {
             entry_measures,
         } = Fx::rest(f, callees, &mut n);
         let mut room = RELATIONAL_LIMIT.saturating_sub(n.0);
+        // The number of each struct's paths, worked out once for the function, and only when
+        // one of its bindings is a struct.
+        let counts = f
+            .typing
+            .bindings
+            .iter()
+            .any(|t| match t {
+                Ty::Struct(_) => true,
+                Ty::Int(_) | Ty::Bool | Ty::Array(..) | Ty::Enum(_) | Ty::Unit | Ty::Any => false,
+            })
+            .then(|| path_counts(f.structs));
         let paths: Vec<Vec<FieldPath>> = f
             .typing
             .bindings
@@ -2472,7 +2493,10 @@ impl<'a> Fx<'a> {
                     return Vec::new();
                 };
                 let mut left = room;
-                let Some(listed) = scalar_paths(f.structs, s, &mut left) else {
+                let Some(listed) = counts
+                    .as_ref()
+                    .and_then(|counts| scalar_paths(f.structs, counts, s, &mut left))
+                else {
                     return Vec::new();
                 };
                 room = left;
@@ -10607,7 +10631,7 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
             assert!(declared.iter().any(|d| d.code == "E0225"), "{}", decls);
             let mut room = RELATIONAL_LIMIT;
             assert!(
-                scalar_paths(&structs, name, &mut room).is_none(),
+                scalar_paths(&structs, &path_counts(&structs), name, &mut room).is_none(),
                 "{}",
                 decls
             );
@@ -10621,7 +10645,7 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         let parsed = mente_syntax::parse_structs(&src, &m);
         let (structs, _) = crate::structs::declare(&m, &parsed, &[]);
         let mut room = RELATIONAL_LIMIT;
-        let paths = scalar_paths(&structs, "T", &mut room).unwrap();
+        let paths = scalar_paths(&structs, &path_counts(&structs), "T", &mut room).unwrap();
         assert_eq!(
             paths.iter().map(|p| p.0.join(".")).collect::<Vec<_>>(),
             ["a.n", "b.n"]
@@ -10648,12 +10672,13 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
         let parsed = mente_syntax::parse_structs(&src, &m);
         let (structs, _) = crate::structs::declare(&m, &parsed, &[]);
         let mut room = RELATIONAL_LIMIT;
-        let paths = scalar_paths(&structs, "S5", &mut room).unwrap();
+        let counts = path_counts(&structs);
+        let paths = scalar_paths(&structs, &counts, "S5", &mut room).unwrap();
         assert_eq!((paths.len(), room), (64, RELATIONAL_LIMIT - 64));
         assert_eq!(paths[1].0, ["l", "l", "l", "l", "l", "b"]);
         // Paths past the room take none of it.
         let mut room = RELATIONAL_LIMIT;
-        assert!(scalar_paths(&structs, "S40", &mut room).is_none());
+        assert!(scalar_paths(&structs, &counts, "S40", &mut room).is_none());
         assert_eq!(room, RELATIONAL_LIMIT);
         // A function of such bindings, of 2^21 paths each within the size a value may have,
         // follows none of them, and checks.
@@ -10671,6 +10696,34 @@ pub fn f(mut p: V, mut q: W) -> u8[0..1] {
                 path
             )]
         );
+    }
+
+    /// A chain of structs, each holding the one before it, has one scalar path through every
+    /// level, which counting and listing find in a step per struct each, with stacks of their
+    /// own: a walk that took a level of the host's stack for each struct overflowed a thread's
+    /// 2 MiB at a chain of 3,000, which this chain is far past (2026-11-22).
+    #[test]
+    fn test_a_long_chain_of_structs_is_walked_on_a_stack_of_its_own() {
+        let levels = 20_000;
+        let mut src = String::from("module t\npub struct S0 {\n  n: u8\n}\n");
+        for k in 1..levels {
+            src.push_str(&format!("pub struct S{} {{\n  a: S{}\n}}\n", k, k - 1));
+        }
+        let m = mente_syntax::parse_module(&src).unwrap();
+        let parsed = mente_syntax::parse_structs(&src, &m);
+        let (structs, declared) = crate::structs::declare(&m, &parsed, &[]);
+        assert!(declared.is_empty(), "{:?}", declared);
+        let (mut room, mut visits) = (RELATIONAL_LIMIT, 0);
+        let outermost = format!("S{}", levels - 1);
+        let counts = path_counts(&structs);
+        assert_eq!(counts.steps, 2 * levels);
+        let paths =
+            scalar_paths_counted(&structs, &counts, &outermost, &mut room, &mut visits).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0.len(), levels);
+        assert!(paths[0].0[..levels - 1].iter().all(|n| n == "a"));
+        assert_eq!(paths[0].0[levels - 1], "n");
+        assert_eq!((visits, room), (levels, RELATIONAL_LIMIT - 1));
     }
 
     /// Counting a struct's scalar paths takes a step per struct, however many paths its nesting
@@ -10709,29 +10762,33 @@ pub struct S0 {{
             let (structs, declared) = crate::structs::declare(&m, &parsed, &[]);
             assert!(declared.is_empty(), "{:?}", declared);
             let (mut room, mut visits) = (RELATIONAL_LIMIT, 0);
-            let paths = scalar_paths_counted(&structs, name, &mut room, &mut visits);
-            (paths.map(|p| p.len()), visits)
+            let counts = path_counts(&structs);
+            let paths = scalar_paths_counted(&structs, &counts, name, &mut room, &mut visits);
+            (paths.map(|p| p.len()), counts.steps, visits)
         };
-        // Leaves of no integer: no path, a step per struct to count, and one into the outermost
-        // to list none. Thirty levels of `bool` keep within the size a value may have (`E0223`).
-        let empty = [("[0]u8", 40), ("bool", 30)];
-        for (leaf, levels) in empty {
+        // The count's steps: a step for each of the `levels + 1` structs, for each node of the
+        // leaf's type, and for each of the two fields of every level.
+        let steps = |leaf_nodes: usize, levels: usize| levels + 1 + leaf_nodes + 2 * levels;
+        // Leaves of no integer: no path, and a step into the outermost to list none. Thirty
+        // levels of `bool` keep within the size a value may have (`E0223`).
+        let empty = [("[0]u8", 2, 40), ("bool", 1, 30)];
+        for (leaf, nodes, levels) in empty {
             let outermost = format!("S{}", levels);
             assert_eq!(
                 count(&nested(leaf, levels), &outermost),
-                (Some(0), levels + 2),
+                (Some(0), steps(nodes, levels), 1),
                 "{}",
                 leaf
             );
         }
         // Integer leaves past the room: given up on after the count, which listed nothing.
-        assert_eq!(count(&nested("u8", 30), "S30"), (None, 31));
+        assert_eq!(count(&nested("u8", 30), "S30"), (None, steps(1, 30), 0));
         // Within the room: the 64 paths of six levels, each listed in a step per level.
-        let (paths, visits) = count(&nested("u8", 6), "S6");
-        assert_eq!(paths, Some(64));
-        assert!(visits <= 7 + 64 * 7, "{}", visits);
+        let (paths, counted, visits) = count(&nested("u8", 6), "S6");
+        assert_eq!((paths, counted), (Some(64), steps(1, 6)));
+        assert!(visits < 2 * 64, "{}", visits);
         // A function of such a binding checks, of either leaf.
-        for (leaf, levels) in empty {
+        for (leaf, _, levels) in empty {
             let src = format!(
                 "{}pub fn f(s: S{}) -> u8 = 0
 ",

@@ -1137,6 +1137,120 @@ mod tests {
         );
     }
 
+    /// The instrument for walks over the structure of types (the review of pull request 184):
+    /// types nested as a DAG of structs, each holding two of the one before it, forty deep, and
+    /// as a chain of sixty thousand, each holding the one before it, pass every phase. Each is
+    /// checked with Tier 1 and without it, its public functions are given arguments by the
+    /// generator and called on the reference interpreter, on MIR with every check and without
+    /// the proven ones, and natively; and it goes through each of the fuzzer's phases once:
+    /// check, render, the incremental session, Tier 1's reports, the arguments' shapes and
+    /// values, lowering, the MIR dump, an object for each target, the host bound, and both
+    /// interpreters. A walk that follows each path of the DAG does not end, and one that recurses
+    /// a level of the host's stack for each struct of the chain overflows this test's thread.
+    ///
+    /// It runs only where the job sets `MENTE_NESTED_TYPES=run`, CI's x86-64 Linux tests, under
+    /// CI's memory limits (`.github/scripts/limits.sh`): the DAG, run on the three paths on a
+    /// laptop while one walk still followed each path, filled 107 GB and forced a restart
+    /// (2026-11-22). A job that sets `skip` skips it, as Coverage and the mutation runs do, and
+    /// so does a machine that is no CI's, saying why. On CI, where `CI` reaches the test through
+    /// the sandbox as `MENTE_*` does and `GITHUB_ACTIONS` does not, a job that sets neither fails
+    /// it, so that it can never pass there without having run.
+    #[test]
+    fn test_types_nested_as_a_dag_or_a_long_chain_pass_every_phase() {
+        match std::env::var("MENTE_NESTED_TYPES").as_deref() {
+            Ok("run") => {}
+            Ok("skip") => {
+                println!("skipped: this job sets MENTE_NESTED_TYPES=skip");
+                return;
+            }
+            Ok(other) => panic!("MENTE_NESTED_TYPES is `run` or `skip`, not `{other}`"),
+            Err(_) if std::env::var_os("CI").is_some() => panic!(
+                "every CI job that runs the tests sets MENTE_NESTED_TYPES to `run` or `skip`; \
+                 this one sets neither, so this test cannot show that it ran"
+            ),
+            Err(_) => {
+                println!(
+                    "skipped: types nested as a DAG forty deep and a chain of sixty thousand run \
+                     only where MENTE_NESTED_TYPES=run, on a GitHub runner under CI's memory \
+                     limits, until the laptop's tests have a memory cap"
+                );
+                return;
+            }
+        }
+        let mut dag = String::from("module m\npub struct S0 {\n  a: [0]u8\n}\n");
+        for k in 1..=40 {
+            dag.push_str(&format!(
+                "pub struct S{k} {{\n  l: S{p}\n  r: S{p}\n}}\n",
+                p = k - 1
+            ));
+        }
+        dag.push_str("pub fn whole(s: S40) -> u8 = 0\npub fn small(s: S2, k: u8) -> u8 = k\n");
+        let mut chain = String::from("module m\npub struct C0 {\n  a: u8\n}\n");
+        for k in 1..60_000 {
+            chain.push_str(&format!("pub struct C{k} {{\n  a: C{}\n}}\n", k - 1));
+        }
+        chain.push_str("pub fn deep(c: C59999) -> u8 = 0\npub fn shallow(c: C1) -> u8 = c.a.a\n");
+        let dir = scratch("nested-types");
+        let mut report = Report::default();
+        for (name, src) in [("dag", &dag), ("chain", &chain)] {
+            let own = dir.join(name);
+            fs::create_dir_all(&own).unwrap();
+            report.add(
+                name.to_string(),
+                "nested",
+                src,
+                compare_source(src, 0, FEW, Some(&own)),
+            );
+            let case = crate::fuzz::Case {
+                text: src.clone(),
+                edit: 0,
+                thorough: true,
+            };
+            let mut phases = crate::fuzz::InProcess(crate::fuzz::Phases::default());
+            let outcome = crate::fuzz::Executor::exec(&mut phases, &case).unwrap();
+            assert!(
+                outcome.failures.is_empty(),
+                "{name}: {:?}",
+                outcome.failures
+            );
+            for phase in [
+                "check",
+                "tier1",
+                "shapes",
+                "lower",
+                "dump-mir",
+                "host-bound",
+                "mir",
+            ] {
+                assert!(outcome.reached(phase), "{name}: {phase} not reached");
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
+        println!("{}", report.summary());
+        assert!(report.failures.is_empty(), "{}", report.failures());
+        assert!(report.rejected.is_empty(), "{}", report.summary());
+        // `small` and `shallow` are called; `whole` holds 2^41 values and `deep` nests past the
+        // parser's levels, so the generator gives them none.
+        assert!(report.calls > 0, "{}", report.summary());
+        // A DAG of refined structs thirty-one deep, a value of 2 GiB: its entry's checks, 2^31 of
+        // them unrolled, are counted first, and the lowering stops at its limit at once, where it
+        // would have built code without end; the checker accepts the module.
+        let mut refined = String::from("module m\npub struct R0 {\n  a: u8[1..=3]\n}\n");
+        for k in 1..=31 {
+            refined.push_str(&format!(
+                "pub struct R{k} {{\n  l: R{p}\n  r: R{p}\n}}\n",
+                p = k - 1
+            ));
+        }
+        refined.push_str("pub fn f(s: R31) -> u8 = 0\n");
+        let checked = mente_sema::check_program(&refined).unwrap();
+        let e = lower::lower(&checked).unwrap_err();
+        assert!(
+            e.contains("a limit of the compiler") && e.contains("`R31`"),
+            "{e}"
+        );
+    }
+
     /// One program, the file `MENTE_GEN_FILE` names, compared like a generated one, with the
     /// arguments `MENTE_GEN_FIRST_SEED` (0) gives: for reproducing and reducing a difference.
     #[test]
