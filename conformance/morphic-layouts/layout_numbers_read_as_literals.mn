@@ -1,0 +1,10 @@
+// expect: pass
+module conformance
+// Layout numbers are read as every integer literal is, in hexadecimal or binary or with `_`
+// between digits (morphic-layouts.md, item 2), where `[0x10]u8` and `[4_0]u8` once had no size.
+@layout(size: 0x40, align: 0b1000)
+pub struct Frame {
+  @bytes(0..0x10) pub tag: [0x10]u8
+  @bytes(0x10..56) pub body: [4_0]u8
+  @bytes(56..64) pub crc: u64
+}

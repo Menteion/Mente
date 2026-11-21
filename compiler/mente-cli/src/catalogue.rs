@@ -1022,9 +1022,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout field has no @bytes range",
-        "Every field of a `@layout` struct states its bytes with `@bytes(start..end)`. When the \
-         field's type has a known size, contiguity leaves one possible range, and the fix that \
-         inserts it is machine-applicable.",
+        "Every field of a `@layout` struct states its bytes with `@bytes(start..end)`, two \
+         integer literals. When the field's type has a known size, contiguity leaves one possible \
+         range, and the fix that writes it is machine-applicable: it inserts the range, or \
+         replaces a `@bytes` that is no range.",
         "module m\n@layout(size: 8, align: 4)\npub struct S {\n  @bytes(0..4) pub a: u32\n  pub b: u32\n}\n",
         "module m\n@layout(size: 8, align: 4)\npub struct S {\n  @bytes(0..4) pub a: u32\n  @bytes(4..8) pub b: u32\n}\n",
     ),
@@ -1075,7 +1076,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A @layout field's type has no known size",
         "A `@layout` struct means the same bytes on every target, so its fields are fixed-size \
          types: primitives, whole-byte `uN` / `iN`, fixed-point, arrays of those, and the module's \
-         own bitstructs and `@layout` structs. `usize` and `isize` depend on the target.",
+         own bitstructs and `@layout` structs. `usize` and `isize` depend on the target. An \
+         array of more elements, or more bytes, than a value may hold has no size either: keep \
+         fewer elements, or split the field.",
         "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub n: usize\n}\n",
         "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub n: u64\n}\n",
     ),
@@ -1135,7 +1138,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "spec/morphic-layouts.md",
         "A bitstruct's fields do not fill its backing type",
         "The last field ends at the width of the backing integer, so every bit has a name. Write \
-         spare bits as a field, or choose a narrower backing type.",
+         spare bits as a field, or choose a narrower backing type. No field reaches past bit 128, \
+         where the widest backing, `u128`, ends.",
         "module m\npub bitstruct B : u16 {\n  @bits(0..8) pub a: u8\n}\n",
         "module m\npub bitstruct B : u16 {\n  @bits(0..8) pub a: u8\n  @bits(8..16) pub spare: u8\n}\n",
     ),
@@ -1158,6 +1162,18 @@ pub const CATALOGUE: &[CodeEntry] = &[
          fixed-point values and other types have no bit-exact packing.",
         "module m\npub bitstruct B : u32 {\n  @bits(0..32) pub v: f32\n}\n",
         "module m\npub bitstruct B : u32 {\n  @bits(0..32) pub v: u32\n}\n",
+    ),
+    emitted(
+        "E0426",
+        FailureClass::HardwareContract,
+        "spec/morphic-layouts.md",
+        "A layout attribute is missing a number, or one is no integer literal",
+        "`@layout(size: S, align: A)` names both, each an integer literal, and nothing else; a \
+         bitstruct field states its bits with `@bits(start..end)`, two integer literals. Each \
+         number is read as any integer literal is, in hexadecimal or binary or with `_` between \
+         its digits, so the struct means the same bytes on every host.",
+        "module m\n@layout(size: 8)\npub struct S {\n  @bytes(0..8) pub v: u64\n}\n",
+        "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub v: u64\n}\n",
     ),
     emitted(
         "E0501",

@@ -1,0 +1,6 @@
+module m
+@layout(size: 8, align: 8)
+struct S {
+  @bytes(0..8) a: u64
+  @bytes(0..18446744073709551615) b: u64
+}
