@@ -1,4 +1,4 @@
-// expect: E0222 E0222 E0222
+// expect: E0222 E0222 E0222 E0222
 module conformance
 // Branches, or arms, that give arrays whose integers fit neither `i128` nor `u128` together meet
 // in no one machine type, as branches of integers that do not fit one together do not
@@ -19,3 +19,6 @@ pub fn named(c: bool, x: i8, y: u128) -> i64 {
   val r: [2]i64 = if c { a } else { b }
   r[0]
 }
+
+// So is an array literal of literals alone, kept exact until it lands as one of no one type is.
+pub fn literals_alone() -> [2]i8 = [-1, 340282366920938463463374607431768211455]

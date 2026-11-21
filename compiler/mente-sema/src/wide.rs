@@ -497,9 +497,10 @@ impl Wide<'_> {
         self.errors.push(d);
     }
 
-    /// `E0222` for an array literal at `at` whose elements, integers of no one type, kept exact
-    /// until the array lands, fit no one 128-bit type together. Its fix binds the element that
-    /// reaches above `i128` to an `i128` first. The hull of its integers is its range, which the
+    /// `E0222` for an array literal at `at` whose elements, integers of no one type or literals
+    /// alone, kept exact until the array lands, fit no one 128-bit type together. Its fix binds
+    /// the element that reaches above `i128` to an `i128` first; literals alone have none, since
+    /// a literal above `i128` bound to one always traps. The hull of its integers is its range, which the
     /// lowering keeps them in (`mir-and-codegen`'s lowering reads it), none for a literal of one
     /// integer type, whose elements are narrowed into it, or one reported.
     fn array(&mut self, at: Span, e: ExprId, items: &[ExprId]) -> Option<Range> {
@@ -514,12 +515,15 @@ impl Wide<'_> {
         let hull = ranges.iter().map(|(_, r)| *r).reduce(|h, r| h.hull(r));
         let top = Num::new(false, i128::MAX.unsigned_abs());
         let above = ranges.iter().find(|(_, r)| r.hi > top).map(|(i, _)| *i);
-        if let (true, Some(h), Some(item)) = (mixed, hull, above) {
+        if let (Some(h), Some(item)) = (hull, above) {
             if !h.fits() {
                 let message = "the elements of this array literal give values that no one of \
                                `i128` and `u128` holds together, and they are kept in one of them"
                     .to_string();
-                self.report_with(at, at, item, "i128", message);
+                match mixed {
+                    true => self.report_with(at, at, item, "i128", message),
+                    false => self.errors.push(Diagnostic::error("E0222", at, message)),
+                }
                 self.unfit[e.0 as usize] = true;
                 return None;
             }
@@ -532,16 +536,17 @@ impl Wide<'_> {
     /// lowering decides it (`Lower::exact`): `Some(true)` for integers of no one type, whose hull
     /// `E0222` holds to 128 bits, `Some(false)` for literals alone; none for any other.
     fn exact(&self, e: ExprId) -> Option<bool> {
-        let mut t = &self.typing.exprs[e.0 as usize];
-        let mut depth = 0;
+        let mut t = match &self.typing.exprs[e.0 as usize] {
+            Ty::Array(_, elem) => &**elem,
+            Ty::Int(_) | Ty::Bool | Ty::Struct(_) | Ty::Enum(_) | Ty::Unit | Ty::Any => {
+                return None
+            }
+        };
         loop {
             match t {
-                Ty::Array(_, inner) => {
-                    t = inner;
-                    depth += 1;
-                }
-                Ty::Int(Int::Mixed(None)) => return (depth > 0).then_some(true),
-                Ty::Int(Int::Literal) => return (depth > 0).then_some(false),
+                Ty::Array(_, inner) => t = inner,
+                Ty::Int(Int::Mixed(None)) => return Some(true),
+                Ty::Int(Int::Literal) => return Some(false),
                 Ty::Int(Int::One(_) | Int::Mixed(Some(_)))
                 | Ty::Bool
                 | Ty::Struct(_)
@@ -1300,6 +1305,16 @@ mod tests {
             "the branches of this `if` give arrays whose integers no one of `i128` and `u128` \
              holds together, and they meet in one of them"
         );
+        // A literal of literals alone kept exact is held to it as one of no one type is, with
+        // no fix: the lowering refused it where the checker let it through.
+        let alone = "pub fn f() -> [2]i8 = [-1, 340282366920938463463374607431768211455]";
+        let d = check_source(&module(alone)).unwrap_err();
+        assert_eq!(
+            (d.len(), d[0].code, d[0].fixes.len()),
+            (1, "E0222", 0),
+            "{:?}",
+            d
+        );
         // An array nested in a branch's literal, or read from an array of arrays, counts too.
         for src in [
             "pub fn f(c: bool, x: i8, y: u128) -> [1][2]i64 = if c { [[x; 2]] } else { [[y; 2]] }",
@@ -1314,6 +1329,45 @@ mod tests {
         ] {
             assert!(codes(src).is_empty(), "{}", src);
         }
+    }
+
+    /// The range `intervals` gives the expression of the last function of `src` whose text is
+    /// `text`.
+    fn interval_of(src: &str, text: &str) -> Option<super::Interval> {
+        let full = module(src);
+        let m = crate::check_program_without_proofs(&full).unwrap();
+        let f = m.functions.last()?.as_ref()?;
+        let at = f
+            .syntax
+            .tree
+            .exprs
+            .iter()
+            .position(|e| full.get(e.span.start..e.span.end) == Some(text))?;
+        super::intervals(&f.syntax, &f.resolution, &f.typing)[at]
+    }
+
+    /// An array kept exact until it lands, a literal of integers of no one type or of literals
+    /// alone and a repeat of one, takes the hull of its integers as its range, the one definition
+    /// the lowering keeps them in and `E0222` holds to 128 bits; a literal of one integer type,
+    /// whose elements are narrowed into it, and a repeat of one take none.
+    #[test]
+    fn test_an_exact_array_takes_the_hull_of_its_integers_as_its_range() {
+        let iv = |lo: i128, hi: u128| {
+            Some(super::Interval {
+                lo: (lo < 0, lo.unsigned_abs()),
+                hi: (false, hi),
+            })
+        };
+        let mixed = "pub fn f(a: i8, b: u128[0..=1000]) -> [2]i128 = [a, b]";
+        assert_eq!(interval_of(mixed, "[a, b]"), iv(-128, 1000));
+        let alone = "pub fn f() -> [2]u16 = [1, 300]";
+        assert_eq!(interval_of(alone, "[1, 300]"), iv(1, 300));
+        let repeat = "pub fn f(a: i8, b: u128[0..=1000]) -> [2][2]i128 = [[a, b]; 2]";
+        assert_eq!(interval_of(repeat, "[[a, b]; 2]"), iv(-128, 1000));
+        let one = "pub fn f(a: u8) -> [2]u8 = [a, 1_u8]";
+        assert_eq!(interval_of(one, "[a, 1_u8]"), None);
+        let copies = "pub fn f(a: u8) -> [4]u8 = [a; 4]";
+        assert_eq!(interval_of(copies, "[a; 4]"), None);
     }
 
     #[test]
