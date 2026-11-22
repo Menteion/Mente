@@ -2337,6 +2337,7 @@ fn run(
     if ask.states {
         fx.states = Some(states::States {
             tracked: fx.tracked(),
+            unwalked: fx.unwalked(),
             ..states::States::default()
         });
     }
@@ -4416,7 +4417,7 @@ impl<'a> Fx<'a> {
         let name = self.syntax.name.clone();
         let syntax = self.syntax;
         for c in &syntax.contracts {
-            if c.kind != ContractKind::Ensures || self.outside(c.expr).is_some() {
+            if !self.proves_at_returns(c) {
                 continue;
             }
             let mut s = out.clone();
@@ -4484,6 +4485,24 @@ impl<'a> Fx<'a> {
     }
 
     // -- the containment oracle's records ([`states`]) ----------------------------------------
+
+    /// Whether `c` is an `ensures` Tier 1 proves, and so walks, at each return: one in the Tier-1
+    /// fragment. One outside it is routed, checked at run time by `@checked` or trusted by
+    /// `@prove`, and walked nowhere.
+    fn proves_at_returns(&self, c: &mente_syntax::tree::Contract) -> bool {
+        c.kind == ContractKind::Ensures && self.outside(c.expr).is_none()
+    }
+
+    /// The clauses the walk never enters, though a run evaluates them: each routed `ensures`
+    /// ([`Self::proves_at_returns`]). The oracle makes no claim inside them.
+    fn unwalked(&self) -> Vec<ExprId> {
+        self.syntax
+            .contracts
+            .iter()
+            .filter(|c| c.kind == ContractKind::Ensures && !self.proves_at_returns(c))
+            .map(|c| c.expr)
+            .collect()
+    }
 
     /// Each variable Tier 1 follows of a binding: the binding's own, and its field paths'.
     fn tracked(&self) -> Vec<states::Tracked> {
@@ -5503,6 +5522,13 @@ impl<'a> Fx<'a> {
                 }
             }
             let v = if a.is_empty() {
+                // An arm no path reaches, which a run that reaches it breaks (`states`): an
+                // expression's value is one of an empty state, and a block's statements and end
+                // have no state at all.
+                match arm.body {
+                    ArmBody::Expr(x) => self.note_value(&a, x, &Val::Other),
+                    ArmBody::Block(_) => {}
+                }
                 Val::Other
             } else {
                 match arm.body {

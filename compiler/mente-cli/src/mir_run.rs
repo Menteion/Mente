@@ -154,8 +154,20 @@ pub fn reference_within(
 ) -> Printed {
     let marked: Vec<bool> = args.iter().map(|(m, _)| *m).collect();
     let values = args.into_iter().map(|(_, v)| v).collect();
-    let (v, finals) =
-        mente_interp::call_leaving(module, name, values, limits).map_err(|s| s.to_string())?;
+    printed(
+        &marked,
+        mente_interp::call_leaving(module, name, values, limits),
+    )
+}
+
+/// What `mn run` prints of a reference run's outcome: the result, then what each argument
+/// `marked` `mut` leaves, or the stop.
+#[cfg(test)]
+pub fn printed(
+    marked: &[bool],
+    outcome: Result<(Value, Vec<Value>), mente_interp::Stop>,
+) -> Printed {
+    let (v, finals) = outcome.map_err(|s| s.to_string())?;
     let mut printed = vec![v.to_string()];
     for (_, last) in marked.iter().zip(finals).filter(|(m, _)| **m) {
         printed.push(format!("leaves {}", last));

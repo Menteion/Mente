@@ -10,12 +10,15 @@
 //! a scalar field path of a struct binding, which the interpreter's values of the same bindings
 //! are compared with.
 //!
-//! Cutting a state down is sound and exact: Tier 1 keeps its octagon tightly closed, so every
-//! bound the state implies between two variables, or on one, is an entry of its matrix, and the
-//! entries over the kept variables are the state with every other variable left free (Mine, "The
-//! octagon abstract domain", 2006, projection by strong closure). Every constraint written here is
-//! one the state holds, so a value that breaks one lies outside the state: the oracle reports no
-//! value the state admits.
+//! Cutting a state down is sound: every constraint written here is one the state holds, an entry
+//! of its matrix or a bound kept beside it, so a value that breaks one lies outside the state, and
+//! the oracle reports no value the state admits. It is exact for the matrix: Tier 1 keeps the
+//! octagon tightly closed, so every bound the matrix implies between two variables, or on one, is
+//! one of its entries, and the entries over the kept variables are the matrix with every other
+//! variable left free (Mine, "The octagon abstract domain", 2006, projection by strong closure).
+//! It is not exact beyond the matrix: a bound kept beside it, past its reach, is not carried along
+//! a relation, and past `RELATIONAL_LIMIT` variables the octagon is a box, which keeps no relation.
+//! What the oracle misses there it misses for want of a constraint, never by a false one.
 
 use mente_syntax::tree::{BlockId, ExprId, StmtId};
 
@@ -75,6 +78,10 @@ pub struct Value {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct States {
     pub tracked: Vec<Tracked>,
+    /// The roots of the parts of the tree the walk never enters, by design, though a run
+    /// evaluates them: each `ensures` outside the Tier-1 fragment, which `@checked` checks at run
+    /// time and `@prove` trusts. A point inside one has no state, and that is no claim.
+    pub unwalked: Vec<ExprId>,
     pub points: Vec<(Point, Facts)>,
     pub values: Vec<Value>,
 }
@@ -141,7 +148,7 @@ mod tests {
     use super::*;
     use mente_syntax::tree::Tree;
 
-    const SRC: &str = "module m\nstruct P {\n  a: u8\n}\npub fn f(x: u8) -> u8 {\n  val y: u16 = x + 1\n  var i: u8 = 0\n  val p = P(a: x)\n  val k: [2]u8 = [x, 3]\n  while i < x {\n    i = i + 1\n  }\n  return k[1] + (y - 1 - x) + p.a\n}\npub fn g(x: u8) -> u8 {\n  if x > 7 { todo(\"big\") } else { x }\n}\n";
+    const SRC: &str = "module m\nstruct P {\n  a: u8\n}\npub fn f(x: u8) -> u8 {\n  val y: u16 = x + 1\n  var i: u8 = 0\n  val p = P(a: x)\n  val k: [2]u8 = [x, 3]\n  while i < x {\n    i = i + 1\n  }\n  return k[1] + (y - 1 - x) + p.a\n}\npub fn g(x: u8) -> u8 {\n  if x > 7 { todo(\"big\") } else { x }\n}\n@checked\npub fn h(x: u8) -> u8\n  ensures result <= 127\n  ensures (if result > 3 { result > 3 } else { result <= 3 })\n{\n  val y: u8 = x / 2\n  y\n}\npub fn n(x: u8) -> u8 {\n  guard x > 0 else { return 1 }\n  match x {\n    0 => 7\n    _ => x\n  }\n}\npub fn w(a: u128, b: u8) -> u8 {\n  val c: u8 = b\n  c\n}\n";
 
     fn exact(v: i128) -> Option<Exact> {
         Some(Exact::from_i128(v))
@@ -264,6 +271,14 @@ mod tests {
             "{:?}",
             array
         );
+        // A value in a loop's body is written once, by the recording pass, from the head it
+        // settles on, though Houdini's rounds evaluate it too.
+        let step = value("i + 1");
+        assert!(
+            step.len() == 1 && step[0].lo == exact(1) && step[0].hi == exact(255),
+            "{:?}",
+            step
+        );
         // `todo` leaves its state empty, and its value is written as one of an empty state.
         let (_, g, gtree, _) = &all[1];
         let todo = expr(gtree, "todo(\"big\")");
@@ -272,6 +287,29 @@ mod tests {
             written.len() == 1 && written[0].empty && written[0].lo.is_none(),
             "{:?}",
             written
+        );
+        // A routed `ensures` is walked nowhere, and named as such; one in the fragment is
+        // walked, and a function without a routed clause names none.
+        assert!(f.unwalked.is_empty() && g.unwalked.is_empty());
+        let (_, h, htree, _) = &all[2];
+        let routed = expr(htree, "if result > 3 { result > 3 } else { result <= 3 }");
+        assert_eq!(h.unwalked, vec![routed]);
+        assert!(h.values.iter().all(|v| v.expr != routed));
+        assert!(h.values.iter().any(|v| v.expr == expr(htree, "127")));
+        // An arm Tier 1 holds unreachable has its value written as one of an empty state.
+        let (_, n, ntree, _) = &all[3];
+        let arm = expr(ntree, "7");
+        let written: Vec<&Value> = n.values.iter().filter(|v| v.expr == arm).collect();
+        assert!(written.len() == 1 && written[0].empty, "{:?}", written);
+        // A relation the matrix leaves unbounded is no relation: of a `u128` beside a `u8`, only
+        // the two with the `u128` negated are written.
+        let (_, w, wtree, wbody) = &all[4];
+        let (a, b) = (w.tracked[0].var, w.tracked[1].var);
+        let before = at(w, Point::Before(wtree.block(*wbody).stmts[0]));
+        let s = |var, neg| Signed { var, neg };
+        assert_eq!(
+            before[0].relations,
+            vec![(s(a, true), s(b, false), 255), (s(a, true), s(b, true), 0)]
         );
     }
 

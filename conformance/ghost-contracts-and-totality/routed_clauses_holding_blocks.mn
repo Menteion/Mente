@@ -1,0 +1,52 @@
+// expect: pass
+module conformance
+// Clauses that hold blocks: an `if` or a `match` with a block arm. Tier 1 walks a `requires`, a
+// routed invariant and a measure where it decides them, and walks a routed `ensures` nowhere,
+// though a run evaluates it; the containment oracle makes no claim inside the latter.
+
+@checked
+pub fn halve(x: u8) -> u8
+  ensures (if result > 3 { result > 3 } else { result <= 3 })
+{
+  val y: u8 = x / 2
+  y
+}
+
+@prove
+pub fn same(x: u8) -> u8
+  ensures (match result {
+    0 => true
+    _ => { result > 0 }
+  })
+{
+  x
+}
+
+@checked
+pub fn quarter(x: u8) -> u8
+  requires (if x > 3 { x > 3 } else { x <= 3 })
+{
+  val y: u8 = x / 4
+  y
+}
+
+@checked
+pub fn count(n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n
+    invariant (if i > 0 { i <= n } else { true })
+  {
+    i = i + 1
+  }
+  i
+}
+
+pub fn down(n: u8) -> u8 {
+  var i: u8 = n
+  while i > 0
+    decreases (if i > 0 { i } else { 0 })
+  {
+    i = i - 1
+  }
+  i
+}

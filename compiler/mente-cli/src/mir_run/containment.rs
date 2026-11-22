@@ -30,7 +30,7 @@ use mente_sema::tier1::states::{Point, Signed, States};
 use mente_sema::CheckedModule;
 use mente_syntax::tree::{ExprId, Tree};
 
-use super::CallArgs;
+use super::{printed, CallArgs, Printed};
 
 /// The most problems one program reports: past them the first ones say enough.
 const MOST: usize = 20;
@@ -77,6 +77,10 @@ struct Claims {
     end: Vec<AtPoint>,
     head: Vec<AtPoint>,
     values: Vec<Vec<Claimed>>,
+    /// The statements and blocks inside a clause Tier 1 never walks (`States::unwalked`),
+    /// where no state is no claim.
+    quiet_stmts: Vec<bool>,
+    quiet_blocks: Vec<bool>,
 }
 
 impl Claims {
@@ -86,7 +90,18 @@ impl Claims {
             end: vec![AtPoint::default(); tree.blocks.len()],
             head: vec![AtPoint::default(); tree.stmts.len()],
             values: vec![Vec::new(); tree.exprs.len()],
+            quiet_stmts: vec![false; tree.stmts.len()],
+            quiet_blocks: vec![false; tree.blocks.len()],
         };
+        for &root in &states.unwalked {
+            let sub = tree.subtree(root);
+            for s in sub.stmts {
+                c.quiet_stmts[s.0 as usize] = true;
+            }
+            for b in sub.blocks {
+                c.quiet_blocks[b.0 as usize] = true;
+            }
+        }
         let most = states.tracked.iter().map(|t| t.var + 1).max().unwrap_or(0);
         let mut tracked: Vec<Option<(usize, Vec<String>)>> = vec![None; most];
         for t in states.tracked {
@@ -129,6 +144,15 @@ impl Claims {
         }
     }
 
+    /// Whether `p` lies inside a clause Tier 1 never walks, where it makes no claim.
+    fn quiet(&self, p: Point) -> bool {
+        let at = |v: &[bool], i: u32| v.get(i as usize).copied().unwrap_or(false);
+        match p {
+            Point::Before(s) | Point::Head(s) => at(&self.quiet_stmts, s.0),
+            Point::End(b) => at(&self.quiet_blocks, b.0),
+        }
+    }
+
     fn at(&self, p: Point) -> Option<&AtPoint> {
         match p {
             Point::Before(s) => self.before.get(s.0 as usize),
@@ -145,6 +169,8 @@ pub struct Outcome {
     pub points: u64,
     pub values: u64,
     pub problems: Vec<(usize, String)>,
+    /// Each call's outcome on the reference interpreter, as `mn run` prints it.
+    pub printed: Vec<Printed>,
 }
 
 fn exact(x: Int) -> Exact {
@@ -332,6 +358,9 @@ impl<'a> Watch<'a> {
         let Some(Some(claims)) = claims.get(function) else {
             return;
         };
+        if claims.quiet(p) {
+            return;
+        }
         let at = match claims.at(p) {
             Some(at) if !at.records.is_empty() => at,
             _ => {
@@ -515,21 +544,28 @@ fn claims_of(src: &str, module: &CheckedModule) -> Vec<Option<Claims>> {
     claims
 }
 
-/// Runs each call of `calls` traced, watched by `watch`.
+/// Runs each call of `calls` traced, watched by `watch`, and keeps its outcome, printed, which
+/// is the reference outcome the comparison of the paths judges.
 fn watch_calls(watch: &mut Watch<'_>, calls: &[CallArgs], limits: Limits) {
     let ran = mente_interp::with_calls(watch.module, limits, |interp| {
+        let mut all = Vec::new();
         for (k, (f, args)) in calls.iter().enumerate() {
             watch.call = k;
+            let marked: Vec<bool> = args.iter().map(|(m, _)| *m).collect();
             let values = args.iter().map(|(_, v)| v.clone()).collect();
-            // The outcome is the comparison's to judge; the oracle reads the points on the way.
-            let _ = interp.traced(f, values, &mut |e| watch.event(e));
+            let outcome = interp.traced(f, values, &mut |e| watch.event(e));
+            all.push(printed(&marked, outcome));
         }
+        all
     });
-    if let Err(stop) = ran {
-        watch
-            .out
-            .problems
-            .push((0, format!("the traced runs did not run: {}", stop)));
+    match ran {
+        Ok(all) => watch.out.printed = all,
+        Err(stop) => {
+            // No call ran: each prints the stop, which the comparison reports as a difference.
+            let why = format!("the traced runs did not run: {}", stop);
+            watch.out.printed = calls.iter().map(|_| Err(why.clone())).collect();
+            watch.out.problems.push((0, why));
+        }
     }
 }
 
@@ -541,6 +577,15 @@ pub fn check(src: &str, module: &CheckedModule, calls: &[CallArgs], limits: Limi
     let mut watch = Watch::new(src, module, &claims);
     watch_calls(&mut watch, calls, limits);
     watch.out
+}
+
+/// Each call's outcome, printed, from the same traced runs as [`check`] makes, watched against no
+/// claims: what tracing alone does to a run, for the test that it does nothing.
+pub fn traced_outcomes(module: &CheckedModule, calls: &[CallArgs], limits: Limits) -> Vec<Printed> {
+    let claims: Vec<Option<Claims>> = (0..module.functions.len()).map(|_| None).collect();
+    let mut watch = Watch::new("", module, &claims);
+    watch_calls(&mut watch, calls, limits);
+    watch.out.printed
 }
 
 #[cfg(test)]
@@ -599,8 +644,11 @@ mod tests {
             SUM,
             "module m\npub fn f(x: u8, y: u8) -> u8 {\n  guard x < y else { return 0 }\n  val d: u8 = y - x\n  var r: u8 = x\n  r %= d\n  r\n}\n",
             "module m\nstruct P {\n  a: u8\n  b: i8\n}\npub fn g(x: u8) -> i16 {\n  val p = P(a: x, b: -3)\n  val k: [3]u8 = [x, 1, 2]\n  if p.a > 9 { p.a + k[2] } else { p.b - 1 }\n}\n",
+            // Routed clauses that hold blocks, which Tier 1 walks nowhere though a run evaluates
+            // them, and a match with an arm Tier 1 holds unreachable.
+            "module m\n@checked\npub fn h(x: u8) -> u8\n  ensures (if result > 3 { result > 3 } else { result <= 3 })\n{\n  val y: u8 = x / 2\n  y\n}\n@prove\npub fn k(x: u8) -> u8\n  ensures (match result {\n    0 => true\n    _ => { result > 0 }\n  })\n{\n  x\n}\npub fn n(x: u8) -> u8 {\n  guard x > 0 else { return 1 }\n  match x {\n    0 => 7\n    _ => x\n  }\n}\n",
         ];
-        let calls: [&[CallArgs]; 3] = [
+        let calls: [&[CallArgs]; 4] = [
             &[call("sum", &[0]), call("sum", &[5]), call("sum", &[255])],
             &[
                 call("f", &[3, 10]),
@@ -609,6 +657,16 @@ mod tests {
                 call("f", &[254, 255]),
             ],
             &[call("g", &[0]), call("g", &[10]), call("g", &[255])],
+            &[
+                call("h", &[0]),
+                call("h", &[8]),
+                call("h", &[255]),
+                call("k", &[0]),
+                call("k", &[200]),
+                call("n", &[0]),
+                call("n", &[1]),
+                call("n", &[9]),
+            ],
         ];
         for (src, calls) in srcs.iter().zip(calls) {
             let m = module(src);

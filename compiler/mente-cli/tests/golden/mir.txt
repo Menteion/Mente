@@ -40068,6 +40068,262 @@ block0(v0: u8, v1: effect):
 t0: stack-overflow @11:8 ["the call stack ran out"]
 t1: unreachable @11:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/ghost-contracts-and-totality/routed_clauses_holding_blocks.mn ==
+mente-dump 3 mir
+f0: fn halve(u8, effect) -> u8 frame 73 {
+block0(v0: u8, v1: effect):
+  v2: i64 = int 2 @11:19
+  v3: i64 = cast v0 @11:15
+  v4: i64 = assume nonzero v2, v1 @11:15
+  v5: i64 = div v3, v4 @11:15
+  v6: i64 = assume within 0..=255 v5, v4 @11:15
+  v7: u8 = cast v6 @11:15
+  v8: i64 = int 3 @9:24
+  v9: i64 = cast v7 @9:24
+  v10: bool = gt v9, v8 @9:24
+  branch v10, block1(v6), block2(v6)
+block1(v11: effect):
+  v15: i64 = int 3 @9:37
+  v16: i64 = cast v7 @9:37
+  v17: bool = gt v16, v15 @9:37
+  jump block3(v17, v11)
+block2(v12: effect):
+  v18: i64 = int 3 @9:58
+  v19: i64 = cast v7 @9:58
+  v20: bool = le v19, v18 @9:58
+  jump block3(v20, v12)
+block3(v13: bool, v14: effect):
+  v21: unit = check t0 v13, v14 @12:3
+  return v7 after v21
+block4(v22: effect):
+  trap t1 after v22
+t0: ensures @12:3 ["`ensures (if (> result 3) {(> result 3)} {(<= result 3)})` is false at this return"]
+t1: unreachable @12:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn same(u8, effect) -> u8 frame 71 {
+block0(v0: u8, v1: effect):
+  v4: i64 = int 0 @17:18
+  v5: i64 = cast v0 @17:18
+  v6: bool = eq v5, v4 @17:18
+  branch v6, block2(v1), block3(v1)
+block1(v2: bool, v3: effect):
+  v13: unit = check t0 v2, v3 @22:3
+  return v0 after v13
+block2(v7: effect):
+  v9: bool = bool true @18:10
+  jump block1(v9, v7)
+block3(v8: effect):
+  v10: i64 = int 0 @19:21
+  v11: i64 = cast v0 @19:21
+  v12: bool = gt v11, v10 @19:21
+  jump block1(v12, v8)
+block4(v14: effect):
+  trap t1 after v14
+t0: ensures @22:3 ["`ensures (match result (=> 0 true) (=> _ {(> result 0)}))` is false at this return"]
+t1: unreachable @22:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn quarter(u8, effect) -> u8 frame 69 {
+block0(v0: u8, v1: effect):
+  v2: i64 = int 4 @29:19
+  v3: i64 = cast v0 @29:15
+  v4: i64 = assume nonzero v2, v1 @29:15
+  v5: i64 = div v3, v4 @29:15
+  v6: i64 = assume within 0..=255 v5, v4 @29:15
+  v7: u8 = cast v6 @29:15
+  return v7 after v6
+block1(v8: effect):
+  trap t0 after v8
+t0: unreachable @30:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn count(u8, effect) -> u8 frame 75 {
+block0(v0: u8, v1: effect):
+  v2: i64 = int 0 @35:15
+  v3: i64 = assume within 0..=255 v2, v1 @35:15
+  v4: u8 = cast v3 @35:15
+  v5: addr = slot 1 @35:15
+  v6: unit = store v5, v4, v3 @35:15
+  jump block1(v6)
+block1(v7: effect):
+  v10: u8 = load v5, v7 @37:19
+  v11: i64 = int 0 @37:23
+  v12: i64 = cast v10 @37:23
+  v13: bool = gt v12, v11 @37:23
+  branch v13, block4(v10), block5(v10)
+block2(v8: effect):
+  v24: u8 = load v5, v8 @39:9
+  v25: i64 = int 1 @39:13
+  v26: i64 = cast v24 @39:9
+  v27: i64 = add v26, v25, v24 @39:9
+  v28: i64 = assume within 0..=255 v27, v24 @39:9
+  v29: u8 = cast v28 @39:9
+  v30: unit = store v5, v29, v28 @39:9
+  jump block1(v30)
+block3(v9: effect):
+  v31: u8 = load v5, v9 @41:3
+  return v31 after v31
+block4(v14: effect):
+  v18: u8 = load v5, v14 @37:27
+  v19: bool = le v18, v0 @37:32
+  jump block6(v19, v18)
+block5(v15: effect):
+  v20: bool = bool true @37:43
+  jump block6(v20, v15)
+block6(v16: bool, v17: effect):
+  v21: unit = check t0 v16, v17 @37:16
+  v22: u8 = load v5, v21 @36:9
+  v23: bool = lt v22, v0 @36:13
+  branch v23, block2(v22), block3(v22)
+block7(v32: effect):
+  trap t1 after v32
+t0: invariant @37:16 ["`invariant (if (> i 0) {(<= i n)} {true})` is false at the loop head"]
+t1: unreachable @41:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn down(u8, effect) -> u8 frame 86 {
+block0(v0: u8, v1: effect):
+  v2: addr = slot 1 @45:15
+  v3: unit = store v2, v0, v1 @45:15
+  v4: addr = slot 1 @46:3
+  v5: bool = bool false @46:3
+  v6: unit = store v4, v5, v3 @46:3
+  v7: addr = slot 16 @46:3
+  jump block1(v6)
+block1(v8: effect):
+  v11: u8 = load v2, v8 @46:9
+  v12: i64 = int 0 @46:13
+  v13: i64 = cast v11 @46:13
+  v14: bool = gt v13, v12 @46:13
+  branch v14, block2(v11), block3(v11)
+block2(v9: effect):
+  v15: u8 = load v2, v9 @47:19
+  v16: i64 = int 0 @47:23
+  v17: i64 = cast v15 @47:23
+  v18: bool = gt v17, v16 @47:23
+  branch v18, block4(v15), block5(v15)
+block3(v10: effect):
+  v65: u8 = load v2, v10 @51:3
+  return v65 after v65
+block4(v19: effect):
+  v23: u8 = load v2, v19 @47:27
+  v24: i64 = cast v23 @47:27
+  jump block6(v24, v23)
+block5(v20: effect):
+  v25: i64 = int 0 @47:38
+  jump block6(v25, v20)
+block6(v21: i64, v22: effect):
+  v26: u128 = load v7, v22 @47:38
+  v27: bool = bool false @47:38
+  v28: i64 = int 0 @47:38
+  v29: bool = lt v21, v28 @47:38
+  branch v29, block7(v26), block8(v26)
+block7(v30: effect):
+  v34: bool = bool true @47:38
+  jump block9(v34, v30)
+block8(v31: effect):
+  v35: i64 = assume within 0..=340282366920938463463374607431768211455 v21, v31 @47:38
+  v36: u128 = cast v35 @47:38
+  v37: bool = lt v36, v26 @47:38
+  jump block9(v37, v35)
+block9(v32: bool, v33: effect):
+  v38: i64 = int 0 @47:38
+  v39: bool = lt v21, v38 @47:38
+  branch v39, block10(v33), block11(v33)
+block10(v40: effect):
+  v44: bool = bool false @47:38
+  jump block12(v44, v40)
+block11(v41: effect):
+  v45: i64 = assume within 0..=340282366920938463463374607431768211455 v21, v41 @47:38
+  v46: u128 = cast v45 @47:38
+  v47: bool = eq v46, v26 @47:38
+  jump block12(v47, v45)
+block12(v42: bool, v43: effect):
+  v48: bool = and v42, v27 @47:38
+  v49: bool = or v32, v48 @47:38
+  v50: bool = load v4, v43 @47:38
+  v51: bool = not v50 @47:38
+  v52: bool = or v51, v49 @47:38
+  v53: bool = bool true @47:38
+  v54: unit = store v4, v53, v50 @47:38
+  v55: i64 = assume within 0..=340282366920938463463374607431768211455 v21, v54 @47:38
+  v56: u128 = cast v55 @47:38
+  v57: unit = store v7, v56, v55 @47:38
+  v58: u8 = load v2, v57 @49:9
+  v59: i64 = int 1 @49:13
+  v60: i64 = cast v58 @49:9
+  v61: i64 = sub v60, v59, v58 @49:9
+  v62: i64 = assume within 0..=255 v61, v58 @49:9
+  v63: u8 = cast v62 @49:9
+  v64: unit = store v2, v63, v62 @49:9
+  jump block1(v64)
+block13(v66: effect):
+  trap t0 after v66
+t0: unreachable @51:3 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn enter halve(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f0 t0 v0, v1 @8:8
+  v3: u8 = call f0 v0, v2 @8:8
+  return v3 after v3
+t0: stack-overflow @8:8 ["the call stack ran out"]
+t1: unreachable @8:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn enter same(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f1 t0 v0, v1 @16:8
+  v3: u8 = call f1 v0, v2 @16:8
+  return v3 after v3
+t0: stack-overflow @16:8 ["the call stack ran out"]
+t1: unreachable @16:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn enter quarter(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f2 t0 v0, v1 @26:8
+  v3: i64 = int 3 @27:20
+  v4: i64 = cast v0 @27:20
+  v5: bool = gt v4, v3 @27:20
+  branch v5, block1(v2), block2(v2)
+block1(v6: effect):
+  v10: i64 = int 3 @27:28
+  v11: i64 = cast v0 @27:28
+  v12: bool = gt v11, v10 @27:28
+  jump block3(v12, v6)
+block2(v7: effect):
+  v13: i64 = int 3 @27:44
+  v14: i64 = cast v0 @27:44
+  v15: bool = le v14, v13 @27:44
+  jump block3(v15, v7)
+block3(v8: bool, v9: effect):
+  v16: unit = check t1 v8, v9 @26:8
+  v17: u8 = call f2 v0, v16 @26:8
+  return v17 after v17
+t0: stack-overflow @26:8 ["the call stack ran out"]
+t1: requires @26:8 ["`requires (if (> x 3) {(> x 3)} {(<= x 3)})` is false at this call"]
+t2: unreachable @26:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn enter count(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f3 t0 v0, v1 @34:8
+  v3: u8 = call f3 v0, v2 @34:8
+  return v3 after v3
+t0: stack-overflow @34:8 ["the call stack ran out"]
+t1: unreachable @34:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn enter down(u8, effect) -> u8 {
+block0(v0: u8, v1: effect):
+  v2: unit = enter f4 t0 v0, v1 @44:8
+  v3: u8 = call f4 v0, v2 @44:8
+  return v3 after v3
+t0: stack-overflow @44:8 ["the call stack ran out"]
+t1: unreachable @44:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/ghost-contracts-and-totality/stale_fact_in_a_guard.mn ==
 mente-dump 3 mir
 f0: fn remainder(u8, u8, u8, effect) -> u8 frame 87 {

@@ -89,7 +89,8 @@ struct Outcome {
     /// The points and the values of expressions the containment oracle held against Tier 1's
     /// claims.
     contained: (u64, u64),
-    /// How long the paths took to compare, and the containment oracle after them.
+    /// How long MIR and native code took, and the reference interpreter's traced runs with the
+    /// containment oracle and Tier 1's claims it reads.
     timing: (std::time::Duration, std::time::Duration),
     findings: Vec<Finding>,
 }
@@ -168,14 +169,16 @@ fn proofs_behind(module: &CheckedModule, trap: &str, line: u32) -> String {
     }
 }
 
-/// Runs every call on the four paths and reports each difference. `proved` is the module as
-/// Tier 1 checked it, whose proofs the lowering uses; `kept`, the same module checked without
-/// Tier 1, whose lowering keeps every check. Native code is built in `scratch` when one is
-/// given.
+/// Compares every call on the four paths and reports each difference. `proved` is the module
+/// as Tier 1 checked it, whose proofs the lowering uses; `kept`, the same module checked without
+/// Tier 1, whose lowering keeps every check. `expected` holds each call's outcome on the
+/// reference interpreter, from the run the containment oracle traces (`containment::check`),
+/// so that each call runs there once. Native code is built in `scratch` when one is given.
 fn compare_module(
     proved: &CheckedModule,
     kept: &CheckedModule,
     calls: &[CallArgs],
+    expected: Vec<Printed>,
     scratch: Option<&Path>,
 ) -> Outcome {
     let mut out = Outcome::default();
@@ -221,8 +224,7 @@ fn compare_module(
     // code has no limit.
     let unfinished = Stop::OutOfSteps.to_string();
     let mut finished: Vec<(&CallArgs, Printed)> = Vec::new();
-    for c in calls {
-        let expected = reference_within(proved, &c.0, c.1.clone(), STEPS);
+    for (c, expected) in calls.iter().zip(expected) {
         if expected.as_ref().err() == Some(&unfinished) {
             out.unfinished += 1;
         } else {
@@ -393,12 +395,14 @@ fn compare_proved(
             }
         };
         let calls = generate::calls(src, proved, seed, plan);
+        // Each call runs once on the reference interpreter, traced: the oracle holds its points
+        // against Tier 1's states, and its outcome is the one the other paths are compared with.
         let started = std::time::Instant::now();
-        let mut out = compare_module(proved, &kept, &calls, scratch);
-        let compared = started.elapsed();
         let held = containment::check(src, proved, &calls, STEPS);
+        let referenced = started.elapsed();
+        let mut out = compare_module(proved, &kept, &calls, held.printed, scratch);
         out.contained = (held.points, held.values);
-        out.timing = (compared, started.elapsed() - compared);
+        out.timing = (started.elapsed() - referenced, referenced);
         for (k, detail) in held.problems {
             let call = calls.get(k).map_or(String::new(), |(f, a)| show_call(f, a));
             out.findings.push(Finding {
@@ -435,7 +439,8 @@ struct Report {
     unproven: u64,
     /// The points and the values of expressions the containment oracle checked.
     contained: (u64, u64),
-    /// How long the comparisons of the paths took together, and the containment oracle.
+    /// How long MIR and native code took together, and the reference interpreter's traced runs
+    /// with the containment oracle.
     timing: (std::time::Duration, std::time::Duration),
     /// Each program with findings: its name, its text and what was found.
     failures: Vec<(String, String, Vec<Finding>)>,
@@ -522,8 +527,8 @@ impl Report {
              the checks Tier 1 proved, and native code; {} of them trap; {} more left out, \
              unfinished within the reference interpreter's steps\n{} obligations proven by Tier \
              1, {} left to run time\n{} points and {} values of expressions the reference \
-             interpreter reached, held against Tier 1's states there, in {:.1} s beside the \
-             paths' {:.1} s\n{} programs with \
+             interpreter reached, held against Tier 1's states there, in {:.1} s of traced \
+             reference runs beside MIR's and native code's {:.1} s\n{} programs with \
              differences",
             self.calls,
             self.traps,
@@ -727,9 +732,27 @@ fn conformance_programs() -> Vec<(String, String)> {
 /// Compares every conformance program that must pass, with generated arguments for its public
 /// functions; the seed of each program's arguments is the length of its name and text, so that
 /// a run is the same everywhere.
+/// The parts the conformance suite's test is split into, so that none holds most of its time
+/// limit (`.config/nextest.toml`): each part takes the programs whose index in the sorted list
+/// leaves its number when divided by them, which spreads every directory across the parts.
+const PARTS: usize = 4;
+
+/// Part `k` of `PARTS` of the conformance programs that must pass.
+fn conformance_part(k: usize) -> Vec<(String, String)> {
+    conformance_programs()
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % PARTS == k)
+        .map(|(_, p)| p)
+        .collect()
+}
+
 fn run_conformance(plan: CallPlan, natively: bool) -> Report {
+    run_programs(conformance_programs(), plan, natively)
+}
+
+fn run_programs(programs: Vec<(String, String)>, plan: CallPlan, natively: bool) -> Report {
     let dir = natively.then(|| scratch("conformance"));
-    let programs = conformance_programs();
     let outcomes = parallel(programs, |(name, src)| {
         let seed = (name.len() * 7919 + src.len()) as u64;
         let own = dir.as_ref().map(|d| {
@@ -792,6 +815,15 @@ mod tests {
     use mente_interp::{Int, Value};
 
     use super::*;
+
+    /// Each call's outcome on the reference interpreter, for a test that compares a module it
+    /// builds by hand, without the oracle's traced runs.
+    fn references(m: &CheckedModule, calls: &[CallArgs]) -> Vec<Printed> {
+        calls
+            .iter()
+            .map(|(f, args)| reference_within(m, f, args.clone(), STEPS))
+            .collect()
+    }
 
     const FEW: CallPlan = CallPlan {
         random: 6,
@@ -1041,6 +1073,7 @@ mod tests {
         assert!(report.problems.is_empty(), "{}", report.summary());
         assert_eq!(report.accepted(), report.programs, "{}", report.summary());
         assert!(report.calls >= 60, "{}", report.summary());
+        assert!(report.contained.0 > 0, "{}", report.summary());
     }
 
     /// Among the seeds the comparison above runs, the generator ends some programs in a recursion
@@ -1079,15 +1112,99 @@ mod tests {
         assert!(deep > 0, "no program of seeds 0 to 8 ends in a recursion");
     }
 
-    /// Every conformance program that must pass, with generated arguments for its public
-    /// functions, prints the same on the four paths.
-    #[test]
-    fn test_three_paths_agree_on_the_conformance_suite() {
-        let report = run_conformance(FEW, true);
+    /// Every conformance program that must pass of part `k`, with generated arguments for its
+    /// public functions, prints the same on the four paths, and the reference interpreter's
+    /// runs lie within Tier 1's states (`containment`).
+    fn conformance_part_agrees(k: usize) {
+        let report = run_programs(conformance_part(k), FEW, true);
         println!("{}", report.summary());
         assert!(report.failures.is_empty(), "{}", report.failures());
         assert!(report.rejected.is_empty(), "{}", report.summary());
-        assert!(report.calls >= 100, "{}", report.summary());
+        assert!(report.calls >= 25, "{}", report.summary());
+        assert!(report.contained.0 > 0, "{}", report.summary());
+    }
+
+    #[test]
+    fn test_three_paths_agree_on_the_conformance_suite_part_1_of_4() {
+        conformance_part_agrees(0);
+    }
+
+    #[test]
+    fn test_three_paths_agree_on_the_conformance_suite_part_2_of_4() {
+        conformance_part_agrees(1);
+    }
+
+    #[test]
+    fn test_three_paths_agree_on_the_conformance_suite_part_3_of_4() {
+        conformance_part_agrees(2);
+    }
+
+    #[test]
+    fn test_three_paths_agree_on_the_conformance_suite_part_4_of_4() {
+        conformance_part_agrees(3);
+    }
+
+    /// The parts hold every conformance program that must pass, each once: a program in no part
+    /// would run on no path.
+    #[test]
+    fn test_the_conformance_suite_parts_hold_every_program_once() {
+        let mut parts: Vec<String> = (0..PARTS)
+            .flat_map(|k| conformance_part(k).into_iter().map(|(name, _)| name))
+            .collect();
+        parts.sort();
+        let all: Vec<String> = conformance_programs()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(!all.is_empty());
+        assert_eq!(parts, all);
+        assert_eq!(PARTS, 4, "the tests above name four parts");
+    }
+
+    /// The tracer only observes: the reference interpreter's traced run, whose outcome the other
+    /// paths are compared with, prints what a run nobody traces prints, value, trap or what a
+    /// `mut` argument leaves, on every fourth conformance program and a few generated ones. A
+    /// tracer that changed what a run does would otherwise move the reference itself, and no
+    /// comparison would see it.
+    #[test]
+    fn test_a_traced_run_prints_what_an_untraced_one_does() {
+        let mut programs: Vec<(String, CheckedModule, u64)> = conformance_programs()
+            .into_iter()
+            .step_by(4)
+            .filter_map(|(name, src)| {
+                let m = mente_sema::check_program(&src).ok()?;
+                Some((src, m, name.len() as u64))
+            })
+            .collect();
+        for seed in 0..6 {
+            let c = generate::checked(seed);
+            if let Some(m) = c.module {
+                programs.push((c.program.text, m, seed));
+            }
+        }
+        assert!(programs.len() > 25, "{}", programs.len());
+        let mut calls_seen = 0;
+        let mut traps = 0;
+        for (src, m, seed) in &programs {
+            // A few calls a function: the run's outcome, not its coverage, is what is compared.
+            let plan = CallPlan {
+                random: 3,
+                exhaustive: 8,
+            };
+            let calls = generate::calls(src, m, *seed, plan);
+            let traced = containment::traced_outcomes(m, &calls, STEPS);
+            let untraced = references(m, &calls);
+            assert_eq!(traced, untraced, "{}", src);
+            calls_seen += calls.len();
+            traps += untraced.iter().filter(|p| trap_at(p).is_some()).count();
+        }
+        // The runs compared hold traps as well as values.
+        assert!(
+            calls_seen > 100 && traps > 0,
+            "{} calls, {} traps",
+            calls_seen,
+            traps
+        );
     }
 
     /// A check Tier 1 did not prove, marked proven by hand, is left out of MIR; the call that
@@ -1107,7 +1224,7 @@ mod tests {
             )
         };
         let calls = vec![call(2), call(9)];
-        let fine = compare_module(&honest, &kept, &calls, None);
+        let fine = compare_module(&honest, &kept, &calls, references(&honest, &calls), None);
         assert!(fine.findings.is_empty(), "{:?}", fine.findings);
         assert_eq!((fine.calls, fine.traps), (2, 1));
         let mut wrong = honest.clone();
@@ -1119,7 +1236,7 @@ mod tests {
                 }
             }
         }
-        let found = compare_module(&wrong, &kept, &calls, None);
+        let found = compare_module(&wrong, &kept, &calls, references(&wrong, &calls), None);
         assert_eq!(found.findings.len(), 1, "{:?}", found.findings);
         let f = &found.findings[0];
         assert_eq!(f.kind, Kind::WrongProof);
@@ -1144,7 +1261,7 @@ mod tests {
             "f".to_string(),
             vec![(false, Value::Int(Int::from_u128(3)))],
         )];
-        let fine = compare_module(&module, &module, &calls, None);
+        let fine = compare_module(&module, &module, &calls, references(&module, &calls), None);
         assert!(fine.findings.is_empty(), "{:?}", fine.findings);
         let mut broken = module.clone();
         for f in broken.functions.iter_mut().flatten() {
@@ -1162,7 +1279,7 @@ mod tests {
                 f.syntax.tree.types[y].kind = mente_syntax::tree::TypeKind::Bool;
             }
         }
-        let found = compare_module(&broken, &broken, &calls, None);
+        let found = compare_module(&broken, &broken, &calls, references(&broken, &calls), None);
         assert_eq!(found.findings.len(), 1, "{:?}", found.findings);
         assert_eq!(
             found.findings[0].kind,
@@ -1309,6 +1426,8 @@ mod tests {
             "a generated program does not check, or a run contradicts a claim of Tier 1:\n{}",
             report.summary()
         );
+        // The containment oracle ran: the reference runs reached points it held against Tier 1.
+        assert!(report.contained.0 > 0, "{}", report.summary());
     }
 
     /// One program, the file `MENTE_GEN_FILE` names, compared like a generated one, with the
@@ -1413,5 +1532,6 @@ mod tests {
         println!("{}", report.summary());
         assert!(report.failures.is_empty(), "{}", report.failures());
         assert!(report.rejected.is_empty(), "{}", report.summary());
+        assert!(report.contained.0 > 0, "{}", report.summary());
     }
 }
