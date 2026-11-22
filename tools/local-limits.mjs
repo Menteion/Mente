@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "./store-apps.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// The script that runs a command in a job object.
@@ -118,8 +119,12 @@ export function runCapped(run, limits, { cwd, menteOnly = false } = {}) {
     console.error("local-limits: no job object off Windows: the command runs unbounded");
     spawned = { cmd: run[0], args: run.slice(1), env: { ...process.env, CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS } };
   } else {
+    if (storePowerShell(run[0])) {
+      console.error(`local-limits: ${run[0]} is the Store's PowerShell, or a program of a WindowsApps directory like it, which takes every process it starts out of the job: run ${SYSTEM_POWERSHELL} instead`);
+      return 2;
+    }
     const { cmd, args, env } = capped(run, limits);
-    spawned = { cmd, args, env: { ...process.env, CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS, ...env } };
+    spawned = { cmd, args, env: { ...withoutStoreApps(process.env), CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS, ...env } };
   }
   const r = spawnSync(spawned.cmd, spawned.args, { stdio: "inherit", env: spawned.env, cwd });
   if (r.error) console.error(`local-limits: ${run[0]} did not start: ${r.error.message}`);
@@ -128,6 +133,8 @@ export function runCapped(run, limits, { cwd, menteOnly = false } = {}) {
 
 /// The target cargo builds for on the laptop, whose runner the tools require.
 export const RUNNER_TARGET = "x86_64-pc-windows-msvc";
+/// The variable that names that runner over every configuration file.
+export const RUNNER_VARIABLE = `CARGO_TARGET_${RUNNER_TARGET.toUpperCase().replace(/-/g, "_")}_RUNNER`;
 
 /// The main checkout of this repository, whose tools/capped.mjs cargo's runner names: the directory
 /// a worktree's .git file points into, or `root` itself.
@@ -177,7 +184,7 @@ export function runnerIn(text) {
 /// The runner cargo uses for RUNNER_TARGET from `cwd`: CARGO_TARGET_<TARGET>_RUNNER, or the first
 /// configuration file that names one, as cargo reads them, from `cwd` up and then CARGO_HOME.
 export function cargoRunner(cwd = process.cwd(), env = process.env) {
-  const variable = env[`CARGO_TARGET_${RUNNER_TARGET.toUpperCase().replace(/-/g, "_")}_RUNNER`];
+  const variable = env[RUNNER_VARIABLE];
   if (variable) return variable.trim().split(/\s+/);
   const files = [];
   for (let at = path.resolve(cwd); ; at = path.dirname(at)) {
@@ -208,6 +215,12 @@ export function requireRunner({ cwd = process.cwd(), env = process.env, say = (l
   const words = cargoRunner(cwd, env);
   const held = Array.isArray(words) && words.length === 4 && /^node(\.exe)?$/i.test(path.basename(words[0])) && /[\\/]tools[\\/]capped\.mjs$/.test(words[1]) && fs.existsSync(words[1]) && words[2] === "--mente-only" && words[3] === "--";
   if (held) return true;
+  // The variable cargo reads before every file: when it names the runner, it is what to change
+  // (the review of PR 195's last round).
+  if (env[RUNNER_VARIABLE]) {
+    say(`local-limits: ${RUNNER_VARIABLE} is set to ${JSON.stringify(env[RUNNER_VARIABLE])}, which cargo uses as its runner over every configuration file, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Unset it, or set it to:\n\n${RUNNER_VARIABLE}=node ${path.join(mainCheckout(), "tools", "capped.mjs").replace(/\\/g, "/")} --mente-only --\n`);
+    return false;
+  }
   const home = env.CARGO_HOME || path.join(os.homedir(), ".cargo");
   say(`local-limits: cargo's runner on this laptop is ${words ? JSON.stringify(words) : "not set"}, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Add these two lines to ${path.join(home, "config.toml")}:\n\n[target.${RUNNER_TARGET}]\n${runnerLine()}\n`);
   return false;

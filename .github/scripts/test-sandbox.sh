@@ -764,7 +764,7 @@ probe_outlive() {
 # end, by SIGTERM as nextest stops a test and by SIGKILL, before the command has started or after,
 # ends the namespace. No crash in it starts the runner's core handler.
 check() {
-  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay cores costs serial parallel began refused outlives
+  local work marker decoy listener shm port tool args control confined route state module failed=0 status wrapper start direct inside k started handled delay cores costs serial parallel began refused outlives out at
   declare -A outside in_sandbox
   if [ "${RUNNER_OS:-}" != Linux ]; then
     echo "No sandbox on ${RUNNER_OS:-this machine}."
@@ -967,12 +967,20 @@ check() {
   # capabilities, no_new_privs, the signals it starts with blocked or ignored, the descriptors it
   # holds, its limits, its umask and its environment; and the descriptors are its standard input,
   # output and error alone, which a child of the command lists while the command holds no other (the
-  # review of 34250a3: a command that held the lifeline's end saw the same view). And both refuse a
-  # command they could not hand over whole, before they record it.
+  # review of 34250a3: a command that held the lifeline's end saw the same view); its standard input
+  # is /dev/null, the character device 1:3 whatever path it was opened by before the root changed,
+  # so that no lifeline's end hides there; it starts in the directory it was started
+  # from; and it sees three processes, the namespace's first, the watcher and itself, counted by the
+  # shell's own reading of /proc (the final review of PR 179). And both refuse a command they could
+  # not hand over whole, before they record it.
   view='/usr/bin/cut -d " " -f 4- /proc/self/mountinfo
 /usr/bin/grep -E "^(Uid|Gid|Groups|NoNewPrivs|Seccomp|CapInh|CapPrm|CapEff|CapBnd|CapAmb|SigBlk|SigIgn):" /proc/self/status
 echo -n "descriptors: "
 /usr/bin/ls -m /proc/$$/fd
+/usr/bin/stat -L -c "standard input: %F %t:%T" /proc/$$/fd/0
+echo "directory: $(pwd -P)"
+set -- /proc/[0-9]*
+echo "processes: $#"
 /usr/bin/cat /proc/self/limits
 umask
 /usr/bin/env | /usr/bin/sort'
@@ -984,8 +992,14 @@ umask
     problem "a command sees another sandbox through the one program than through the shell's route: $(/usr/bin/diff <(printf '%s\n' "$through_shell") <(printf '%s\n' "$through_one") | /usr/bin/head -n 20 | /usr/bin/tr '\n' ' ')"
   elif ! /usr/bin/grep -q -x "descriptors: 0, 1, 2" <<< "$through_one"; then
     problem "a command in the sandbox holds a descriptor beyond its standard input, output and error, through both routes: $(/usr/bin/grep "^descriptors:" <<< "$through_one")"
+  elif ! /usr/bin/grep -q -x "standard input: character special file 1:3" <<< "$through_one"; then
+    problem "a command in the sandbox reads something other than /dev/null, the device 1:3, on its standard input, through both routes: $(/usr/bin/grep "^standard input:" <<< "$through_one")"
+  elif ! /usr/bin/grep -q -x -F "directory: $(pwd -P)" <<< "$through_one"; then
+    problem "a command in the sandbox starts elsewhere than where it was started, $(pwd -P), through both routes: $(/usr/bin/grep "^directory:" <<< "$through_one")"
+  elif ! /usr/bin/grep -q -x "processes: 3" <<< "$through_one"; then
+    problem "a command in the sandbox sees other processes than the namespace's first, the watcher and itself, through both routes: $(/usr/bin/grep "^processes:" <<< "$through_one")"
   else
-    echo "Through the one program and through the shell, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, signals, descriptors, limits and environment."
+    echo "Through the one program and through the shell, a command sees the same sandbox: $(printf '%s\n' "$through_one" | /usr/bin/grep -c .) lines of mounts, ids, capabilities, signals, descriptors, standard input, directory, processes, limits and environment."
   fi
   for route in "$program run" "/usr/bin/bash $self reference"; do
     k=$(/usr/bin/wc -l < "$log")
@@ -996,6 +1010,34 @@ umask
       if [ "$status" != 2 ]; then problem "${route% *} handed over a command it should refuse, '$refused': status $status"; fi
     done
     if [ "$(/usr/bin/wc -l < "$log")" != "$k" ]; then problem "${route% *} recorded a command it refused"; fi
+  done
+
+  # Where a command may not start, and what it may not run, through both routes (the final review
+  # of PR 179: no probe reached these refusals): a working directory outside the workspace, in the
+  # sandbox (/tmp) or not there at all ($work); a bare name that only the working directory holds,
+  # which runs nothing and ends as env ends it, with 127; and a target/tmp that is a link, which root
+  # mounts nothing through.
+  /usr/bin/printf '#!/bin/sh\necho %s\n' "$marker-bare" > target/test-sandbox-probe/bare-probe
+  /usr/bin/chmod +x target/test-sandbox-probe/bare-probe
+  for route in "$program run" "/usr/bin/bash $self reference"; do
+    for at in /tmp "$work"; do
+      status=0
+      # shellcheck disable=SC2086
+      out=$(cd "$at" && $route /usr/bin/true 2>&1) || status=$?
+      if [ "$status" != 2 ] || ! /usr/bin/grep -q -e "leads out of the workspace" -e "is not in the sandbox" <<< "$out"; then problem "${route% *} ran a command started in $at, outside the workspace: status $status: $out"; fi
+    done
+    status=0
+    # shellcheck disable=SC2086
+    out=$(cd target/test-sandbox-probe && $route bare-probe 2>&1) || status=$?
+    if [ "$status" != 127 ] || /usr/bin/grep -q "$marker-bare" <<< "$out"; then problem "${route% *} ran a bare name that only the working directory holds: status $status: $out"; fi
+    /usr/bin/mv target/tmp target/tmp.probe
+    /usr/bin/ln -s tmp.probe target/tmp
+    status=0
+    # shellcheck disable=SC2086
+    out=$($route /usr/bin/true 2>&1) || status=$?
+    /usr/bin/rm target/tmp
+    /usr/bin/mv target/tmp.probe target/tmp
+    if [ "$status" != 2 ] || ! /usr/bin/grep -q "is a link, lies under one or is no directory" <<< "$out"; then problem "${route% *} ran a command with target/tmp a link: status $status: $out"; fi
   done
 
   # The probe crashed two processes in the sandbox, one at a core limit it had lowered to 0. The

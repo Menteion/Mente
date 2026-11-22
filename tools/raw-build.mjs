@@ -13,6 +13,7 @@
 // The workflow policy loads it and tests it, so this module starts no process and reads nothing.
 
 import path from "node:path";
+import { SYSTEM_POWERSHELL, storePowerShell } from "./store-apps.mjs";
 
 /// The cargo commands that build nothing and run nothing of the repository's: every other one,
 /// `test`, `llvm-cov`, `fix` or one not yet written, is refused.
@@ -228,6 +229,18 @@ function verdict({ text, words }, depth) {
   }
   if (i >= words.length) return null;
   const program = programOf(v(i));
+  // tools/capped.mjs asked to run the Store's pwsh, which would take every process it starts out of
+  // the job: the same command with Windows PowerShell in its place (Norman, 2026-11-22). Its command
+  // is the word after its first `--`, by either separator of a path; tools/cargo.mjs and mn.mjs run
+  // cargo and mn, whatever their arguments name, so a test filter `--skip pwsh` is no program (the
+  // review of 55c40e7).
+  if (program === "node" && /(^|[\\/])tools[\\/]capped\.mjs$/i.test(v(i + 1))) {
+    const dash = words.findIndex((w, k) => k > i + 1 && w.value === "--");
+    const at = dash < 0 ? -1 : dash + 1;
+    if (at < 0 || at >= words.length || !storePowerShell(v(at))) return null;
+    const end = words[words.length - 1].end;
+    return { found: slice(i), instead: `${text.slice(words[i].start, words[at].start)}${SYSTEM_POWERSHELL}${text.slice(words[at].end, end)}`, reason: "would start the Store's pwsh inside the job, which takes every process it starts out of it" };
+  }
   if (program === "cargo") {
     let j = i + 1;
     while (j < words.length) {
@@ -265,9 +278,10 @@ export function refusal(command) {
   return refusalIn(command, 0);
 }
 
-/// The refusal's words for the session: what would run outside the limits, and what to run.
-export function message({ found, instead }) {
-  return `"${found}" would run outside the local limits. Run this instead: ${instead}\n(tools/cargo.mjs and tools/mn.mjs run each process in a job object that bounds its memory and time, and hold the machine to two builds at once: tools/local-limits.mjs.)`;
+/// The refusal's words for the session: what would run outside the limits, or what else it would
+/// do, and what to run.
+export function message({ found, instead, reason = "would run outside the local limits" }) {
+  return `"${found}" ${reason}. Run this instead: ${instead}\n(tools/cargo.mjs and tools/mn.mjs run each process in a job object that bounds its memory and time, and hold the machine to two builds at once: tools/local-limits.mjs.)`;
 }
 
 /// What the hook answers to `input`, its event as read from standard input: status 0 to let the
