@@ -17,6 +17,12 @@
 //! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate;
 //!   `@example` bodies are parsed as tokens but not executed.
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
+//! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes/` per week and per area;
+//!   `--check` checks each escape as its test does.
+//! - `mn evidence --spec-guard F --nextest F... [--node F]...`: Checks every guard of the escaped bugs
+//!   and every test an `@assert-count` names as evidence against what the runners run.
+//! - `mn pressure [--since D] [--top N]`: Reads `main`'s history from `git log` on its standard input and
+//!   ranks the files by how many merged pull requests changed them, each with what it is among the records.
 
 use std::env;
 use std::fs;
@@ -25,8 +31,9 @@ use std::process;
 use std::time::Instant;
 
 use mente_ast::project_spec_blueprint;
+use mente_cli::{escapes, evidence, pressure, records};
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
-use mente_sema::check_module;
+use mente_sema::{Listings, SourceChecked};
 use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
 
@@ -85,6 +92,9 @@ fn run() {
         "dump" => cmd_dump(&args[1..]),
         "smt" => cmd_smt(&args[1..]),
         "fuzz" => cmd_fuzz(&args[1..]),
+        "escapes" => cmd_escapes(&args[1..]),
+        "evidence" => cmd_evidence(&args[1..]),
+        "pressure" => cmd_pressure(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -116,6 +126,9 @@ fn print_help() {
     println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
+    println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes/ per week and per area; --check checks each escape");
+    println!("  mn evidence --spec-guard F --nextest F... [--node F]...  Check each escape's guard and each test named as evidence against the tests the runners run");
+    println!("  mn pressure [--since D] [--top N]  Rank the files by how many merged pull requests changed them, from git log on stdin");
     println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
     println!("                               Fuzz every phase of the compiler, and minimize each crash found");
 }
@@ -740,28 +753,92 @@ fn cmd_check(args: &[String]) {
         process::exit(1);
     }
 
+    // Each piece printed as soon as it is made, so that a file reached stays reported if a later
+    // one stops the run.
+    let run = check_files(
+        &files,
+        json,
+        mente_sema::check_source_listed,
+        |(stream, text)| match stream {
+            Stream::Out => print!("{}", text),
+            Stream::Err => eprint!("{}", text),
+        },
+    );
+    if !run.ok() {
+        process::exit(1);
+    }
+}
+
+/// Where a piece of `mn check`'s output goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stream {
+    Out,
+    Err,
+}
+
+/// One file as `mn check` reports it: its name as shown, its source, its diagnostics and what it
+/// lists.
+struct FileChecked {
+    shown: String,
+    src: String,
+    diagnostics: Vec<Diagnostic>,
+    listings: Listings,
+}
+
+/// What `mn check` checked of its files: each file it read, and how many it could not read.
+struct CheckRun {
+    files: Vec<FileChecked>,
+    unread: usize,
+}
+
+impl CheckRun {
+    /// Whether every file read and checked, with no diagnostic.
+    fn ok(&self) -> bool {
+        self.unread == 0 && self.files.iter().all(|f| f.diagnostics.is_empty())
+    }
+}
+
+/// The whole of `mn check` over `files`: each read, checked by `prove`, which parses a module's
+/// source and checks it in one run of the checker, Tier 1 included
+/// (`mente_sema::check_source_listed`), and reported in the text form or the JSON form, each piece
+/// handed to `emit` with its stream as soon as its file is checked. Nothing else checks a file, so
+/// a test that counts `prove`'s runs holds `mn check` to one proof of each module: it once ran the
+/// checker for a module's verdict and again for what it lists, and a corpus program whose proof
+/// takes seconds made the diagnostics test run past its limit on Windows (pull request 183 brought
+/// the program, 207 the first fix, and its review this structure). What a file reported stays
+/// printed if a later file stops the run, by a panic, a hang or the time a probe is held to.
+fn check_files(
+    files: &[PathBuf],
+    json: bool,
+    mut prove: impl FnMut(&str) -> SourceChecked,
+    mut emit: impl FnMut((Stream, String)),
+) -> CheckRun {
     let t0 = Instant::now();
-    let mut all_ok = true;
-    // Each file with its source and its diagnostics, for the JSON form.
-    let mut checked: Vec<(String, String, Vec<Diagnostic>, mente_sema::Listings)> = Vec::new();
-    for file in &files {
+    let mut checked = Vec::new();
+    let mut unread = 0;
+    for file in files {
         let shown = file.display().to_string();
         let src = match fs::read_to_string(file) {
             Ok(src) => src,
             Err(e) => {
-                eprintln!("error: cannot read `{}`: {}", shown, e);
-                all_ok = false;
+                emit((
+                    Stream::Err,
+                    format!("error: cannot read `{}`: {}\n", shown, e),
+                ));
+                unread += 1;
                 continue;
             }
         };
-        let diagnostics = match parse_module(&src) {
-            Err(d) => vec![d],
-            Ok(module) => match check_module(&src, &module) {
-                Ok(rep) => {
-                    if !json {
-                        let proj = project_spec_blueprint(&module);
-                        println!(
-                            "[PASS] [{}] module `{}` | spec_hash: {}.. | layouts: {} | bitstructs: {} | @branchless: {} | @total: {} | @kernel: {}",
+        let SourceChecked { verdict, listings } = prove(&src);
+        let diagnostics = match verdict {
+            Err(diagnostics) => diagnostics,
+            Ok((module, rep)) => {
+                if !json {
+                    let proj = project_spec_blueprint(&module);
+                    emit((
+                        Stream::Out,
+                        format!(
+                            "[PASS] [{}] module `{}` | spec_hash: {}.. | layouts: {} | bitstructs: {} | @branchless: {} | @total: {} | @kernel: {}\n",
                             shown,
                             rep.module_path,
                             &proj.hashes.spec_hash[..12],
@@ -770,58 +847,65 @@ fn cmd_check(args: &[String]) {
                             rep.branchless_functions_verified,
                             rep.total_functions_verified,
                             rep.kernel_functions_verified,
-                        );
-                        for lp in &rep.layout_proofs {
-                            println!(
-                                "       Proven @layout `{}` ({} bytes, align {} bytes — 0 padding holes)",
+                        ),
+                    ));
+                    for lp in &rep.layout_proofs {
+                        emit((
+                            Stream::Out,
+                            format!(
+                                "       Proven @layout `{}` ({} bytes, align {} bytes — 0 padding holes)\n",
                                 lp.struct_name, lp.total_bytes, lp.align_bytes
-                            );
-                        }
+                            ),
+                        ));
                     }
-                    Vec::new()
                 }
-                Err(diagnostics) => diagnostics,
-            },
+                Vec::new()
+            }
         };
-        if !diagnostics.is_empty() {
-            all_ok = false;
-            if !json {
-                for d in &diagnostics {
-                    eprint!("{}", render_text(d, &shown, &src));
-                }
+        if !json {
+            for d in &diagnostics {
+                emit((Stream::Err, render_text(d, &shown, &src)));
             }
         }
-        // Every todo and every trusted clause, which change nothing in the verdict.
-        let listings = mente_sema::listings(&src);
+        // Every todo and every trusted clause, which change nothing in the verdict, from the
+        // same run of the checker.
         if !json {
             for line in listing_lines(&shown, &src, &listings) {
-                println!("{}", line);
+                emit((Stream::Out, format!("{}\n", line)));
             }
         }
-        checked.push((shown, src, diagnostics, listings));
+        checked.push(FileChecked {
+            shown,
+            src,
+            diagnostics,
+            listings,
+        });
     }
     if json {
-        let files: Vec<FileDiagnostics> = checked
+        let reports: Vec<FileDiagnostics> = checked
             .iter()
-            .map(|(file, src, diagnostics, listings)| FileDiagnostics {
-                file,
-                src,
-                diagnostics,
-                todos: &listings.todos,
-                axioms: &listings.axioms,
+            .map(|f| FileDiagnostics {
+                file: &f.shown,
+                src: &f.src,
+                diagnostics: &f.diagnostics,
+                todos: &f.listings.todos,
+                axioms: &f.listings.axioms,
             })
             .collect();
-        println!("{}", render_json(&files));
+        emit((Stream::Out, format!("{}\n", render_json(&reports))));
     } else {
-        println!(
-            "
-Checked {} `.mn` file(s) in {:.2} ms.",
-            files.len(),
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
+        emit((
+            Stream::Out,
+            format!(
+                "\nChecked {} `.mn` file(s) in {:.2} ms.\n",
+                files.len(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            ),
+        ));
     }
-    if !all_ok {
-        process::exit(1);
+    CheckRun {
+        files: checked,
+        unread,
     }
 }
 
@@ -853,11 +937,9 @@ fn cmd_explain(args: &[String]) {
 /// What `mn check` reports for one module's source, one diagnostic per line as `line:col code`:
 /// the form of a module's `.expected` file.
 fn diagnostic_lines(src: &str) -> Vec<String> {
-    let diagnostics = match parse_module(src) {
-        Err(d) => vec![d],
-        Ok(module) => check_module(src, &module).err().unwrap_or_default(),
-    };
-    diagnostics
+    mente_sema::check_source(src)
+        .err()
+        .unwrap_or_default()
         .iter()
         .map(|d| format!("{}:{} {}", d.primary.line, d.primary.col, d.code))
         .collect()
@@ -1258,6 +1340,162 @@ fn strip_mn_comments(src: &str) -> String {
     out
 }
 
+/// `mn escapes [--check]`: the record of escaped bugs, one file an escape in `docs/escapes/`, read
+/// from the current directory, counted per ISO week and per area; with `--check`, each escape checked against the tree
+/// as `tests/escapes.rs` checks it. The counts are printed, never written into a document.
+fn cmd_escapes(args: &[String]) {
+    let check = match args {
+        [] => false,
+        [flag] if flag == "--check" => true,
+        _ => {
+            eprintln!("Usage: mn escapes [--check]");
+            process::exit(1);
+        }
+    };
+    let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let rows = match escapes::read(&root.join(escapes::RECORD)) {
+        Ok(rows) => rows,
+        Err(problems) => {
+            for p in problems {
+                eprintln!("[FAIL] {}", p);
+            }
+            process::exit(1);
+        }
+    };
+    if !check {
+        print!("{}", escapes::counts(&rows));
+        return;
+    }
+    let problems = escapes::problems(&rows);
+    if problems.is_empty() {
+        println!(
+            "[PASS] mn escapes: every escape of {} holds",
+            escapes::RECORD
+        );
+    } else {
+        for p in problems {
+            eprintln!("[FAIL] {}", p);
+        }
+        process::exit(1);
+    }
+}
+
+/// `mn evidence --spec-guard <file> --nextest <file>... [--node <file>]...`: every guard of the
+/// record of escaped bugs, and every test an `@assert-count` names as evidence, checked against
+/// what the runners run (`evidence.rs`). The directives are spec-guard's own report of them; the
+/// Rust tests are nextest's list from each runner, a test listed on any of them counting, since a
+/// test may be compiled on one platform only; the Node tests are our reporter's report of each
+/// run. Run from the repository's root. A list that cannot be read fails the check.
+fn cmd_evidence(args: &[String]) {
+    fn usage() -> ! {
+        eprintln!(
+            "Usage: mn evidence --spec-guard <file> --nextest <file>... [--node <file>]...\n  spec-guard's report: {} > <file>\n  nextest's list, from each runner: {} > <file>\n  a Node run's report: {}",
+            evidence::SPEC_GUARD,
+            evidence::NEXTEST,
+            evidence::NODE
+        );
+        process::exit(1);
+    }
+    let mut spec_guard = None;
+    let mut nextest = Vec::new();
+    let mut node = Vec::new();
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let Some(file) = rest.next() else { usage() };
+        match flag.as_str() {
+            "--spec-guard" if spec_guard.is_none() => spec_guard = Some(file),
+            "--nextest" => nextest.push(file),
+            "--node" => node.push(file),
+            _ => usage(),
+        }
+    }
+    let Some(spec_guard) = spec_guard else {
+        usage()
+    };
+    if nextest.is_empty() {
+        usage();
+    }
+    let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let fail = |problems: Vec<String>| -> ! {
+        for p in problems {
+            eprintln!("[FAIL] {}", p);
+        }
+        process::exit(1);
+    };
+    fn load<T>(file: &str, parse: impl Fn(&str) -> Result<T, String>) -> Result<T, Vec<String>> {
+        fs::read_to_string(file)
+            .map_err(|e| format!("{}: {}", file, e))
+            .and_then(|t| parse(&t).map_err(|e| format!("{}: {}", file, e)))
+            .map_err(|e| vec![e])
+    }
+    let documents = evidence::spec_guard_files(&root).unwrap_or_else(|e| fail(vec![e]));
+    let named =
+        load(spec_guard, |t| evidence::spec_guard(t, &documents)).unwrap_or_else(|p| fail(p));
+    let mut runs = evidence::Runs::default();
+    for file in nextest {
+        runs.rust
+            .extend(load(file, evidence::nextest).unwrap_or_else(|p| fail(p)));
+    }
+    for file in node {
+        runs.node
+            .extend(load(file, evidence::node_report).unwrap_or_else(|p| fail(p)));
+    }
+    let quick = root.join("tools/quick-checks.json");
+    runs.quick = load(&quick.to_string_lossy(), evidence::quick_checks).unwrap_or_else(|p| fail(p));
+    let rows = escapes::read(&root.join(escapes::RECORD)).unwrap_or_else(|p| fail(p));
+    let mut problems = evidence::guards(&rows, &runs);
+    problems.extend(evidence::evidence(&root, &named, &runs));
+    if !problems.is_empty() {
+        fail(problems);
+    }
+    println!(
+        "[PASS] mn evidence: every guard of {} and every test named as evidence runs",
+        escapes::RECORD
+    );
+}
+
+/// `mn pressure [--since YYYY-MM-DD] [--top N]`: the pull requests merged in the log on standard
+/// input, as `pressure::LOG` prints it, and the files the most of them changed, the twenty first
+/// unless `--top` says how many (`pressure.rs`). A report, never a gate.
+fn cmd_pressure(args: &[String]) {
+    fn usage() -> ! {
+        eprintln!(
+            "Usage: {} && {} | mn pressure [--since YYYY-MM-DD] [--top N]",
+            pressure::FETCH,
+            pressure::LOG
+        );
+        process::exit(1);
+    }
+    let mut since: Option<&str> = None;
+    let mut top: Option<usize> = None;
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let Some(value) = rest.next() else { usage() };
+        match flag.as_str() {
+            "--since" if since.is_none() && records::is_day(value) => since = Some(value),
+            "--top" if top.is_none() => match value.parse::<usize>() {
+                Ok(n) if n > 0 => top = Some(n),
+                _ => usage(),
+            },
+            _ => usage(),
+        }
+    }
+    let log = match std::io::read_to_string(std::io::stdin()) {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("[FAIL] standard input: {}", e);
+            process::exit(1);
+        }
+    };
+    match pressure::merges(&log) {
+        Ok(merges) => print!("{}", pressure::report(&merges, since, top.unwrap_or(20))),
+        Err(e) => {
+            eprintln!("[FAIL] {}", e);
+            process::exit(1);
+        }
+    }
+}
+
 fn cmd_spec(_args: &[String]) {
     let t0 = Instant::now();
     let root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1283,6 +1521,215 @@ fn cmd_spec(_args: &[String]) {
 mod tests {
     use super::*;
     use mente_sema::verify_module;
+
+    /// A scratch directory of its own for a test, with the `.mn` files given, by name and text.
+    fn scratch_files(name: &str, files: &[(&str, &str)]) -> (PathBuf, Vec<PathBuf>) {
+        let dir = std::env::temp_dir().join(format!("mente-{}-{}", name, std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let paths = files
+            .iter()
+            .map(|(file, src)| {
+                let path = dir.join(file);
+                fs::write(&path, src).unwrap();
+                path
+            })
+            .collect();
+        (dir, paths)
+    }
+
+    /// The text of one stream of what `mn check` emitted.
+    fn emitted_on(emitted: &[(Stream, String)], stream: Stream) -> String {
+        emitted
+            .iter()
+            .filter(|(s, _)| *s == stream)
+            .map(|(_, t)| t.as_str())
+            .collect()
+    }
+
+    /// `mn check` proves each module once: the whole of its work over its files, read, checked and
+    /// printed in either form, runs the prover once for each file, and what it reports and lists of
+    /// a file is what that run gave, never a second check's. The prover here marks all it gives:
+    /// the module's name in its report when it checks, a diagnostic of its own when it does not, and
+    /// a `todo` of its own in the listings, each of which every file's report and output must show
+    /// once; a verdict or listings taken from another run of the checker lack them. A module that
+    /// checks, one with a `todo`, a trusted clause and an error, and one that does not parse. A
+    /// corpus program whose proof takes seconds made the diagnostics test run past its limit on
+    /// Windows while `mn check` proved it twice; the reviews of pull requests 207 and 212 found the
+    /// earlier tests pinned a helper, then the listings alone, not the path `mn check` takes.
+    #[test]
+    fn test_mn_check_proves_each_module_once() {
+        let sources = [
+            "module m\npub fn f(x: u8) -> u8 = x\n",
+            "module m\n@prove\npub fn h(x: u8) -> u8\n  requires x != 3\n= todo(\"b\")\npub fn k(x: u8) -> u8 = y\n",
+            "module m\nlet x = 1\n",
+        ];
+        let (dir, files) = scratch_files(
+            "check-once",
+            &[
+                ("f0.mn", sources[0]),
+                ("f1.mn", sources[1]),
+                ("f2.mn", sources[2]),
+            ],
+        );
+        const LISTED: &str = "listed by the one run";
+        const NAMED: &str = "named_by_the_one_run";
+        const REPORTED: &str = "reported by the one run";
+        let mark = mente_syntax::Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            col: 1,
+        };
+        for json in [false, true] {
+            let mut runs = 0;
+            let mut emitted = Vec::new();
+            let run = check_files(
+                &files,
+                json,
+                |src| {
+                    runs += 1;
+                    let mut checked = mente_sema::check_source_listed(src);
+                    checked.listings.todos.push((mark, LISTED.to_string()));
+                    match &mut checked.verdict {
+                        Ok((_, report)) => report.module_path = NAMED.to_string(),
+                        Err(diagnostics) => {
+                            diagnostics.push(Diagnostic::error("E0222", mark, REPORTED))
+                        }
+                    }
+                    checked
+                },
+                |piece| emitted.push(piece),
+            );
+            assert_eq!(runs, files.len(), "json: {json}");
+            assert!(!run.ok());
+            for (f, src) in run.files.iter().zip(sources) {
+                let mut own = mente_sema::check_source(src).err().unwrap_or_default();
+                if !own.is_empty() {
+                    own.push(Diagnostic::error("E0222", mark, REPORTED));
+                }
+                assert_eq!(f.diagnostics, own, "{}", f.shown);
+                assert_eq!(
+                    f.listings.todos.last().map(|t| t.1.as_str()),
+                    Some(LISTED),
+                    "{}",
+                    f.shown
+                );
+            }
+            let [pass, listed, unparsed] = &run.files[..] else {
+                panic!("three files")
+            };
+            assert!(pass.diagnostics.is_empty());
+            assert_eq!(unparsed.diagnostics.len(), 2);
+            assert_eq!(unparsed.listings.todos.len(), 1);
+            assert!(unparsed.listings.axioms.is_empty());
+            let todos: Vec<(u32, &str)> = listed
+                .listings
+                .todos
+                .iter()
+                .map(|(s, r)| (s.line, r.as_str()))
+                .collect();
+            assert_eq!(todos, [(5, "b"), (1, LISTED)]);
+            let axioms: Vec<(u32, &str)> = listed
+                .listings
+                .axioms
+                .iter()
+                .map(|(s, a)| (s.line, a.as_str()))
+                .collect();
+            assert_eq!(axioms, [(4, "requires x != 3 of h")]);
+            let (out, err) = (
+                emitted_on(&emitted, Stream::Out),
+                emitted_on(&emitted, Stream::Err),
+            );
+            assert_eq!(out.matches(LISTED).count(), files.len(), "{out}");
+            if json {
+                assert_eq!(out.matches(REPORTED).count(), 2, "{out}");
+                assert!(out.contains("\"reason\":\"b\""), "{out}");
+                assert!(err.is_empty(), "{err}");
+            } else {
+                assert_eq!(
+                    out.matches(&format!("module `{}`", NAMED)).count(),
+                    1,
+                    "{out}"
+                );
+                assert_eq!(err.matches(REPORTED).count(), 2, "{err}");
+                for d in &listed.diagnostics {
+                    assert!(
+                        err.contains(&render_text(d, &listed.shown, sources[1])),
+                        "{err}"
+                    );
+                }
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `mn check` reports each file as soon as it is checked: a run that stops at a file, here by a
+    /// panic, has already printed what every file before it gave, and nothing of the files after
+    /// it. It once printed all at the end, so that a panic, a hang or the time a probe is held to
+    /// lost every result reached (the review of pull request 212).
+    #[test]
+    fn test_mn_check_reports_each_file_before_the_next() {
+        let (dir, files) = scratch_files(
+            "check-early",
+            &[
+                ("a.mn", "module a\npub fn f(x: u8) -> u8 = x\n"),
+                (
+                    "b.mn",
+                    "module b\n// PLANTED_STOP\npub fn f(x: u8) -> u8 = x\n",
+                ),
+                ("c.mn", "module c\npub fn f(x: u8) -> u8 = x\n"),
+            ],
+        );
+        let mut emitted = Vec::new();
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            check_files(
+                &files,
+                false,
+                |src| {
+                    assert!(!src.contains("PLANTED_STOP"), "the run stops here");
+                    mente_sema::check_source_listed(src)
+                },
+                |piece| emitted.push(piece),
+            )
+        }));
+        assert!(stopped.is_err());
+        let out = emitted_on(&emitted, Stream::Out);
+        assert!(
+            out.contains("[PASS] [") && out.contains("module `a`"),
+            "{out}"
+        );
+        assert!(!out.contains("module `c`"), "{out}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An entry `mn check` cannot read fails the run, beside files that all check: a directory named
+    /// `x.mn`, which the run names on stderr; the same files alone pass.
+    #[test]
+    fn test_mn_check_fails_on_an_entry_it_cannot_read() {
+        let (dir, mut files) = scratch_files(
+            "check-unread",
+            &[("a.mn", "module a\npub fn f(x: u8) -> u8 = x\n")],
+        );
+        let ok = |files: &[PathBuf]| {
+            let mut emitted = Vec::new();
+            let run = check_files(files, false, mente_sema::check_source_listed, |piece| {
+                emitted.push(piece)
+            });
+            (run.ok(), run.unread, emitted_on(&emitted, Stream::Err))
+        };
+        assert_eq!(ok(&files), (true, 0, String::new()));
+        let unreadable = dir.join("x.mn");
+        fs::create_dir_all(&unreadable).unwrap();
+        files.push(unreadable);
+        let (passed, unread, err) = ok(&files);
+        assert!(!passed);
+        assert_eq!(unread, 1);
+        assert!(
+            err.contains("error: cannot read") && err.contains("x.mn"),
+            "{err}"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
 
     /// Whether a function of the module has a loop inside another loop, in its body or its
     /// condition, by their spans.

@@ -92,8 +92,11 @@ impl fmt::Display for IntTy {
 pub enum Ty {
     Int(IntTy),
     Bool,
-    /// The address of memory: a stack slot, an element of one, or what a caller passed.
-    Addr,
+    /// The address of memory of a shape ([`Mem`]): a stack slot, an element or a field of one,
+    /// or what a caller passed. Two addresses have one type only where they point at memory of
+    /// one shape, so a join, a call and a copy agree on it, and the verifier holds every slot,
+    /// element, load and store to it ([`verify`]).
+    Addr(MemId),
     /// What an instruction without a result has.
     Unit,
     /// The latest effect where a block begins: the type of its last parameter, and of no other,
@@ -102,14 +105,117 @@ pub enum Ty {
     Effect,
 }
 
+impl Ty {
+    /// The shape of the memory an address points at; none for a value that is no address.
+    pub fn mem(self) -> Option<MemId> {
+        match self {
+            Ty::Addr(m) => Some(m),
+            Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Effect => None,
+        }
+    }
+}
+
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Ty::Int(t) => write!(f, "{}", t),
             Ty::Bool => write!(f, "bool"),
-            Ty::Addr => write!(f, "addr"),
+            Ty::Addr(_) => write!(f, "addr"),
             Ty::Unit => write!(f, "unit"),
             Ty::Effect => write!(f, "effect"),
+        }
+    }
+}
+
+/// What memory holds at an address, so its every access: an integer, a boolean, an array of
+/// elements of one shape, or a record of fields at their offsets. A value is built in memory of
+/// one shape and read in that shape, never in another: an array of `i64` is not read as one of
+/// `u8`, whose elements lie at another stride.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Mem {
+    Int(IntTy),
+    /// A boolean, in a byte.
+    Bool,
+    /// No bytes: the element of an array of no elements.
+    Empty,
+    /// `len` elements of one shape, each its size past the one before.
+    Array {
+        len: u32,
+        elem: MemId,
+    },
+    /// Fields at their offsets within `size` bytes: a struct's, or an enum's tag at offset 0
+    /// and the fields of every variant's payload, where those of two variants may overlap.
+    Record {
+        size: u32,
+        fields: Vec<(u32, MemId)>,
+    },
+}
+
+/// A shape of memory, by its place in its module's table ([`Mems`]).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct MemId(pub u32);
+
+/// The shapes of memory a module's addresses point at, each held once: two addresses point at
+/// memory of one shape exactly where their [`MemId`]s are equal. A shape is added after the
+/// shapes it holds, so the table has no cycle.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Mems {
+    all: Vec<Mem>,
+    ids: std::collections::HashMap<Mem, MemId>,
+}
+
+impl Mems {
+    /// The id of `m`, added to the table if it is not there yet.
+    pub fn of(&mut self, m: Mem) -> MemId {
+        if let Some(id) = self.ids.get(&m) {
+            return *id;
+        }
+        let id = MemId(self.all.len() as u32);
+        self.all.push(m.clone());
+        self.ids.insert(m, id);
+        id
+    }
+
+    pub fn get(&self, id: MemId) -> Option<&Mem> {
+        self.all.get(id.0 as usize)
+    }
+
+    /// The bytes memory of the shape `id` takes.
+    pub fn size(&self, id: MemId) -> Option<u32> {
+        Some(match self.get(id)? {
+            Mem::Int(t) => t.bytes(),
+            Mem::Bool => 1,
+            Mem::Empty => 0,
+            Mem::Array { len, elem } => len.checked_mul(self.size(*elem)?)?,
+            Mem::Record { size, .. } => *size,
+        })
+    }
+
+    /// The type a load of memory of the shape `id` gives, and a store into it takes: an
+    /// integer's or a boolean's, none for an aggregate.
+    pub fn scalar(&self, id: MemId) -> Option<Ty> {
+        match self.get(id)? {
+            Mem::Int(t) => Some(Ty::Int(*t)),
+            Mem::Bool => Some(Ty::Bool),
+            Mem::Empty | Mem::Array { .. } | Mem::Record { .. } => None,
+        }
+    }
+
+    /// The shape `id`, as a diagnostic names it: `[4]u8`, `{0: u8, 8: [2]i64}`.
+    pub fn name(&self, id: MemId) -> String {
+        match self.get(id) {
+            None => format!("m{}", id.0),
+            Some(Mem::Int(t)) => t.to_string(),
+            Some(Mem::Bool) => "bool".into(),
+            Some(Mem::Empty) => "()".into(),
+            Some(Mem::Array { len, elem }) => format!("[{}]{}", len, self.name(*elem)),
+            Some(Mem::Record { fields, .. }) => {
+                let fields: Vec<String> = fields
+                    .iter()
+                    .map(|(at, m)| format!("{}: {}", at, self.name(*m)))
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
         }
     }
 }
@@ -251,7 +357,7 @@ pub enum CmpOp {
 fn int_ty(t: Ty) -> Option<IntTy> {
     match t {
         Ty::Int(i) => Some(i),
-        Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => None,
+        Ty::Bool | Ty::Addr(_) | Ty::Unit | Ty::Effect => None,
     }
 }
 
@@ -494,7 +600,8 @@ pub enum Op {
     /// or a fact a type gives, which costs nothing at run time (the Ghost Contract `Assume` of
     /// Engineering Guardrail #2). The MIR interpreter reports broken MIR where it does not hold.
     Assume(FactId),
-    /// A new stack slot of `bytes`, aligned to 16, its address the value.
+    /// A new stack slot of `bytes`, its address the value, at the alignment its size implies,
+    /// the largest power of two up to 16 that divides it.
     Slot {
         bytes: u32,
     },
@@ -723,7 +830,7 @@ impl Function {
             Op::Param => "param".into(),
             Op::Int(bits) => match self.ty(v) {
                 Ty::Int(t) => format!("int {}", Num::from_bits(*bits, t)),
-                Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => format!("int {}", bits),
+                Ty::Bool | Ty::Addr(_) | Ty::Unit | Ty::Effect => format!("int {}", bits),
             },
             Op::Bool(b) => format!("bool {}", b),
             Op::Arith { op, trap } => {
@@ -773,6 +880,8 @@ pub struct Module {
     /// The run's stack budget in bytes, which the lowering takes from the one the checker
     /// defines (`core-calculus.md`, item 25): every [`Op::Enter`] counts against it.
     pub budget: u128,
+    /// The shapes of memory its addresses point at ([`Ty::Addr`]).
+    pub mems: Mems,
 }
 
 impl Module {
@@ -1002,8 +1111,36 @@ impl Builder {
 
 /// The ways a function can be malformed, each found by [`verify`].
 pub fn verify(m: &Module) -> Result<(), String> {
+    verify_mems(&m.mems)?;
     for f in &m.functions {
         verify_function(m, f).map_err(|e| format!("fn {}: {}", f.name, e))?;
+    }
+    Ok(())
+}
+
+/// Every shape of memory holds only shapes added before it, so the table has no cycle; an
+/// array's bytes fit 32 bits; and a record's fields lie within its bytes.
+fn verify_mems(mems: &Mems) -> Result<(), String> {
+    for (i, m) in mems.all.iter().enumerate() {
+        let id = MemId(i as u32);
+        let before = |c: &MemId| c.0 < id.0;
+        let fits = match m {
+            Mem::Int(_) | Mem::Bool | Mem::Empty => true,
+            Mem::Array { elem, .. } => before(elem) && mems.size(id).is_some(),
+            Mem::Record { size, fields } => fields.iter().all(|(at, f)| {
+                before(f)
+                    && mems
+                        .size(*f)
+                        .and_then(|s| at.checked_add(s))
+                        .is_some_and(|end| end <= *size)
+            }),
+        };
+        if !fits {
+            return Err(format!(
+                "memory m{} holds a shape not added before it, or more bytes than it has",
+                id.0
+            ));
+        }
     }
     Ok(())
 }
@@ -1015,12 +1152,44 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
     if entry_tys != f.params {
         return Err("the entry block's parameters are not the function's".into());
     }
+    // Every address points at memory of a shape the module holds.
+    if let Some(v) = (0..n).find(|&v| match f.tys[v] {
+        Ty::Addr(id) => m.mems.get(id).is_none(),
+        Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Effect => false,
+    }) {
+        return Err(format!(
+            "v{} is the address of memory of a shape the module does not hold",
+            v
+        ));
+    }
+    // No function returns an address: a slot's address never outlives the call that made it.
+    if f.result.is_some_and(|t| t.mem().is_some()) {
+        return Err("the function returns an address, which would outlive its slot".into());
+    }
     let defined = |v: NodeId| (v.0 as usize) < n;
     let jump = |(b, args): &(BlockId, Vec<NodeId>)| -> Result<(), String> {
         let target = f
             .blocks
             .get(b.0 as usize)
             .ok_or(format!("a jump to block {} that does not exist", b.0))?;
+        // Where branches meet, an array built in one shape is never taken in another.
+        for (a, p) in args
+            .iter()
+            .zip(&target.params)
+            .filter(|(a, _)| defined(**a))
+        {
+            match (f.ty(*a).mem(), f.ty(*p).mem()) {
+                (Some(given), Some(taken)) if given != taken => {
+                    return Err(format!(
+                        "a jump to block {} passes memory of {} where it takes memory of {}",
+                        b.0,
+                        m.mems.name(given),
+                        m.mems.name(taken)
+                    ));
+                }
+                (Some(_) | None, Some(_) | None) => {}
+            }
+        }
         let admitted = args.len() == target.params.len()
             && args
                 .iter()
@@ -1046,6 +1215,7 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
                 return Err(format!("{}: an operand that does not exist", at()));
             }
             check_inst(m, f, v).map_err(|e| format!("{}: {}", at(), e))?;
+            check_memory(&m.mems, f, v).map_err(|e| format!("{}: {}", at(), e))?;
         }
         match &b.term {
             Term::Jump(t, args) => jump(&(*t, args.clone()))?,
@@ -1189,6 +1359,8 @@ struct Dominators {
     /// The places, in the order a walk of the tree enters the blocks, of each block and of the
     /// blocks it dominates; none for a block no path reaches.
     span: Vec<Option<Range<usize>>>,
+    /// The blocks each block's terminator may go to, in its order.
+    next: Vec<Vec<usize>>,
 }
 
 impl Dominators {
@@ -1282,7 +1454,7 @@ impl Dominators {
                 }
             }
         }
-        Dominators { span }
+        Dominators { span, next }
     }
 
     /// Whether a path from the entry reaches block `b`.
@@ -1308,7 +1480,8 @@ impl Dominators {
 /// dominates its block, and an operand of a terminator likewise. So nothing reads a value before
 /// an instruction gives it, and the order of a call's count is held by its values: a count
 /// stands after the arguments it takes, and before the narrowings, checks and call that take it
-/// ([`Op::Enter`]). A block no path reaches is not checked.
+/// ([`Op::Enter`]). Every cycle has a head that dominates it, and no address passes that head
+/// into the next round. A block no path reaches is not checked.
 fn verify_order(f: &Function) -> Result<(), String> {
     // Where each value is defined: its block, and its place there, 0 for a parameter.
     let mut defined: Vec<Option<(usize, usize)>> = vec![None; f.ops.len()];
@@ -1358,6 +1531,58 @@ fn verify_order(f: &Function) -> Result<(), String> {
                 "block {}: its terminator's operand v{} is not defined before it on every path",
                 b, a.0
             ));
+        }
+    }
+    // Every cycle has a head that dominates it, the block every round passes: in a walk from the
+    // entry, each jump to a block the walk is still inside, which closes a cycle, goes to a block
+    // that dominates the jump's own. A cycle none of whose blocks dominates the rest has no such
+    // head, so no back-edge, and the rule below would not see it as a loop.
+    let mut inside = vec![false; f.blocks.len()];
+    let mut seen = vec![false; f.blocks.len()];
+    let mut walk: Vec<(usize, usize)> = vec![(0, 0)];
+    (inside[0], seen[0]) = (true, true);
+    while let Some((b, k)) = walk.pop() {
+        let Some(&t) = dom.next[b].get(k) else {
+            inside[b] = false;
+            continue;
+        };
+        walk.push((b, k + 1));
+        if inside[t] && !dom.dominates(t, b) {
+            return Err(format!(
+                "block {}: the jump from block {} closes a cycle with no head that dominates it, \
+                 none of its blocks dominating the rest",
+                t, b
+            ));
+        }
+        if !seen[t] {
+            (inside[t], seen[t]) = (true, true);
+            walk.push((t, 0));
+        }
+    }
+    // No address crosses a loop's back-edge: a block a jump reaches from a block it dominates
+    // heads a loop, and none of its parameters is an address. So a loop that makes a slot makes
+    // it afresh in every round, as MIR's memory does, and no address of one round is alive in the
+    // next; native code gives every round of one `slot` the same bytes, and lays the slots never
+    // alive together over the same bytes by what this holds (`mente-codegen`'s `slots.rs`).
+    for (b, block) in f.blocks.iter().enumerate() {
+        if !reached(b) {
+            continue;
+        }
+        for head in successors(&block.term).into_iter().map(|t| t.0 as usize) {
+            if !dom.dominates(head, b) {
+                continue;
+            }
+            let carried = f
+                .blocks
+                .get(head)
+                .and_then(|h| h.params.iter().find(|p| f.ty(**p).mem().is_some()).copied());
+            if let Some(p) = carried {
+                return Err(format!(
+                    "block {}: it heads a loop, and its parameter v{} is an address, which the \
+                     back-edge from block {} would carry into the next round",
+                    head, p.0, b
+                ));
+            }
         }
     }
     Ok(())
@@ -1450,6 +1675,8 @@ enum Want {
     Is(Ty),
     Int,
     IntOrBool,
+    /// An address, of memory of any shape, which [`check_memory`] holds to its access.
+    Addr,
     /// A value of any type but unit: an argument as evaluated.
     Value,
     /// Any value: what a parameter of type [`Ty::Effect`] admits.
@@ -1462,6 +1689,7 @@ impl Want {
             Want::Is(x) => x == t,
             Want::Int => matches!(t, Ty::Int(_)),
             Want::IntOrBool => matches!(t, Ty::Int(_) | Ty::Bool),
+            Want::Addr => t.mem().is_some(),
             Want::Value => t != Ty::Unit,
             Want::Any => true,
         }
@@ -1471,7 +1699,7 @@ impl Want {
     fn param(t: Ty) -> Want {
         match t {
             Ty::Effect => Want::Any,
-            Ty::Int(_) | Ty::Bool | Ty::Addr | Ty::Unit => Want::Is(t),
+            Ty::Int(_) | Ty::Bool | Ty::Addr(_) | Ty::Unit => Want::Is(t),
         }
     }
 }
@@ -1526,29 +1754,18 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             let guarded = args.last().copied().unwrap_or(Ty::Unit);
             (Want::Is(guarded), wants, Some((*trap, values)))
         }
+        // The integer it states a fact of, which it yields.
         Op::Assume(fact) => {
             if f.facts.get(fact.0 as usize).is_none() {
                 return Err("an assumption of a fact that does not exist".into());
             }
-            (same, vec![Want::Int], None)
+            (Want::Int, vec![same], None)
         }
-        Op::Slot { .. } => (Want::Is(Ty::Addr), vec![], None),
-        Op::Elem { .. } => (
-            Want::Is(Ty::Addr),
-            vec![Want::Is(Ty::Addr), Want::Int],
-            None,
-        ),
-        Op::Load => (Want::IntOrBool, vec![Want::Is(Ty::Addr)], None),
-        Op::Store => (
-            Want::Is(Ty::Unit),
-            vec![Want::Is(Ty::Addr), Want::IntOrBool],
-            None,
-        ),
-        Op::Copy { .. } => (
-            Want::Is(Ty::Unit),
-            vec![Want::Is(Ty::Addr), Want::Is(Ty::Addr)],
-            None,
-        ),
+        Op::Slot { .. } => (Want::Addr, vec![], None),
+        Op::Elem { .. } => (Want::Addr, vec![Want::Addr, Want::Int], None),
+        Op::Load => (Want::IntOrBool, vec![Want::Addr], None),
+        Op::Store => (Want::Is(Ty::Unit), vec![Want::Addr, Want::IntOrBool], None),
+        Op::Copy { .. } => (Want::Is(Ty::Unit), vec![Want::Addr, Want::Addr], None),
         Op::Call(c) => {
             let callee = m
                 .functions
@@ -1587,6 +1804,102 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             f.op(v)
         )),
     }
+}
+
+/// Checks an access against the shape of the memory it reaches ([`Mem`]): a slot takes the
+/// bytes of its shape; an element of an array is one of its elements, at their stride, and an
+/// element of a record is a field, at its offset; a load gives, and a store takes, the type of
+/// the integer or boolean there; and a copy moves all the bytes of memory of one shape between
+/// two addresses of it. Where branches meet and where a call passes an address, the address's
+/// type ([`Ty::Addr`]) holds the shape, so they agree on it too. So an array built in one shape
+/// is never read in another, as one of `i64` read at the stride of `u8` would be.
+fn check_memory(mems: &Mems, f: &Function, v: NodeId) -> Result<(), String> {
+    let addr = |x: NodeId| {
+        f.ty(x)
+            .mem()
+            .ok_or_else(|| format!("v{} is no address", x.0))
+    };
+    let arg = |k: usize| {
+        f.own_args(v)
+            .get(k)
+            .copied()
+            .ok_or_else(|| format!("no operand {}", k))
+    };
+    let name = |id: MemId| mems.name(id);
+    match f.op(v) {
+        Op::Slot { bytes } => {
+            let at = addr(v)?;
+            if mems.size(at) != Some(*bytes) {
+                return Err(format!(
+                    "a slot of {} bytes for memory of {}",
+                    bytes,
+                    name(at)
+                ));
+            }
+        }
+        Op::Elem { stride } => {
+            let (base, at) = (addr(arg(0)?)?, addr(v)?);
+            let fits = match mems.get(base) {
+                Some(Mem::Array { elem, .. }) => *elem == at && mems.size(at) == Some(*stride),
+                // A field, at the offset a constant index gives.
+                Some(Mem::Record { fields, .. }) => match f.fact(arg(1)?) {
+                    Some(Fact::Within(k, last)) if *stride == 1 && k == last && !k.neg => {
+                        u32::try_from(k.mag).is_ok_and(|k| fields.contains(&(k, at)))
+                    }
+                    Some(Fact::Within(..) | Fact::NonZero) | None => false,
+                },
+                Some(Mem::Int(_) | Mem::Bool | Mem::Empty) | None => false,
+            };
+            if !fits {
+                return Err(format!(
+                    "an element of memory of {} taken as {} at a stride of {}",
+                    name(base),
+                    name(at),
+                    stride
+                ));
+            }
+        }
+        Op::Load => {
+            let at = addr(arg(0)?)?;
+            if mems.scalar(at) != Some(f.ty(v)) {
+                return Err(format!("a load of {} from memory of {}", f.ty(v), name(at)));
+            }
+        }
+        Op::Store => {
+            let (at, x) = (addr(arg(0)?)?, f.ty(arg(1)?));
+            if mems.scalar(at) != Some(x) {
+                return Err(format!("a store of {} into memory of {}", x, name(at)));
+            }
+        }
+        Op::Copy { bytes } => {
+            let (to, from) = (addr(arg(0)?)?, addr(arg(1)?)?);
+            if to != from || mems.size(to) != Some(*bytes) {
+                return Err(format!(
+                    "a copy of {} bytes from memory of {} into memory of {}",
+                    bytes,
+                    name(from),
+                    name(to)
+                ));
+            }
+        }
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
+        | Op::Call(_)
+        | Op::Enter { .. } => {}
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1697,7 +2010,7 @@ impl Memory {
                 Ok(Val::Int(Num::from_bits(u128::from_le_bytes(bits), t)))
             }
             Ty::Bool => Ok(Val::Bool(self.bytes[self.range(at, 1)?.start] != 0)),
-            Ty::Addr | Ty::Unit | Ty::Effect => Err(Stop::Broken(format!("a load of {}", ty))),
+            Ty::Addr(_) | Ty::Unit | Ty::Effect => Err(Stop::Broken(format!("a load of {}", ty))),
         }
     }
 
@@ -1951,7 +2264,7 @@ impl<'m> Machine<'m> {
             Op::Param => return Err(broken("a parameter in a block's instructions")),
             Op::Int(bits) => match ty {
                 Ty::Int(t) => Val::Int(Num::from_bits(*bits, t)),
-                Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => {
+                Ty::Bool | Ty::Addr(_) | Ty::Unit | Ty::Effect => {
                     return Err(broken("an integer of a type that is not one"))
                 }
             },
@@ -2265,10 +2578,29 @@ mod tests {
     /// The budget of the modules these tests build.
     const BUDGET: u128 = 1 << 20;
 
+    /// The shapes of memory these tests' addresses point at, each with its address's type below.
+    fn mems() -> Mems {
+        let mut m = Mems::default();
+        let byte = m.of(Mem::Int(U8));
+        m.of(Mem::Array { len: 3, elem: byte });
+        m.of(Mem::Bool);
+        m.of(Mem::Array { len: 4, elem: byte });
+        m.of(Mem::Int(IntTy::new(16, false)));
+        m.of(Mem::Int(I64));
+        m
+    }
+    const BYTE: Ty = Ty::Addr(MemId(0));
+    const BYTES3: Ty = Ty::Addr(MemId(1));
+    const FLAG: Ty = Ty::Addr(MemId(2));
+    const BYTES4: Ty = Ty::Addr(MemId(3));
+    const WORD: Ty = Ty::Addr(MemId(4));
+    const LONG: Ty = Ty::Addr(MemId(5));
+
     fn module(functions: Vec<Function>) -> Module {
         let m = Module {
             functions,
             budget: BUDGET,
+            mems: mems(),
         };
         verify(&m).unwrap();
         m
@@ -2442,6 +2774,7 @@ mod tests {
         let unverified = Module {
             functions: vec![b.finish()],
             budget: BUDGET,
+            mems: mems(),
         };
         assert!(verify(&unverified).is_err());
         assert!(matches!(
@@ -2510,6 +2843,7 @@ mod tests {
             Module {
                 functions: vec![b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             }
         };
         let m = product(true);
@@ -2725,10 +3059,10 @@ mod tests {
     #[test]
     fn test_memory_holds_arrays_and_mut_parameters() {
         // `fn bump(a: addr)`: a[1] += 1 through the address a caller passed, as `mut a: [3]u8`.
-        let mut b = Builder::new("bump", &[Ty::Addr], None);
+        let mut b = Builder::new("bump", &[BYTES3], None);
         let a = b.params(BlockId(0))[0];
         let one = b.int(U64, Num::from_i128(1));
-        let at = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[a, one]);
+        let at = b.inst(Op::Elem { stride: 1 }, BYTE, &[a, one]);
         let x = b.inst(Op::Load, Ty::Int(U8), &[at]);
         let k = b.int(U8, Num::from_i128(1));
         let y = b.inst(add(None), Ty::Int(U8), &[x, k]);
@@ -2736,21 +3070,21 @@ mod tests {
         b.ret(None);
         // `fn main() -> u8`: a slot of u16s, filled, bumped, copied, read back.
         let mut m = Builder::new("main", &[], Some(Ty::Int(U8)));
-        let slot = m.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
+        let slot = m.inst(Op::Slot { bytes: 3 }, BYTES3, &[]);
         for i in 0..3 {
             let idx = m.int(U64, Num::from_i128(i));
-            let at = m.inst(Op::Elem { stride: 1 }, Ty::Addr, &[slot, idx]);
+            let at = m.inst(Op::Elem { stride: 1 }, BYTE, &[slot, idx]);
             let v = m.int(U8, Num::from_i128(10 * i + 1));
             m.inst(Op::Store, Ty::Unit, &[at, v]);
         }
         call(&mut m, 0, Ty::Unit, &[slot]);
-        let copy = m.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
+        let copy = m.inst(Op::Slot { bytes: 3 }, BYTES3, &[]);
         m.inst(Op::Copy { bytes: 3 }, Ty::Unit, &[copy, slot]);
         let two = m.int(U64, Num::from_i128(2));
-        let last = m.inst(Op::Elem { stride: 1 }, Ty::Addr, &[copy, two]);
+        let last = m.inst(Op::Elem { stride: 1 }, BYTE, &[copy, two]);
         let r2 = m.inst(Op::Load, Ty::Int(U8), &[last]);
         let one = m.int(U64, Num::from_i128(1));
-        let at = m.inst(Op::Elem { stride: 1 }, Ty::Addr, &[copy, one]);
+        let at = m.inst(Op::Elem { stride: 1 }, BYTE, &[copy, one]);
         let r1 = m.inst(Op::Load, Ty::Int(U8), &[at]);
         let r = m.inst(add(None), Ty::Int(U8), &[r1, r2]);
         m.ret(Some(r));
@@ -2777,6 +3111,192 @@ mod tests {
         assert_eq!(memory.load(w, Ty::Bool), Ok(Val::Bool(true)));
         assert!(memory.load(w + 30, Ty::Int(U64)).is_err());
         assert_eq!(w % 16, 0);
+    }
+
+    /// Every access agrees with the shape of the memory it reaches, or the MIR is broken: an
+    /// array built as one of `i64` and copied, joined or read as one of `u8` (the nightly triage's
+    /// root causes 2 and 11, and the `if` and indexing forms its review found) stops compilation
+    /// on every path instead of reading past a slot or reading the wrong bytes.
+    #[test]
+    fn test_every_access_agrees_with_the_shape_of_its_memory() {
+        let mut mems = Mems::default();
+        let (u8m, i64m, u64m) = (
+            mems.of(Mem::Int(U8)),
+            mems.of(Mem::Int(I64)),
+            mems.of(Mem::Int(U64)),
+        );
+        let bytes4 = mems.of(Mem::Array { len: 4, elem: u8m });
+        let longs4 = mems.of(Mem::Array { len: 4, elem: i64m });
+        let longs2 = mems.of(Mem::Array { len: 2, elem: i64m });
+        let bytes2 = mems.of(Mem::Array { len: 2, elem: u8m });
+        let words2 = mems.of(Mem::Array { len: 2, elem: u64m });
+        // `{0: u8, 8: [2]i64}`: a tag, and a field at offset 8.
+        let record = mems.of(Mem::Record {
+            size: 24,
+            fields: vec![(0, u8m), (8, longs2)],
+        });
+        assert_eq!(mems.name(record), "{0: u8, 8: [2]i64}");
+        let verified = |functions: Vec<Function>| {
+            verify(&Module {
+                functions,
+                budget: BUDGET,
+                mems: mems.clone(),
+            })
+        };
+        let refused = |functions: Vec<Function>, why: &str| match verified(functions) {
+            Err(e) => assert!(e.contains(why), "{} does not say {}", e, why),
+            Ok(()) => panic!("verified, where {} breaks it", why),
+        };
+        let a = Ty::Addr;
+        let slot = |b: &mut Builder, m: MemId| {
+            let bytes = mems.size(m).unwrap_or(0);
+            b.inst(Op::Slot { bytes }, a(m), &[])
+        };
+        // `copy 4` of a [4]i64 into a [4]u8, as root cause 11's `if` did.
+        let copy = |from: MemId, bytes: u32| {
+            let mut b = Builder::new("copy", &[], None);
+            let to = slot(&mut b, bytes4);
+            let src = slot(&mut b, from);
+            b.inst(Op::Copy { bytes }, Ty::Unit, &[to, src]);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![copy(bytes4, 4)]), Ok(()));
+        refused(
+            vec![copy(longs4, 4)],
+            "a copy of 4 bytes from memory of [4]i64 into memory of [4]u8",
+        );
+        refused(vec![copy(bytes4, 3)], "a copy of 3 bytes");
+        // A slot takes the bytes of its shape.
+        let mut b = Builder::new("slot", &[], None);
+        b.inst(Op::Slot { bytes: 5 }, a(bytes4), &[]);
+        b.ret(None);
+        refused(vec![b.finish()], "a slot of 5 bytes for memory of [4]u8");
+        // Branches that meet with arrays of [2]i64 and [2]u8, as the review's `f1` did.
+        let join = |other: MemId| {
+            let mut b = Builder::new("join", &[Ty::Bool], None);
+            let c = b.params(BlockId(0))[0];
+            let (yes, no) = (b.block(&[]), b.block(&[]));
+            let met = b.block(&[a(longs2)]);
+            b.branch(c, (yes, vec![]), (no, vec![]));
+            for (block, m) in [(yes, longs2), (no, other)] {
+                b.switch(block);
+                let s = slot(&mut b, m);
+                b.jump(met, vec![s]);
+            }
+            b.switch(met);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![join(longs2)]), Ok(()));
+        refused(
+            vec![join(bytes2)],
+            "passes memory of [2]u8 where it takes memory of [2]i64",
+        );
+        // An element and its load: a [2]u64 read as `i64`, as the review's indexing did, and
+        // elements taken at another stride or as another shape.
+        let read = |arr: MemId, stride: u32, elem: MemId, ty: Ty| {
+            let mut b = Builder::new("read", &[a(arr), Ty::Int(U64)], Some(ty));
+            let [base, i] = b.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let i = b.assume(i, Fact::Within(Num::ZERO, Num::from_i128(1)));
+            let at = b.inst(Op::Elem { stride }, a(elem), &[base, i]);
+            let x = b.inst(Op::Load, ty, &[at]);
+            b.ret(Some(x));
+            b.finish()
+        };
+        assert_eq!(verified(vec![read(words2, 8, u64m, Ty::Int(U64))]), Ok(()));
+        refused(
+            vec![read(words2, 8, u64m, Ty::Int(I64))],
+            "a load of i64 from memory of u64",
+        );
+        refused(
+            vec![read(longs2, 1, i64m, Ty::Int(I64))],
+            "an element of memory of [2]i64 taken as i64 at a stride of 1",
+        );
+        refused(
+            vec![read(longs2, 8, u64m, Ty::Int(U64))],
+            "an element of memory of [2]i64 taken as u64",
+        );
+        // A field of a record: one at its offset, of its shape, and none elsewhere.
+        let field = |offset: u128, elem: MemId| {
+            let mut b = Builder::new("field", &[a(record)], None);
+            let base = b.params(BlockId(0))[0];
+            let k = b.int(U64, Num::new(false, offset));
+            b.inst(Op::Elem { stride: 1 }, a(elem), &[base, k]);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![field(8, longs2)]), Ok(()));
+        refused(
+            vec![field(4, longs2)],
+            "an element of memory of {0: u8, 8: [2]i64}",
+        );
+        refused(vec![field(8, bytes2)], "taken as [2]u8");
+        // A field is taken at a stride of 1 alone, though its offset is the constant index.
+        let mut b = Builder::new("stride", &[a(record)], None);
+        let base = b.params(BlockId(0))[0];
+        let eight = b.int(U64, Num::from_i128(8));
+        b.inst(Op::Elem { stride: 8 }, a(longs2), &[base, eight]);
+        b.ret(None);
+        refused(
+            vec![b.finish()],
+            "an element of memory of {0: u8, 8: [2]i64} taken as [2]i64 at a stride of 8",
+        );
+        // An address of a shape the module does not hold.
+        let mut b = Builder::new("unknown", &[a(MemId(99))], None);
+        b.ret(None);
+        refused(vec![b.finish()], "a shape the module does not hold");
+        // A store takes the type its memory holds.
+        let mut b = Builder::new("store", &[a(u8m)], None);
+        let at = b.params(BlockId(0))[0];
+        let x = b.int(I64, Num::from_i128(1));
+        b.inst(Op::Store, Ty::Unit, &[at, x]);
+        b.ret(None);
+        refused(vec![b.finish()], "a store of i64 into memory of u8");
+        // A call passes an address of the shape its callee takes.
+        let callee = || {
+            let mut c = Builder::new("callee", &[a(bytes4)], None);
+            c.ret(None);
+            c.finish()
+        };
+        let caller = |m: MemId| {
+            let mut b = Builder::new("caller", &[], None);
+            let s = slot(&mut b, m);
+            call(&mut b, 0, Ty::Unit, &[s]);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![callee(), caller(bytes4)]), Ok(()));
+        assert!(verified(vec![callee(), caller(longs4)]).is_err());
+        // The table itself: a field past its record's bytes, or a shape held before it is added.
+        let mut past = Mems::default();
+        let long = past.of(Mem::Int(I64));
+        past.of(Mem::Record {
+            size: 4,
+            fields: vec![(0, long)],
+        });
+        let mut ahead = Mems::default();
+        ahead.of(Mem::Array {
+            len: 1,
+            elem: MemId(1),
+        });
+        ahead.of(Mem::Int(U8));
+        // A shape that holds itself, whose size has no end.
+        let mut itself = Mems::default();
+        itself.of(Mem::Array {
+            len: 1,
+            elem: MemId(0),
+        });
+        for mems in [past, ahead, itself] {
+            assert!(verify(&Module {
+                functions: vec![],
+                budget: BUDGET,
+                mems,
+            })
+            .is_err());
+        }
     }
 
     /// The order of values is checked in time and memory that grow with the function, not with
@@ -2807,6 +3327,7 @@ mod tests {
         assert!(verify(&Module {
             functions: vec![b.finish()],
             budget: BUDGET,
+            mems: mems(),
         })
         .is_ok());
         assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
@@ -2821,6 +3342,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         // `x + 1`, the constant after the addition that takes it.
@@ -2944,6 +3466,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         let (f, [_, _, check1, pos, check2, q, one, s, neg]) = chained();
@@ -2954,6 +3477,7 @@ mod tests {
                 &Module {
                     functions: vec![f.clone()],
                     budget: BUDGET,
+                    mems: mems(),
                 },
                 0,
                 &[int(7), int(2)]
@@ -3068,6 +3592,7 @@ mod tests {
             verify(&Module {
                 functions: vec![b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         let within =
@@ -3092,6 +3617,7 @@ mod tests {
             let verified = verify(&Module {
                 functions: vec![b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             });
             assert_eq!(verified.is_ok(), ok, "{}", n);
         }
@@ -3112,6 +3638,7 @@ mod tests {
                 verify(&Module {
                     functions: vec![b.finish()],
                     budget: BUDGET,
+                    mems: mems(),
                 })
             };
             assert!(checked(None).is_err());
@@ -3125,13 +3652,10 @@ mod tests {
             Num::ZERO,
             Num::new(false, u128::from(u64::MAX) + 1),
         ));
-        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, None).is_err());
-        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, within(-1, 5)).is_err());
-        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, past).is_err());
-        assert_eq!(
-            check(elem, Ty::Addr, &[Ty::Addr, i], 1, within(0, 5)),
-            Ok(())
-        );
+        assert!(check(elem.clone(), BYTE, &[BYTES3, i], 1, None).is_err());
+        assert!(check(elem.clone(), BYTE, &[BYTES3, i], 1, within(-1, 5)).is_err());
+        assert!(check(elem.clone(), BYTE, &[BYTES3, i], 1, past).is_err());
+        assert_eq!(check(elem, BYTE, &[BYTES3, i], 1, within(0, 5)), Ok(()));
         // An i64 into a u8, and a u8 into an i64.
         assert!(check(Op::Cast, u, &[i], 0, None).is_err());
         assert!(check(Op::Cast, u, &[i], 0, within(-1, 255)).is_err());
@@ -3159,6 +3683,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             }),
             Ok(())
         );
@@ -3213,6 +3738,7 @@ mod tests {
             Module {
                 functions: vec![leaf.clone(), b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             }
         };
         // The count only in `otherwise`, the call after the join: the join is entered with the
@@ -3340,6 +3866,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
             .unwrap_err()
         };
@@ -3430,6 +3957,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         let add = |trap| Op::Arith {
@@ -3449,14 +3977,8 @@ mod tests {
                 &[0, 1, 2],
                 &[&["", "", ""]],
             ),
-            one(
-                Op::Elem { stride: 1 },
-                Ty::Addr,
-                &[Ty::Addr, u],
-                &[0, 1],
-                &[],
-            ),
-            one(Op::Store, Ty::Unit, &[Ty::Addr, Ty::Bool], &[0, 1], &[]),
+            one(Op::Elem { stride: 1 }, BYTE, &[BYTES3, u], &[0, 1], &[]),
+            one(Op::Store, Ty::Unit, &[FLAG, Ty::Bool], &[0, 1], &[]),
             one(
                 Op::Cmp(CmpOp::Eq),
                 Ty::Bool,
@@ -3496,18 +4018,18 @@ mod tests {
             ),
             one(
                 Op::Elem { stride: 1 },
-                Ty::Addr,
-                &[Ty::Addr, Ty::Bool],
+                BYTES3,
+                &[BYTES3, Ty::Bool],
                 &[0, 1],
                 &[],
             ),
-            one(Op::Load, Ty::Addr, &[Ty::Addr], &[0], &[]),
+            one(Op::Load, BYTES3, &[BYTES3], &[0], &[]),
             one(Op::Store, Ty::Unit, &[i, i], &[0, 1], &[]),
             one(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, u], &[0, 1], &[]),
             one(
                 Op::Cmp(CmpOp::Lt),
                 Ty::Bool,
-                &[Ty::Addr, Ty::Addr],
+                &[BYTES3, BYTES3],
                 &[0, 1],
                 &[],
             ),
@@ -3520,15 +4042,9 @@ mod tests {
             ),
             one(Op::Shr, u, &[i, u], &[0, 1], &[]),
             one(Op::Cast, u, &[Ty::Bool], &[0], &[]),
-            one(Op::Not, Ty::Addr, &[Ty::Addr], &[0], &[]),
+            one(Op::Not, BYTES3, &[BYTES3], &[0], &[]),
             one(Op::Bits(BitOp::And), u, &[u, i], &[0, 1], &[]),
-            one(
-                Op::Copy { bytes: 1 },
-                Ty::Unit,
-                &[Ty::Addr, u],
-                &[0, 1],
-                &[],
-            ),
+            one(Op::Copy { bytes: 1 }, Ty::Unit, &[BYTES3, u], &[0, 1], &[]),
             one(Op::Int(1), Ty::Bool, &[], &[], &[]),
             one(Op::Bool(true), u, &[], &[], &[]),
             one(Op::Slot { bytes: 1 }, u, &[], &[], &[]),
@@ -3551,6 +4067,7 @@ mod tests {
             Module {
                 functions: vec![callee.clone(), b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             }
         };
         assert_eq!(verify(&caller(i, u)), Ok(()));
@@ -3563,9 +4080,450 @@ mod tests {
         assert!(verify(&Module {
             functions: vec![f],
             budget: BUDGET,
+            mems: mems(),
         })
         .unwrap_err()
         .contains("does not exist"));
+    }
+
+    /// MIR keeps an address only in a value, never in memory: the verifier refuses a store of an
+    /// address and a load that gives one, beside the store and the load of an integer it admits.
+    /// Native code lays the slots never alive together over the same bytes by what this holds,
+    /// that a slot is reached only through the values derived from its own
+    /// (`spec/mir-and-codegen.md`, "Slots never alive together share bytes").
+    #[test]
+    fn test_no_address_is_stored_in_memory_or_loaded_from_it() {
+        let u8t = Ty::Int(U8);
+        let function = |stored: Ty, loaded: Ty| {
+            let mut b = Builder::new("f", &[u8t], Some(u8t));
+            let x = b.params(BlockId(0))[0];
+            let s = b.inst(Op::Slot { bytes: 1 }, BYTE, &[]);
+            let value = if stored == BYTE { s } else { x };
+            b.inst(Op::Store, Ty::Unit, &[s, value]);
+            b.inst(Op::Load, loaded, &[s]);
+            b.ret(Some(x));
+            Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+                mems: mems(),
+            }
+        };
+        verify(&function(u8t, u8t)).unwrap();
+        let stored = verify(&function(BYTE, u8t)).unwrap_err();
+        assert!(stored.contains("Store"), "{stored}");
+        let loaded = verify(&function(u8t, BYTE)).unwrap_err();
+        assert!(loaded.contains("Load"), "{loaded}");
+    }
+
+    /// No operation but those of addresses takes an address or gives one, whatever its kind: a
+    /// slot and an element give one; an element, a load, a store and a copy take one where they
+    /// reach memory; a count takes the arguments of its call as they were evaluated, an address
+    /// among them; a call passes one only to a parameter that is one; and no function returns
+    /// one, so no address outlives its slot. Each kind of operation, an assumption, a call and a
+    /// count among them, is built in a function of its own and tried with an address in each
+    /// place that is not one of those, and in its result, and refused, so that no kind's refusal
+    /// stands for another's: a guard that took an address passed beside an assumption that
+    /// refused one (the review of pull request 183). Native code lays the slots never alive
+    /// together over the same bytes by what this holds, that a slot is reached only through the
+    /// values derived from its own (`spec/mir-and-codegen.md`, "Slots never alive together share
+    /// bytes"); a `cast` or a `guard` that took an address would break it.
+    #[test]
+    fn test_only_the_operations_of_addresses_take_or_give_one() {
+        let (u, i, a, b) = (Ty::Int(U8), Ty::Int(I64), BYTE, Ty::Bool);
+        // Which operand of an operation may be an address, and whether its result may be one. The
+        // matches name every operation, so that a new one is placed here before it builds.
+        let takes = |op: &Op, k: usize| match op {
+            Op::Elem { .. } | Op::Load | Op::Store => k == 0,
+            Op::Copy { .. } | Op::Enter { .. } => true,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
+            | Op::Slot { .. }
+            | Op::Call(_) => false,
+        };
+        let gives = |op: &Op| match op {
+            Op::Slot { .. } | Op::Elem { .. } => true,
+            Op::Param
+            | Op::Int(_)
+            | Op::Bool(_)
+            | Op::Arith { .. }
+            | Op::Neg { .. }
+            | Op::Bits(_)
+            | Op::Not
+            | Op::Shl { .. }
+            | Op::Shr
+            | Op::Cmp(_)
+            | Op::Cast
+            | Op::Check { .. }
+            | Op::Guard { .. }
+            | Op::Assume(_)
+            | Op::Load
+            | Op::Store
+            | Op::Copy { .. }
+            | Op::Call(_)
+            | Op::Enter { .. } => false,
+        };
+        let check = |functions: Vec<Function>| {
+            verify(&Module {
+                functions,
+                budget: BUDGET,
+                mems: mems(),
+            })
+        };
+        let add = |trap| Op::Arith {
+            op: ArithOp::Add,
+            trap,
+        };
+        const X: &[&str] = &["", "x"];
+        // A function of the operation of the result `ty` on parameters `params`, one operand
+        // each, with the functions it reaches: by `one` for most kinds; with a fact for an
+        // assumption; and, for a count and the call it counts, with their callee as the module's
+        // function 1, which takes a `u8`.
+        type Build = Box<dyn Fn(Ty, &[Ty]) -> Vec<Function>>;
+        let by_one = |op: Op, traps: Vec<&'static [&'static str]>| -> Build {
+            Box::new(move |ty, params| {
+                let args: Vec<usize> = (0..params.len()).collect();
+                vec![one(op.clone(), ty, params, &args, &traps)]
+            })
+        };
+        let callee = || {
+            let mut g = Builder::new("callee", &[Ty::Int(U8)], None);
+            g.ret(None);
+            g.finish()
+        };
+        let assumed: Build = Box::new(|ty, params| {
+            let mut f = Builder::new("assumed", params, None);
+            let v = f.params(BlockId(0))[0];
+            let fact = f.fact_site(Fact::Within(Num::ZERO, Num::from_i128(3)));
+            f.inst(Op::Assume(fact), ty, &[v]);
+            f.ret(None);
+            vec![f.finish()]
+        });
+        // A count is closed by its call, which here passes an integer of a parameter of its own.
+        let counted: Build = Box::new(move |ty, params| {
+            let mut f = Builder::new("counted", &[params, &[Ty::Int(U8)]].concat(), None);
+            let [v, x] = f.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let trap = f.trap_site("stack-overflow", &["the call stack ran out"]);
+            f.inst(
+                Op::Enter {
+                    callee: FuncId(1),
+                    trap: Some(trap),
+                },
+                ty,
+                &[v],
+            );
+            f.inst(Op::Call(FuncId(1)), Ty::Unit, &[x]);
+            f.ret(None);
+            vec![f.finish(), callee()]
+        });
+        let called: Build = Box::new(move |ty, params| {
+            let mut f = Builder::new("called", params, None);
+            let v = f.params(BlockId(0))[0];
+            let trap = f.trap_site("stack-overflow", &["the call stack ran out"]);
+            f.inst(
+                Op::Enter {
+                    callee: FuncId(1),
+                    trap: Some(trap),
+                },
+                Ty::Unit,
+                &[v],
+            );
+            f.inst(Op::Call(FuncId(1)), ty, &[v]);
+            f.ret(None);
+            vec![f.finish(), callee()]
+        });
+        let enter = Op::Enter {
+            callee: FuncId(1),
+            trap: Some(TrapId(0)),
+        };
+        // Each kind: the operation, its result, its parameters (one an operand each), and how a
+        // function of it is built. Each well formed as it stands.
+        let samples: Vec<(Op, Ty, Vec<Ty>, Build)> = vec![
+            (Op::Int(1), i, vec![], by_one(Op::Int(1), vec![])),
+            (Op::Bool(true), b, vec![], by_one(Op::Bool(true), vec![])),
+            (add(None), i, vec![i, i], by_one(add(None), vec![])),
+            (
+                add(Some(TrapId(0))),
+                i,
+                vec![i, i],
+                by_one(add(Some(TrapId(0))), vec![X]),
+            ),
+            (
+                Op::Neg { trap: None },
+                i,
+                vec![i],
+                by_one(Op::Neg { trap: None }, vec![]),
+            ),
+            (
+                Op::Bits(BitOp::And),
+                u,
+                vec![u, u],
+                by_one(Op::Bits(BitOp::And), vec![]),
+            ),
+            (Op::Not, u, vec![u], by_one(Op::Not, vec![])),
+            (
+                Op::Shl { trap: TrapId(0) },
+                u,
+                vec![u, u],
+                by_one(Op::Shl { trap: TrapId(0) }, vec![X]),
+            ),
+            (Op::Shr, u, vec![u, u], by_one(Op::Shr, vec![])),
+            (
+                Op::Cmp(CmpOp::Eq),
+                b,
+                vec![u, u],
+                by_one(Op::Cmp(CmpOp::Eq), vec![]),
+            ),
+            (Op::Cast, i, vec![u], by_one(Op::Cast, vec![])),
+            (
+                Op::Check { trap: TrapId(0) },
+                Ty::Unit,
+                vec![b, u],
+                by_one(Op::Check { trap: TrapId(0) }, vec![X]),
+            ),
+            (Op::Assume(FactId(0)), u, vec![u], assumed),
+            (
+                Op::Slot { bytes: 1 },
+                a,
+                vec![],
+                by_one(Op::Slot { bytes: 1 }, vec![]),
+            ),
+            (
+                Op::Elem { stride: 1 },
+                a,
+                vec![BYTES3, u],
+                by_one(Op::Elem { stride: 1 }, vec![]),
+            ),
+            (Op::Load, u, vec![a], by_one(Op::Load, vec![])),
+            (Op::Store, Ty::Unit, vec![a, u], by_one(Op::Store, vec![])),
+            (
+                Op::Copy { bytes: 1 },
+                Ty::Unit,
+                vec![a, a],
+                by_one(Op::Copy { bytes: 1 }, vec![]),
+            ),
+            (enter, Ty::Unit, vec![u], counted),
+            (Op::Call(FuncId(1)), Ty::Unit, vec![u], called),
+        ];
+        for (op, ty, params, build) in &samples {
+            assert_eq!(check(build(*ty, params)), Ok(()), "{op:?}");
+            for k in (0..params.len()).filter(|k| !takes(op, *k)) {
+                let mut wrong = params.clone();
+                wrong[k] = a;
+                assert!(
+                    check(build(*ty, &wrong)).is_err(),
+                    "{op:?} takes an address as its operand {k}"
+                );
+            }
+            if !gives(op) {
+                assert!(check(build(a, params)).is_err(), "{op:?} gives an address");
+            }
+        }
+        // A guard yields the integer it takes, in a function of its own (an assumption is among
+        // the kinds above).
+        for guarded in [u, a] {
+            let mut f = Builder::new("g", &[b, guarded], None);
+            let [c, v] = f.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let site = f.trap_site("narrowing", &["x does not fit"]);
+            let fact = f.fact_site(Fact::Within(Num::ZERO, Num::from_i128(3)));
+            f.inst(Op::Guard { trap: site, fact }, guarded, &[c, v]);
+            f.ret(None);
+            assert_eq!(
+                check(vec![f.finish()]).is_ok(),
+                guarded == u,
+                "a guard of {guarded}"
+            );
+        }
+        // A count takes what it counts, an address among them; a call passes an address only to a
+        // parameter that is one.
+        let callee_of = |param: Ty| {
+            let mut g = Builder::new("callee", &[param], None);
+            g.ret(None);
+            g.finish()
+        };
+        for (param, arg, ok) in [(a, a, true), (u, a, false), (a, u, false)] {
+            let mut f = Builder::new("caller", &[arg], None);
+            let p = f.params(BlockId(0))[0];
+            call(&mut f, 0, Ty::Unit, &[p]);
+            f.ret(None);
+            let verified = check(vec![callee_of(param), f.finish()]);
+            assert_eq!(verified.is_ok(), ok, "{param} given {arg}: {verified:?}");
+        }
+        // No function returns an address, so a call never gives one.
+        let mut f = Builder::new("leak", &[], Some(a));
+        let s = f.inst(Op::Slot { bytes: 1 }, a, &[]);
+        f.ret(Some(s));
+        let leaked = check(vec![f.finish()]).unwrap_err();
+        assert!(leaked.contains("returns an address"), "{leaked}");
+    }
+
+    /// No address crosses a loop's back-edge: a block a jump reaches from a block it dominates
+    /// heads a loop, and an address among its parameters is refused, so that a loop that makes a
+    /// slot makes it afresh in every round, as MIR's memory does, and no address of one round is
+    /// alive in the next. Native code gives every round of one `slot` the same bytes, and lays
+    /// the slots never alive together over the same bytes by what this holds; the lowering never
+    /// passes an address around a loop, so the rule holds what was only observed (the final
+    /// review of pull request 183). A join of two branches, which no back-edge reaches, may take
+    /// one, and a loop that makes its slot in each round verifies.
+    #[test]
+    fn test_no_address_crosses_a_back_edge() {
+        let check = |f: Function| {
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+                mems: mems(),
+            })
+        };
+        let u8t = Ty::Int(U8);
+        // A slot passed into a loop, and around it again.
+        let mut f = Builder::new("around", &[Ty::Bool], None);
+        let c = f.params(BlockId(0))[0];
+        let s = f.inst(Op::Slot { bytes: 1 }, BYTE, &[]);
+        let head = f.block(&[BYTE]);
+        let out = f.block(&[]);
+        f.jump(head, vec![s]);
+        f.switch(head);
+        let p = f.params(head)[0];
+        f.inst(Op::Load, u8t, &[p]);
+        f.branch(c, (head, vec![p]), (out, vec![]));
+        f.switch(out);
+        f.ret(None);
+        let carried = check(f.finish()).unwrap_err();
+        assert!(carried.contains("heads a loop"), "{carried}");
+        // The slot taken by a join of two branches.
+        let mut f = Builder::new("join", &[Ty::Bool], None);
+        let c = f.params(BlockId(0))[0];
+        let s = f.inst(Op::Slot { bytes: 1 }, BYTE, &[]);
+        let (yes, no) = (f.block(&[]), f.block(&[]));
+        let join = f.block(&[BYTE]);
+        f.branch(c, (yes, vec![]), (no, vec![]));
+        f.switch(yes);
+        f.jump(join, vec![s]);
+        f.switch(no);
+        f.jump(join, vec![s]);
+        f.switch(join);
+        let p = f.params(join)[0];
+        f.inst(Op::Load, u8t, &[p]);
+        f.ret(None);
+        assert_eq!(check(f.finish()), Ok(()));
+        // A loop that makes its slot in each round, which no parameter carries.
+        let mut f = Builder::new("fresh", &[Ty::Bool], None);
+        let c = f.params(BlockId(0))[0];
+        let head = f.block(&[]);
+        let out = f.block(&[]);
+        f.jump(head, vec![]);
+        f.switch(head);
+        let s = f.inst(Op::Slot { bytes: 1 }, BYTE, &[]);
+        f.inst(Op::Load, u8t, &[s]);
+        f.branch(c, (head, vec![]), (out, vec![]));
+        f.switch(out);
+        f.ret(None);
+        assert_eq!(check(f.finish()), Ok(()));
+    }
+
+    /// Every cycle has a head that dominates it: a cycle none of whose blocks dominates the rest
+    /// is refused, closed by either target of a branch, so that every loop has a head through
+    /// which every round passes. The rule that no address crosses a back-edge finds a loop by that head, a block a
+    /// jump reaches from a block it dominates; a cycle with no such head has no back-edge, and
+    /// carried an address around it past that rule (the final review of pull request 183). The
+    /// lowering makes loops only of `while`s and the element loops of arrays, each entered at its
+    /// head, so it never makes one. A loop entered at its head, with a join of two branches inside
+    /// it, a loop inside it and a block that jumps to itself, verifies.
+    #[test]
+    fn test_every_cycle_has_a_head_that_dominates_it() {
+        let check = |f: Function| {
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+                mems: mems(),
+            })
+        };
+        let u8t = Ty::Int(U8);
+        // `a` and `b` jump to each other, and the entry jumps to either: a cycle entered at both,
+        // carrying a slot's address from round to round.
+        let irreducible = |carried: bool| {
+            let params: &[Ty] = if carried { &[BYTE] } else { &[] };
+            let mut f = Builder::new("two_entries", &[Ty::Bool], None);
+            let c = f.params(BlockId(0))[0];
+            let s = f.inst(Op::Slot { bytes: 1 }, BYTE, &[]);
+            let given = |s| if carried { vec![s] } else { vec![] };
+            let (a, b, out) = (f.block(params), f.block(params), f.block(&[]));
+            f.branch(c, (a, given(s)), (b, given(s)));
+            f.switch(a);
+            let p = if carried { f.params(a)[0] } else { s };
+            f.inst(Op::Load, u8t, &[p]);
+            f.branch(c, (b, given(p)), (out, vec![]));
+            f.switch(b);
+            let q = if carried { f.params(b)[0] } else { s };
+            f.jump(a, given(q));
+            f.switch(out);
+            f.ret(None);
+            f.finish()
+        };
+        for carried in [false, true] {
+            let refused = check(irreducible(carried)).unwrap_err();
+            assert!(refused.contains("no head that dominates it"), "{refused}");
+        }
+        // A cycle of three entered at its second block too, from a branch past the first, closed
+        // by the first target of its last branch and by the second.
+        for second in [false, true] {
+            let mut f = Builder::new("late_entry", &[Ty::Bool], None);
+            let c = f.params(BlockId(0))[0];
+            let (a, b, d, out) = (f.block(&[]), f.block(&[]), f.block(&[]), f.block(&[]));
+            f.branch(c, (a, vec![]), (b, vec![]));
+            f.switch(a);
+            f.jump(b, vec![]);
+            f.switch(b);
+            f.jump(d, vec![]);
+            f.switch(d);
+            if second {
+                f.branch(c, (out, vec![]), (a, vec![]));
+            } else {
+                f.branch(c, (a, vec![]), (out, vec![]));
+            }
+            f.switch(out);
+            f.ret(None);
+            let refused = check(f.finish()).unwrap_err();
+            assert!(refused.contains("no head that dominates it"), "{refused}");
+        }
+        // A loop entered at its head, with a join of two branches inside it, a loop inside it and
+        // a block that jumps to itself. The walk reaches the join from the first branch and has
+        // left it when the second jumps there, which closes no cycle.
+        let mut f = Builder::new("nested", &[Ty::Bool], None);
+        let c = f.params(BlockId(0))[0];
+        let (outer, inner, spin, out) = (f.block(&[]), f.block(&[]), f.block(&[]), f.block(&[]));
+        let (then, otherwise, join) = (f.block(&[]), f.block(&[]), f.block(&[]));
+        f.jump(outer, vec![]);
+        f.switch(outer);
+        f.branch(c, (then, vec![]), (otherwise, vec![]));
+        f.switch(then);
+        f.jump(join, vec![]);
+        f.switch(otherwise);
+        f.jump(join, vec![]);
+        f.switch(join);
+        f.branch(c, (inner, vec![]), (out, vec![]));
+        f.switch(inner);
+        f.branch(c, (inner, vec![]), (spin, vec![]));
+        f.switch(spin);
+        f.branch(c, (spin, vec![]), (outer, vec![]));
+        f.switch(out);
+        f.ret(None);
+        assert_eq!(check(f.finish()), Ok(()));
     }
 
     /// A slot read before it is written holds the memory's fill, 0 unless another is asked
@@ -3574,7 +4532,7 @@ mod tests {
     fn test_unwritten_memory_holds_its_fill_and_runs_count_their_steps() {
         // `fn peek() -> u16`: a slot's first two bytes, never written.
         let mut b = Builder::new("peek", &[], Some(Ty::Int(IntTy::new(16, false))));
-        let s = b.inst(Op::Slot { bytes: 2 }, Ty::Addr, &[]);
+        let s = b.inst(Op::Slot { bytes: 2 }, WORD, &[]);
         let v = b.inst(Op::Load, Ty::Int(IntTy::new(16, false)), &[s]);
         b.ret(Some(v));
         let m = module(vec![b.finish()]);
@@ -3600,15 +4558,22 @@ mod tests {
             let u16 = IntTy::new(16, false);
             let mut b = Builder::new("at", &[Ty::Int(t)], Some(Ty::Int(u16)));
             let i = b.params(BlockId(0))[0];
-            let s = b.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
-            let _next = b.inst(Op::Slot { bytes: 4 }, Ty::Addr, &[]);
+            let s = b.inst(Op::Slot { bytes: 3 }, BYTES3, &[]);
+            let _next = b.inst(Op::Slot { bytes: 4 }, BYTES4, &[]);
             let inside = Fact::Within(Num::ZERO, Num::new(false, u128::from(u64::MAX)));
             let i = b.assume(i, inside);
-            let e = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[s, i]);
+            let e = b.inst(Op::Elem { stride: 1 }, BYTE, &[s, i]);
             let v = b.inst(Op::Load, Ty::Int(u16), &[e]);
             b.ret(Some(v));
+            // A `u16` read from memory of bytes is no access the verifier admits: the run shows
+            // what the interpreter makes of MIR that breaks it, as a mutant may.
+            let unverified = Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+                mems: mems(),
+            };
             run(
-                &module(vec![b.finish()]),
+                &unverified,
                 FuncId(0),
                 &[int(index)],
                 &mut Memory::filled(7),
@@ -3658,7 +4623,7 @@ mod tests {
     fn test_runs_count_steps_and_give_back_memory() {
         // Three instructions: a slot, a constant and its store.
         let mut b = Builder::new("three", &[], None);
-        let s = b.inst(Op::Slot { bytes: 8 }, Ty::Addr, &[]);
+        let s = b.inst(Op::Slot { bytes: 8 }, LONG, &[]);
         let k = b.int(I64, Num::from_i128(7));
         b.inst(Op::Store, Ty::Unit, &[s, k]);
         b.ret(None);

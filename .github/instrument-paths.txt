@@ -1,6 +1,6 @@
 # The paths each instrument watches: the one list per instrument workflow, read by the workflow's
 # first step after its checkout (.github/scripts/watch.mjs) and by the workflow policy test
-# (.github/scripts/policy.test.mjs). The workflows themselves carry no `paths:` filter, since a
+# (.github/scripts/policy/). The workflows themselves carry no `paths:` filter, since a
 # workflow that a filter skips never reports, and so cannot be a required check of `main`
 # (docs/design-review.md, guard-per-problem).
 #

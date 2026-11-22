@@ -1,0 +1,10 @@
+// expect: E0212 E0222
+module conformance
+// A literal takes the type of every operand of its expression, not only of the one it stands
+// beside (core-calculus.md, item 5). `~0` beside `118_i8` shares an expression with `p`, and no
+// standard type holds a `u128` with an `i8`, so it takes none, which it needs (E0212). `~0` beside
+// `0b11111111_u8` shares one with a `u128`, so it works in `u128`, and 255 times it needs more
+// than 128 bits (E0222). The program generator wrote both, each typed by its neighbour alone.
+pub fn untyped(p: u128) -> i128 = p + 118_i8 * ~0
+
+pub fn widened(a: u128) -> bool = a - 0b11111111_u8 * ~0 == 0

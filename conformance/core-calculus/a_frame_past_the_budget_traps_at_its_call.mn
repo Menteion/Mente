@@ -1,0 +1,20 @@
+// expect: pass
+module conformance
+// A function whose frame passes the stack budget never runs: each call of it is counted first,
+// and traps, however little of the stack is in use (core-calculus.md, item 25). Native code runs
+// no count yet, but traps at such a call as MIR does, and never builds the body, whose 4 GiB slot
+// passes what a machine frame can hold: the fuzzer found Cranelift refusing it (2026-11-22).
+
+fn huge(k: u8) -> u8 {
+  _ = [[0_u8; 1]; 4294967295]
+  k
+}
+
+// A call inside the program traps at the call; the other branch runs.
+pub fn call(c: bool, k: u8) -> u8 = if c { huge(k) } else { k }
+
+// A call from outside the program traps at the function's name.
+pub fn past(k: u8) -> u8 {
+  _ = [[0_u8; 1]; 4294967295]
+  k
+}

@@ -8,6 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+// JSON as npm reads it, defined once in the library.
+use mente_cli::json::{parse as parse_json, Json};
+
 /// Where a crate of the lock comes from: the workspace, a member the root manifest names; crates.io;
 /// or anywhere else, another registry, a git repository or a path outside the workspace.
 #[derive(Clone, Debug, PartialEq)]
@@ -777,174 +780,6 @@ fn test_the_english_check_finds_every_cjk_block() {
     );
 }
 
-/// A JSON value as the guard reads package.json: every key of an object in order, duplicates kept,
-/// so that a second `"scripts"` key cannot hide behind the first (npm's `JSON.parse` keeps the
-/// last), and every escape decoded as `JSON.parse` decodes it, so an escaped key still names `scripts`.
-#[derive(Debug, PartialEq)]
-enum Json {
-    Null,
-    Bool(bool),
-    Number(String),
-    Str(String),
-    Array(Vec<Json>),
-    Object(Vec<(String, Json)>),
-}
-
-/// Reads a whole JSON text, refusing anything after its value.
-fn parse_json(text: &str) -> Result<Json, String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut at = 0;
-    let value = json_value(&chars, &mut at)?;
-    json_space(&chars, &mut at);
-    if at != chars.len() {
-        return Err(format!("text after the value at {at}"));
-    }
-    Ok(value)
-}
-
-fn json_space(chars: &[char], at: &mut usize) {
-    while chars
-        .get(*at)
-        .is_some_and(|c| matches!(c, ' ' | '\t' | '\n' | '\r'))
-    {
-        *at += 1;
-    }
-}
-
-fn json_value(chars: &[char], at: &mut usize) -> Result<Json, String> {
-    json_space(chars, at);
-    match chars.get(*at) {
-        Some('{') => {
-            *at += 1;
-            let mut entries = Vec::new();
-            json_space(chars, at);
-            if chars.get(*at) == Some(&'}') {
-                *at += 1;
-                return Ok(Json::Object(entries));
-            }
-            loop {
-                json_space(chars, at);
-                let key = json_string(chars, at)?;
-                json_space(chars, at);
-                if chars.get(*at) != Some(&':') {
-                    return Err(format!("no `:` after a key at {at}"));
-                }
-                *at += 1;
-                entries.push((key, json_value(chars, at)?));
-                json_space(chars, at);
-                match chars.get(*at) {
-                    Some(',') => *at += 1,
-                    Some('}') => {
-                        *at += 1;
-                        return Ok(Json::Object(entries));
-                    }
-                    _ => return Err(format!("no `,` or `}}` at {at}")),
-                }
-            }
-        }
-        Some('[') => {
-            *at += 1;
-            let mut items = Vec::new();
-            json_space(chars, at);
-            if chars.get(*at) == Some(&']') {
-                *at += 1;
-                return Ok(Json::Array(items));
-            }
-            loop {
-                items.push(json_value(chars, at)?);
-                json_space(chars, at);
-                match chars.get(*at) {
-                    Some(',') => *at += 1,
-                    Some(']') => {
-                        *at += 1;
-                        return Ok(Json::Array(items));
-                    }
-                    _ => return Err(format!("no `,` or `]` at {at}")),
-                }
-            }
-        }
-        Some('"') => Ok(Json::Str(json_string(chars, at)?)),
-        Some(_) => {
-            let start = *at;
-            while chars
-                .get(*at)
-                .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '.'))
-            {
-                *at += 1;
-            }
-            let word: String = chars[start..*at].iter().collect();
-            match word.as_str() {
-                "null" => Ok(Json::Null),
-                "true" => Ok(Json::Bool(true)),
-                "false" => Ok(Json::Bool(false)),
-                _ if word.parse::<f64>().is_ok() => Ok(Json::Number(word)),
-                _ => Err(format!("not a JSON value at {start}: {word:?}")),
-            }
-        }
-        None => Err("the text ends before a value".to_string()),
-    }
-}
-
-fn json_string(chars: &[char], at: &mut usize) -> Result<String, String> {
-    if chars.get(*at) != Some(&'"') {
-        return Err(format!("no string at {at}"));
-    }
-    *at += 1;
-    let mut out = String::new();
-    let hex = |at: usize| -> Result<u32, String> {
-        let digits: String = chars
-            .get(at..at + 4)
-            .ok_or("a short \\u escape")?
-            .iter()
-            .collect();
-        u32::from_str_radix(&digits, 16).map_err(|_| format!("a bad \\u escape at {at}"))
-    };
-    loop {
-        match chars.get(*at) {
-            None => return Err("a string that does not end".to_string()),
-            Some('"') => {
-                *at += 1;
-                return Ok(out);
-            }
-            Some('\\') => {
-                let escaped = chars.get(*at + 1).ok_or("an escape at the end")?;
-                *at += 2;
-                match escaped {
-                    '"' => out.push('"'),
-                    '\\' => out.push('\\'),
-                    '/' => out.push('/'),
-                    'b' => out.push('\u{8}'),
-                    'f' => out.push('\u{c}'),
-                    'n' => out.push('\n'),
-                    'r' => out.push('\r'),
-                    't' => out.push('\t'),
-                    'u' => {
-                        let mut code = hex(*at)?;
-                        *at += 4;
-                        // A high surrogate and its low one make one character.
-                        if (0xD800..0xDC00).contains(&code)
-                            && chars.get(*at) == Some(&'\\')
-                            && chars.get(*at + 1) == Some(&'u')
-                        {
-                            let low = hex(*at + 2)?;
-                            if (0xDC00..0xE000).contains(&low) {
-                                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
-                                *at += 6;
-                            }
-                        }
-                        out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
-                    }
-                    c => return Err(format!("an unknown escape \\{c}")),
-                }
-            }
-            Some(c) => {
-                out.push(*c);
-                *at += 1;
-            }
-        }
-    }
-}
-
 #[test]
 fn test_the_guard_reads_json_as_npm_does() {
     let text = "{\"scr\\u0069pts\": {\"a\": \"x \\\"y\\\"\"}, \"n\": [1, -2.5e3, true, null], \"scripts\": {}}";
@@ -1011,7 +846,7 @@ const POLICY_STEP: [&str; 4] = [
     "      - name: The workflow policy, its required checks, path lists, pins and milestone tags",
     "        run: |",
     "          node .github/scripts/policy-collect.mjs",
-    "          node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
+    "          node --test \".github/scripts/policy/*.test.mjs\" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
 ];
 
 /// The steps before it, exactly: the checkout and node. Nothing has run when the policy does.
@@ -1045,7 +880,7 @@ const SCRIPTS: [(&str, &str); 13] = [
     ("test:site", "node --test site/site.test.mjs"),
     (
         "test:ci",
-        "node .github/scripts/policy-collect.mjs && node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
+        "node .github/scripts/policy-collect.mjs && node --test \".github/scripts/policy/*.test.mjs\" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
     ),
     (
         "verify:docs",
@@ -1053,14 +888,135 @@ const SCRIPTS: [(&str, &str); 13] = [
     ),
 ];
 
+/// The directory of the workflow policy's files.
+const POLICY_DIR: &str = ".github/scripts/policy/";
+
+/// The workflow policy's list of its own files, `modules.json` in its directory, which its pins
+/// hold: the test modules node runs, the libraries they share, and the checks the modules hold in
+/// all.
+struct PolicyList {
+    modules: Vec<String>,
+    libraries: Vec<String>,
+    checks: usize,
+}
+
+/// Reads the policy's list from its text: `modules` and `libraries` each one array of plain
+/// strings, `checks` one number. A key written twice, which a JSON reader would take the last of,
+/// or an entry of any other kind is refused, so that the list is never read as fewer files.
+fn policy_list(text: &str) -> Result<PolicyList, String> {
+    let after_key = |key: &str| -> Result<&str, String> {
+        let quoted = format!("\"{key}\"");
+        let rest = match text.split(&quoted).collect::<Vec<_>>()[..] {
+            [_, rest] => rest.trim_start(),
+            _ => return Err(format!("modules.json names {quoted} other than once")),
+        };
+        rest.strip_prefix(':')
+            .map(str::trim_start)
+            .ok_or(format!("{quoted} is no key of modules.json"))
+    };
+    let strings = |key: &str| -> Result<Vec<String>, String> {
+        let body = after_key(key)?
+            .strip_prefix('[')
+            .and_then(|r| r.split_once(']'))
+            .ok_or(format!("{key} is no array"))?
+            .0;
+        body.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .filter(|s| !s.contains(['"', '\\']))
+                    .map(str::to_string)
+                    .ok_or(format!("{key} holds {s}, no plain string"))
+            })
+            .collect()
+    };
+    let checks = after_key("checks")?;
+    let digits: String = checks.chars().take_while(char::is_ascii_digit).collect();
+    if !checks[digits.len()..].trim_start().starts_with(['}', ',']) {
+        return Err(format!("checks is {checks}, no number"));
+    }
+    Ok(PolicyList {
+        modules: strings("modules")?,
+        libraries: strings("libraries")?,
+        checks: digits.parse().map_err(|e| format!("checks: {e}"))?,
+    })
+}
+
+/// What keeps the policy's directory from holding exactly its listed files, given the names it
+/// holds (`entries`), the list, and a reader of a file's text: no dotfile, which node's glob does not
+/// run; nothing but the listed modules and libraries, README.md and the list; every listed file
+/// there; every module a `.test.mjs` and no library a test file; and the modules' checks adding up to
+/// the list's total (the review of f217d1e: a module renamed out of the glob left every count
+/// passing).
+fn policy_dir_problems(
+    entries: &[String],
+    list: &PolicyList,
+    read: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut listed: BTreeSet<String> = BTreeSet::from(["README.md".into(), "modules.json".into()]);
+    for f in list.modules.iter().chain(&list.libraries) {
+        match f.strip_prefix(POLICY_DIR).filter(|n| !n.contains('/')) {
+            Some(name) => {
+                listed.insert(name.to_string());
+            }
+            None => problems.push(format!("{f}, listed, lies outside {POLICY_DIR}")),
+        }
+    }
+    for e in entries {
+        if e.starts_with('.') {
+            problems.push(format!(
+                "{POLICY_DIR}{e} is a dotfile, which node's glob does not run"
+            ));
+        } else if !listed.contains(e) {
+            problems.push(format!(
+                "{POLICY_DIR}{e} is none of the files modules.json lists"
+            ));
+        }
+    }
+    for name in &listed {
+        if !entries.contains(name) {
+            problems.push(format!("{POLICY_DIR}{name}, listed, is missing"));
+        }
+    }
+    for f in &list.modules {
+        if !f.ends_with(".test.mjs") {
+            problems.push(format!(
+                "{f}, listed as a module, is no .test.mjs node runs"
+            ));
+        }
+    }
+    for f in &list.libraries {
+        if f.contains(".test.") {
+            problems.push(format!("{f}, listed as a library, is a test file"));
+        }
+    }
+    let total: usize = list
+        .modules
+        .iter()
+        .filter_map(|f| read(f))
+        .map(|text| text.lines().filter(|l| l.starts_with("check(\"")).count())
+        .sum();
+    if total != list.checks {
+        problems.push(format!(
+            "the policy's modules hold {total} checks, not the {} modules.json pins",
+            list.checks
+        ));
+    }
+    problems
+}
+
 /// The workflow policy runs where it blocks a merge, as written. ci.yml's Documentation job, a
 /// required check, runs it first, after only the checkout and node, through node itself, in a step
 /// of a name and a command alone; `npm ci` runs after it with no install script; the job sets
 /// nothing but its name, runner and steps, and none of its scripts writes the environment or the
 /// path of a later step; the workflow sets no shell and no environment but cargo's colours. The npm
 /// scripts are exactly SCRIPTS, with no hook, and no `.npmrc` changes npm. The policy's suites mark
-/// no test skipped, todo or only, and the policy declares a floor equal to its number of checks,
-/// which a run that skips any fails. Without this, a step deleted, a hook or an install script, a
+/// no test skipped, todo or only, and each module declares a floor equal to its number of checks,
+/// which a run that skips any fails; the policy's directory holds exactly the files its list
+/// names, and the modules hold the checks the list pins. Without this, a step deleted, a hook or an install script, a
 /// skip pattern, an option in `NODE_OPTIONS` or a shell that runs nothing would turn every check of
 /// the policy off unseen.
 #[test]
@@ -1181,12 +1137,118 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         !root.join(".npmrc").exists(),
         "a .npmrc changes what npm runs"
     );
+    // The policy's files, exactly those its list names: the test modules, which the step runs by
+    // their glob, and the libraries they share; the directory holds nothing else, and the modules
+    // hold the checks the list pins.
+    let entries: Vec<String> = fs::read_dir(root.join(POLICY_DIR))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    let list =
+        policy_list(&fs::read_to_string(root.join(POLICY_DIR).join("modules.json")).unwrap())
+            .unwrap_or_else(|e| panic!("{e}"));
+    let read = |f: &str| fs::read_to_string(root.join(f)).ok();
+    assert_eq!(
+        policy_dir_problems(&entries, &list, read),
+        Vec::<String>::new()
+    );
+    // Planted, as the review of f217d1e found them: a module renamed out of the glob, to plain
+    // `.mjs` or to a dotfile, which node's glob does not match; a test module the list does not
+    // name; a module dropped from the list and the tree; a module listed that is not there; and the
+    // total lowered.
+    let first = list.modules[0]
+        .strip_prefix(POLICY_DIR)
+        .unwrap()
+        .to_string();
+    let renamed = |to: &str| -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| {
+                if *e == first {
+                    to.to_string()
+                } else {
+                    e.clone()
+                }
+            })
+            .collect()
+    };
+    let read_as = |to: String| {
+        let first = first.clone();
+        let root = &root;
+        move |f: &str| {
+            let f = if f == format!("{POLICY_DIR}{to}") {
+                format!("{POLICY_DIR}{first}")
+            } else {
+                f.to_string()
+            };
+            fs::read_to_string(root.join(f)).ok()
+        }
+    };
+    let plain = first.replace(".test.mjs", ".mjs");
+    let dotted = format!(".{first}");
+    let dropped = PolicyList {
+        modules: list.modules[1..].to_vec(),
+        libraries: list.libraries.clone(),
+        checks: list.checks,
+    };
+    let lowered = PolicyList {
+        modules: list.modules.clone(),
+        libraries: list.libraries.clone(),
+        checks: list.checks - 1,
+    };
+    let ghost = PolicyList {
+        modules: [&list.modules[..], &[format!("{POLICY_DIR}ghost.test.mjs")]].concat(),
+        libraries: list.libraries.clone(),
+        checks: list.checks,
+    };
+    let mut extra = entries.clone();
+    extra.push("extra.test.mjs".to_string());
+    let without: Vec<String> = entries.iter().filter(|e| **e != first).cloned().collect();
+    for (problems, what) in [
+        (
+            policy_dir_problems(&renamed(&plain), &list, read_as(plain.clone())),
+            "a module renamed to plain .mjs",
+        ),
+        (
+            policy_dir_problems(&renamed(&dotted), &list, read_as(dotted.clone())),
+            "a module renamed to a dotfile",
+        ),
+        (
+            policy_dir_problems(&extra, &list, read),
+            "a test module no list names",
+        ),
+        (
+            policy_dir_problems(&without, &dropped, read),
+            "a module dropped from the list and the tree",
+        ),
+        (
+            policy_dir_problems(&entries, &ghost, read),
+            "a module listed that is not there",
+        ),
+        (
+            policy_dir_problems(&entries, &lowered, read),
+            "the total lowered",
+        ),
+    ] {
+        assert!(!problems.is_empty(), "{what} passed");
+    }
+    // The list is read as written or refused: a second key, or an entry that is no plain string.
+    let text = fs::read_to_string(root.join(POLICY_DIR).join("modules.json")).unwrap();
+    assert!(policy_list(&text.replacen("\"checks\"", "\"checks\": 1, \"checks\"", 1)).is_err());
+    assert!(policy_list(&text.replacen("\"modules\": [", "\"modules\": [1, ", 1)).is_err());
+    let policy: Vec<String> = list
+        .modules
+        .iter()
+        .chain(&list.libraries)
+        .cloned()
+        .collect();
+    let policy_tests: Vec<&String> = list.modules.iter().collect();
     // No test of the policy's suites is skipped, left to do or singled out.
-    for suite in [
-        ".github/scripts/policy.test.mjs",
+    for suite in policy.iter().map(String::as_str).chain([
         ".github/scripts/policy-run.test.mjs",
         ".github/scripts/yaml.test.mjs",
-    ] {
+    ]) {
         let text = fs::read_to_string(root.join(suite)).unwrap();
         for marker in [".skip(", ".todo(", ".only(", "skip:", "todo:", "only:"] {
             assert!(
@@ -1195,11 +1257,13 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
             );
         }
     }
-    // The floor of checks of the policy and of its run tests equals the checks each declares.
-    for suite in [
-        ".github/scripts/policy.test.mjs",
-        ".github/scripts/policy-run.test.mjs",
-    ] {
+    // The floor of checks of each module of the policy and of its run tests equals the checks each
+    // declares.
+    for suite in policy_tests
+        .iter()
+        .map(|f| f.as_str())
+        .chain([".github/scripts/policy-run.test.mjs"])
+    {
         let text = fs::read_to_string(root.join(suite)).unwrap();
         let checks = text.lines().filter(|l| l.starts_with("check(\"")).count();
         let floor: usize = text

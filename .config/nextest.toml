@@ -3,8 +3,9 @@
 # The required Rust jobs run the tests under the profile `ci` (.github/workflows/ci.yml), and the
 # mutation runs under `mutants` (.github/workflows/mutants.yml and mutants-full.yml), so a test
 # that outgrows its limit fails a required check, not only a mutation run's first pass. The two
-# differ only in whether the first failure stops the run. The workflow policy test
-# (.github/scripts/policy.test.mjs) reads every line of this file and holds its own copy of each
+# differ only in whether the first failure stops the run, and in the order of the tests: the
+# mutation runs take the tests that use every core last. The workflow policy test
+# (.github/scripts/policy/test-runs.test.mjs) reads every line of this file and holds its own copy of each
 # limit and of the tests each override names, so that a change to a limit, more time for another
 # test, or another test run alone, is a change to the policy too. Every test an override names
 # must be a test that runs.
@@ -33,7 +34,11 @@ leak-timeout = { period = "100ms", result = "fail" }
 [[profile.default.overrides]]
 filter = """
 (package(mente-sema) & test(=incremental::tests::test_a_session_reports_what_the_whole_module_check_does))
-| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_1_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_2_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_3_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_4_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_5_of_5))
 | (package(mente-cli) & test(=mir_run::tests::test_mir_runs_every_agent_program_as_the_reference_interpreter_does))
 | (package(mente-cli) & test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar))
 | (package(mente-interp) & test(=tests::test_a_program_tier1_proves_never_trips_its_checks))
@@ -52,7 +57,11 @@ filter = """
 (package(mente-cli) & test(=mir_mutants::tests::test_the_command_passes_or_fails_on_the_corpus_it_finds))
 | (package(mente-cli) & test(=mir_mutants::tests::test_the_corpus_passes_the_gate))
 | (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_generated_programs))
-| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_1_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_2_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_3_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_4_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_5_of_5))
 | (package(mente-cli) & test(=test_mn_test_mutate_runs_the_demo_gate))
 | (package(mente-cli) & test(=test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds))
 | (package(mente-cli) & test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar))
@@ -71,6 +80,36 @@ all-cores = { max-threads = 1 }
 # Every failure of the run, not only the first.
 fail-fast = false
 
+[profile.ci.junit]
+# Each test's time, in target/nextest/ci/junit.xml, which the Rust jobs report as each test's share
+# of its stop, in the job's summary (.github/scripts/lib/test-times.mjs).
+path = "junit.xml"
+
 [profile.mutants]
 # The first failing test catches the mutant: the rest need not run.
 fail-fast = true
+
+# The tests that take every core run after every other test of a mutant's run: the first test that
+# fails catches the mutant, and each of these holds the whole machine while it runs. Run in name
+# order, they came first, and PR 191's caught mutants spent 506 of their 890 minutes of tests in
+# them before the test that caught each, which was one of them for one mutant of 663 (run
+# 44959802577). A mutant no test catches still runs every test. The policy holds this filter to the
+# tests of the group all-cores above (.github/scripts/policy/test-runs.test.mjs).
+[[profile.mutants.overrides]]
+filter = """
+(package(mente-cli) & test(=mir_mutants::tests::test_the_command_passes_or_fails_on_the_corpus_it_finds))
+| (package(mente-cli) & test(=mir_mutants::tests::test_the_corpus_passes_the_gate))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_generated_programs))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_1_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_2_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_3_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_4_of_5))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite_part_5_of_5))
+| (package(mente-cli) & test(=test_mn_test_mutate_runs_the_demo_gate))
+| (package(mente-cli) & test(=test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds))
+| (package(mente-cli) & test(=mir_run::coverage::test_generated_programs_reach_every_construct_of_the_grammar))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_generated_programs_of_seeds_0_to_29_are_well_typed_and_replayable))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_generated_programs_of_seeds_30_to_59_are_well_typed_and_replayable))
+| (package(mente-cli) & test(=mir_run::differential::tests::test_generated_programs_of_seeds_60_to_89_are_well_typed_and_replayable))
+"""
+priority = -100

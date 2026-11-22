@@ -1,7 +1,7 @@
 # The limits the compiler's tests run under where a required check or a mutation run runs them:
 # sourced by the step that runs them (ci.yml's Rust jobs, mutants.yml and mutants-full.yml), so
 # that they hold for every process the step starts after. They are defined here once. The workflow
-# policy (.github/scripts/policy.test.mjs) pins this file, the scripts it runs and those steps by
+# policy (.github/scripts/policy/) pins this file, the scripts it runs and those steps by
 # their digests, so that a change to any of them is a change to the policy too.
 #
 # A test that allocates or writes without end would take the runner down with it, as a mutant

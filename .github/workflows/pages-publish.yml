@@ -68,7 +68,7 @@ jobs:
 
   deploy:
     # The github-pages environment admits main alone, as this job's own condition does. The only job
-    # of any workflow whose token may write Pages or an OIDC token (.github/scripts/policy.test.mjs).
+    # of any workflow whose token may write Pages or an OIDC token (.github/scripts/policy/).
     name: Publish to GitHub Pages
     if: github.ref == 'refs/heads/main'
     needs: build

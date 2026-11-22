@@ -77,6 +77,7 @@ const F_SETFD: c_int = 2;
 const O_RDWR: c_int = 2;
 const O_CLOEXEC: c_int = 0o2000000;
 const WNOHANG: c_int = 1;
+const X_OK: c_int = 1;
 #[cfg(target_arch = "x86_64")]
 const SYS_PIVOT_ROOT: c_long = 155;
 #[cfg(target_arch = "x86_64")]
@@ -124,6 +125,7 @@ extern "C" {
     fn fcntl(fd: c_int, command: c_int, ...) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn open(path: *const c_char, flags: c_int, ...) -> c_int;
+    fn access(path: *const c_char, mode: c_int) -> c_int;
     fn getrlimit(resource: c_int, limit: *mut Rlimit) -> c_int;
     fn setrlimit(resource: c_int, limit: *const Rlimit) -> c_int;
     fn setgroups(size: usize, list: *const u32) -> c_int;
@@ -411,18 +413,31 @@ fn remaining(watcher: c_int) -> Vec<String> {
 }
 
 /// The command's program: its path, or, for a bare name, the first of PATH=/usr/bin:/bin that is a
-/// file it may run, as env(1) finds it in the environment it set.
+/// file the command's user may run, as env(1) finds it in the environment it set. A bare name none
+/// of them runs ends the command as env ends it: 126 when one holds a file of that name it may not
+/// run, else 127. It never falls through to a path from the working directory (the final review of
+/// PR 179: a bare name found nowhere was run from there).
 fn program(name: &[u8]) -> Vec<u8> {
     if name.contains(&b'/') {
         return name.to_vec();
     }
+    let mut denied = false;
     for dir in [&b"/usr/bin/"[..], &b"/bin/"[..]] {
         let candidate = [dir, name].concat();
-        if Path::new(std::ffi::OsStr::from_bytes(&candidate)).is_file() {
+        if !Path::new(std::ffi::OsStr::from_bytes(&candidate)).is_file() {
+            continue;
+        }
+        let path = c(candidate.clone());
+        // SAFETY: a NUL-terminated path that outlives the call.
+        if unsafe { access(path.as_ptr(), X_OK) } == 0 {
             return candidate;
         }
+        denied = true;
     }
-    name.to_vec()
+    let (why, code) = if denied { ("Permission denied", 126) } else { ("No such file or directory", 127) };
+    say(&format!("env: '{}': {why}", String::from_utf8_lossy(name)));
+    // SAFETY: ends this child at once, as a failed exec does.
+    unsafe { _exit(code) }
 }
 
 /// The command's own process, never returning: the privileges dropped, as setpriv dropped them, and
@@ -582,9 +597,21 @@ fn inner(args: &[OsString]) -> ! {
     }
     let mut status = status_of(wait_for(child));
     // A process the command left behind ends with the namespace. As under nextest's leak-timeout,
-    // 100 ms after the command, that fails it.
+    // 100 ms after the command, that fails it. The namespace counts as empty only when a second
+    // scan, at once, finds it so too: one scan lists /proc, then reads each process, and a chain of
+    // processes that each start the next and end could fall between the listing and the reads (the
+    // final review of PR 179). The second scan costs a listing, not a wait, since every sandboxed
+    // process pays it. A chain that slips past both scans in a row is a known limit.
+    let scan = || {
+        let first = remaining(watcher);
+        if first.is_empty() {
+            remaining(watcher)
+        } else {
+            first
+        }
+    };
     let mut raw = 0;
-    let mut left = remaining(watcher);
+    let mut left = scan();
     for _ in 0..10 {
         if left.is_empty() {
             break;
@@ -593,7 +620,7 @@ fn inner(args: &[OsString]) -> ! {
         // SAFETY: a pointer to a status that outlives the call.
         while unsafe { waitpid(-1, &mut raw, WNOHANG) } > 0 {}
         std::thread::sleep(std::time::Duration::from_millis(10));
-        left = remaining(watcher);
+        left = scan();
     }
     if !left.is_empty() {
         say(&format!("test-sandbox: the command left processes behind, which end with it: {}", left.join(" ")));
