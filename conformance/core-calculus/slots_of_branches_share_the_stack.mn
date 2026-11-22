@@ -1,0 +1,59 @@
+// expect: pass
+// frame: f 786505
+module conformance
+// The stack budget (`core-calculus.md#stack-budget`): of branches that never run together only one
+// counts, so a frame holds one branch's array and the binding it initializes. Native code lays the
+// slots of branches that never run together over the same bytes, as the frame counts them: twelve
+// branches of a 384 KiB array take 768 KiB of slots, where a slot each took 9 MiB, past the stack
+// of every platform, before any branch ran.
+pub fn f(x: u8) -> u8 {
+  if x == 7 {
+    val a0: [393216]u8 = [x; 393216]
+    _ = a0
+  }
+  if x == 7 {
+    val a1: [393216]u8 = [x; 393216]
+    _ = a1
+  }
+  if x == 7 {
+    val a2: [393216]u8 = [x; 393216]
+    _ = a2
+  }
+  if x == 7 {
+    val a3: [393216]u8 = [x; 393216]
+    _ = a3
+  }
+  if x == 7 {
+    val a4: [393216]u8 = [x; 393216]
+    _ = a4
+  }
+  if x == 7 {
+    val a5: [393216]u8 = [x; 393216]
+    _ = a5
+  }
+  if x == 7 {
+    val a6: [393216]u8 = [x; 393216]
+    _ = a6
+  }
+  if x == 7 {
+    val a7: [393216]u8 = [x; 393216]
+    _ = a7
+  }
+  if x == 7 {
+    val a8: [393216]u8 = [x; 393216]
+    _ = a8
+  }
+  if x == 7 {
+    val a9: [393216]u8 = [x; 393216]
+    _ = a9
+  }
+  if x == 7 {
+    val a10: [393216]u8 = [x; 393216]
+    _ = a10
+  }
+  if x == 7 {
+    val a11: [393216]u8 = [x; 393216]
+    _ = a11
+  }
+  x
+}

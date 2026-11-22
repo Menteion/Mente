@@ -484,8 +484,10 @@ fn parenthesized(src: &str, start: usize, end: usize) -> (usize, usize) {
 /// What a loop's condition that changes state is told where no call can be named.
 const EVERY_ROUND: &str = "move it to the top of the loop's body, which runs every round, and leave the loop there with `guard ... else { break }`";
 
-/// `E0236` for the condition `open`, under a name for its fix that no binding, no name of the
-/// module and no earlier fix of the function in `given` has.
+/// `E0236` for the condition `open`, under a name for the `val` it proposes that no binding, no
+/// name of the module and no name proposed before in the function, in `given`, has: advice that
+/// carries no fix names one too, and two pieces of advice applied as written must not declare
+/// the same name (`E0202`).
 fn report(
     tree: &Tree,
     resolution: &Resolution,
@@ -518,9 +520,10 @@ fn report(
         )
     };
     let leading = call.filter(|&c| evaluated_first(tree, open.root, c));
-    let how = match (open.place, call) {
-        (Place::Clause(_), _) => "write it over the values as they are".to_string(),
-        (Place::While, None) => EVERY_ROUND.to_string(),
+    // The advice, and whether it proposes `val` with the name.
+    let (how, named) = match (open.place, call) {
+        (Place::Clause(_), _) => ("write it over the values as they are".to_string(), false),
+        (Place::While, None) => (EVERY_ROUND.to_string(), false),
         (Place::While, Some(c)) => {
             let mut parts = Vec::new();
             conjuncts(tree, open.root, &mut parts);
@@ -534,7 +537,7 @@ fn report(
                     let head: Vec<String> = parts[..k].iter().map(|&p| source(p)).collect();
                     let mut test = vec![with_name(parts[k], c)];
                     test.extend(parts[k + 1..].iter().map(|&p| source(p)));
-                    format!(
+                    let advice = format!(
                         "to call `{}` every round, write `while {} {{` and start its body with `val {} = {}` and then `guard {} else {{ break }}`",
                         text(at),
                         match head.is_empty() {
@@ -544,23 +547,30 @@ fn report(
                         name,
                         text(at),
                         test.join(" and ")
-                    )
+                    );
+                    (advice, true)
                 }
-                None => EVERY_ROUND.to_string(),
+                None => (EVERY_ROUND.to_string(), false),
             }
         }
         (
             Place::Guard | Place::If | Place::ElseIf | Place::Scrutinee | Place::Operand(_),
             _,
         ) => match leading {
-            Some(c) => format!(
-                "compute `{}` into a `val` in a statement of its own where it runs, `val {} = {}`, and test `{}`",
-                text(tree.expr(c).span),
-                name,
-                text(tree.expr(c).span),
-                with_name(open.root, c)
+            Some(c) => (
+                format!(
+                    "compute `{}` into a `val` in a statement of its own where it runs, `val {} = {}`, and test `{}`",
+                    text(tree.expr(c).span),
+                    name,
+                    text(tree.expr(c).span),
+                    with_name(open.root, c)
+                ),
+                true,
             ),
-            None => "move it out of the condition into a statement of its own where it runs, and test what it leaves".to_string(),
+            None => (
+                "move it out of the condition into a statement of its own where it runs, and test what it leaves".to_string(),
+                false,
+            ),
         },
     };
     let mut d = Diagnostic::error(
@@ -600,6 +610,8 @@ fn report(
                 },
             ],
         });
+    }
+    if named {
         given.push(name);
     }
     d
@@ -634,6 +646,33 @@ mod tests {
         );
         let at = src[d[0].primary.start..d[0].primary.end].to_string();
         (d[0].clone(), at)
+    }
+
+    /// Each piece of advice in a function proposes a name no other proposes, whether a fix
+    /// carries it or not: two refused loops were both told `val v = ...`, which applied as
+    /// written declare `v` twice (`E0202`), since only a fix's name was recorded (Fable's review
+    /// of pull request 196).
+    #[test]
+    fn test_advice_in_one_function_never_repeats_a_name() {
+        let d = diagnostics(
+            "pub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while r < 8 and next(mut i) > 0 {\n    r += 1\n  }\n  while r < 16 and next(mut i) > 0 {\n    r += 1\n  }\n  guard next(mut i) > 0 else {\n    return 0\n  }\n  r\n}",
+        );
+        assert_eq!(
+            d.iter().map(|d| d.code).collect::<Vec<_>>(),
+            ["E0236", "E0236", "E0236"],
+            "{:?}",
+            d
+        );
+        for (d, name) in d.iter().zip(["v", "v2", "v3"]) {
+            assert!(
+                d.message.contains(&format!("`val {} = next(mut i)`", name)),
+                "{}: {}",
+                name,
+                d.message
+            );
+        }
+        assert!(d[0].fixes.is_empty() && d[1].fixes.is_empty());
+        assert_eq!(d[2].fixes.len(), 1);
     }
 
     /// The advice quotes each part of the condition as written, its parentheses included
