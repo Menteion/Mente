@@ -536,10 +536,17 @@ fn group(mode: Mode) -> &'static str {
 }
 
 /// Where the seeds the comparison checks without running begin, beyond those any run of it runs
-/// (`generated_programs_run_alike_on_the_three_paths`): its `n`-th checked seed after a run that
-/// begins at `first` is `CHECKED_SEEDS + first + n`, so that a nightly run never checks seeds
-/// the next night's run runs again, whose ranges follow each other far below it.
+/// (`generated_programs_run_alike_on_the_three_paths`), far below it.
 const CHECKED_SEEDS: u64 = 1 << 40;
+
+/// The first seed checked without running after a run of `count` seeds from `first` that
+/// checks `checked` more: the run's place among runs of its size, `first / count`, times
+/// `checked`, from [`CHECKED_SEEDS`]. A nightly run's first seed is the day's number times its
+/// programs, so each night checks a range of its own, which the next night's does not meet
+/// whatever its size; a pull request's run, from 0, checks the first.
+fn first_checked(first: u64, count: u64, checked: u64) -> u64 {
+    CHECKED_SEEDS + first / count.max(1) * checked
+}
 
 /// The programs of the `count` seeds from `first`, generated and checked, Tier 1 included, but
 /// not run: a line of what they show, and what no generated program may show
@@ -1164,7 +1171,7 @@ mod tests {
             ("no programs checked beyond them".to_string(), Vec::new())
         } else {
             let start = std::time::Instant::now();
-            let (line, wrong) = check_generated(CHECKED_SEEDS + first, wide);
+            let (line, wrong) = check_generated(first_checked(first, count, wide), wide);
             (format!("{}\nin {:.1?}", line, start.elapsed()), wrong)
         };
         println!("{}", checked);

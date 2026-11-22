@@ -469,9 +469,13 @@ fn passes_mut(e: &E, name: &str) -> bool {
             .any(|(is_mut, a)| (*is_mut && names(a, &|n| n == name)) || sub(a)),
         E::Lit(_) | E::Name(_) | E::Builtin(..) => false,
         E::Index(a, b) | E::Bin(_, a, b) => sub(a) || sub(b),
-        E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
-            sub(x)
-        }
+        E::Len(x)
+        | E::Field(x, _)
+        | E::Neg(x)
+        | E::BitNot(x)
+        | E::Not(x)
+        | E::Repeat(x, _)
+        | E::Bits(x, _) => sub(x),
         E::Construct(_, fields) | E::Variant(_, _, fields) => fields.iter().any(|(_, x)| sub(x)),
         E::If(c, a, b) => sub(c) || sub(a) || sub(b),
         E::Array(items) => items.iter().any(sub),
@@ -488,9 +492,13 @@ fn names(e: &E, is: &dyn Fn(&str) -> bool) -> bool {
         E::Name(n) => is(n),
         E::Lit(_) | E::Builtin(..) => false,
         E::Index(a, b) | E::Bin(_, a, b) => sub(a) || sub(b),
-        E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
-            sub(x)
-        }
+        E::Len(x)
+        | E::Field(x, _)
+        | E::Neg(x)
+        | E::BitNot(x)
+        | E::Not(x)
+        | E::Repeat(x, _)
+        | E::Bits(x, _) => sub(x),
         E::Construct(_, fields) | E::Variant(_, _, fields) => fields.iter().any(|(_, x)| sub(x)),
         E::Call(_, args) => args.iter().any(|(_, x)| sub(x)),
         E::If(c, a, b) => sub(c) || sub(a) || sub(b),
@@ -676,6 +684,43 @@ enum E {
     Return(Box<E>),
     /// `break` or `continue`, as a branch of an `if` inside a loop: the branch leaves the round.
     Leave(&'static str),
+    /// A bit operation of literals alone (`Gen::literal_bits`), with the type it was written in,
+    /// which the generator believes its literals take there. It prints as its expression,
+    /// between marks the module's text is stripped of (`unmarked`), so that the span and type of
+    /// each are known (`Program::bits`) for the check of what the checker gives them
+    /// (`literals_as_written`).
+    Bits(Box<E>, IntT),
+}
+
+/// The marks around a bit operation of literals alone in an expression's text (`E::Bits`): before
+/// it, the name of the type it was written in, then its text, then the end. Characters of
+/// Unicode's private use area, which no generated program holds otherwise.
+const MARK_OPEN: char = '\u{E000}';
+const MARK_TYPE: char = '\u{E001}';
+const MARK_CLOSE: char = '\u{E002}';
+
+/// `text` stripped of its marks (`E::Bits`), and the span in the stripped text of each marked bit
+/// operation of literals alone, with the name of the type it was written in.
+fn unmarked(text: &str) -> (String, Vec<(Range<usize>, String)>) {
+    let mut out = String::with_capacity(text.len());
+    let mut open: Vec<(usize, String)> = Vec::new();
+    let mut spans = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            MARK_OPEN => {
+                let name: String = chars.by_ref().take_while(|&c| c != MARK_TYPE).collect();
+                open.push((out.len(), name));
+            }
+            MARK_CLOSE => {
+                if let Some((start, name)) = open.pop() {
+                    spans.push((start..out.len(), name));
+                }
+            }
+            c => out.push(c),
+        }
+    }
+    (out, spans)
 }
 
 impl E {
@@ -702,6 +747,7 @@ impl E {
             E::Bin(op, ..) => op.level(),
             E::Not(_) => NOT,
             E::Neg(_) | E::BitNot(_) => UNARY,
+            E::Bits(x, _) => x.level(),
             E::Index(..) | E::Len(_) | E::Field(..) => POSTFIX,
             _ => PRIMARY,
         }
@@ -798,11 +844,19 @@ impl E {
             E::Neg(x) | E::BitNot(x) => {
                 out.push(if matches!(self, E::Neg(_)) { '-' } else { '~' });
                 // `- -x` would read as one token to a reader, if not to the lexer.
-                let min = match **x {
+                let min = match x.bare() {
                     E::Neg(_) | E::BitNot(_) => PRIMARY,
                     _ => UNARY,
                 };
                 x.print(min, out);
+            }
+            // Inside any parentheses its level put around it, as the parser's span of it is.
+            E::Bits(x, t) => {
+                out.push(MARK_OPEN);
+                out.push_str(t.name);
+                out.push(MARK_TYPE);
+                x.print(min, out);
+                out.push(MARK_CLOSE);
             }
             E::Not(x) => {
                 out.push_str("not ");
@@ -854,16 +908,32 @@ impl E {
         }
     }
 
+    /// Its text, as a program holds it.
     fn text(&self) -> String {
+        unmarked(&self.marked()).0
+    }
+
+    /// Its text with the marks of its bit operations of literals alone (`E::Bits`), which the
+    /// module's text is stripped of once their spans are read.
+    fn marked(&self) -> String {
         let mut s = String::new();
         self.print(0, &mut s);
         s
     }
 
+    /// The expression a wrapper of the generator's own stands for: itself but for `E::Bits`.
+    fn bare(&self) -> &E {
+        match self {
+            E::Bits(x, _) => x.bare(),
+            other => other,
+        }
+    }
+
     /// Its text where a statement's header holds it, before the `{` of a block: the condition
     /// of an `if`, a `while` or a `guard`, and what a `match` reads. An `if` or a `match` there
     /// stands in parentheses, as it does as an operand (`E0115`).
-    fn header(&self) -> String {
+    /// Its text where a statement's header holds it, with its marks ([`E::marked`]).
+    fn header_marked(&self) -> String {
         let mut s = String::new();
         self.print(1, &mut s);
         s
@@ -973,6 +1043,9 @@ pub struct Program {
     pub text: String,
     /// Each function's name, with where its text lies in `text`.
     pub functions: Vec<(String, Range<usize>)>,
+    /// Each bit operation of literals alone the generator wrote (`E::Bits`), with where it lies
+    /// in `text` and the type it was written in (`literals_as_written`).
+    pub bits: Vec<(Range<usize>, IntT)>,
 }
 
 /// The program `seed` generates, the same on every platform.
@@ -986,12 +1059,13 @@ pub fn generated(seed: u64, attempts: &[u32]) -> Program {
     let mode = Mode::of(seed);
     let mut g = Gen::new(seed, mode);
     g.attempts = attempts.to_vec();
-    let (text, functions) = g.module();
+    let (text, functions, bits) = g.module();
     Program {
         seed,
         mode,
         text,
         functions,
+        bits,
     }
 }
 
@@ -1264,7 +1338,16 @@ impl Gen {
         }
     }
 
-    fn module(&mut self) -> (String, Vec<(String, Range<usize>)>) {
+    /// The module's text, each function's name and range, and each bit operation of literals
+    /// alone with its range and the type it was written in (`Program::bits`).
+    #[allow(clippy::type_complexity)]
+    fn module(
+        &mut self,
+    ) -> (
+        String,
+        Vec<(String, Range<usize>)>,
+        Vec<(Range<usize>, IntT)>,
+    ) {
         let mut out = String::from("module generated\n");
         // Structs and enums first, each holding only those declared before it, so none contains
         // itself.
@@ -1287,12 +1370,18 @@ impl Gen {
             .map(|k| k + 1 == count || self.rng.chance(50))
             .collect();
         let mut functions = Vec::new();
+        let mut bits = Vec::new();
         for (k, public) in public.into_iter().enumerate() {
-            let text = self.function(k, public);
+            // A function's text holds the marks of its bit operations of literals alone, which
+            // give each one's span here, and nothing else does (`E::Bits`).
+            let (text, marked) = unmarked(&self.function(k, public));
             out.push('\n');
             let start = out.len();
             out.push_str(&text);
             functions.push((format!("f{}", k), start..out.len()));
+            bits.extend(marked.into_iter().filter_map(|(at, name)| {
+                Some((start + at.start..start + at.end, IntT::named(&name)?))
+            }));
         }
         // Now and then arrays that meet in one shape, from a random source of its own too, before
         // the recursion, which ends a program, and named past its two functions
@@ -1323,7 +1412,7 @@ impl Gen {
             out.push_str(&text);
             functions.push((format!("pin{}", k), start..out.len()));
         }
-        (out, functions)
+        (out, functions, bits)
     }
 
     // ---------------------------------------------------------------- structs
@@ -1790,9 +1879,13 @@ impl Gen {
             E::Name(n) => names.contains(n),
             E::Lit(_) | E::Builtin(..) => false,
             E::Index(a, b) | E::Bin(_, a, b) => sub(a) || sub(b),
-            E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
-                sub(x)
-            }
+            E::Len(x)
+            | E::Field(x, _)
+            | E::Neg(x)
+            | E::BitNot(x)
+            | E::Not(x)
+            | E::Repeat(x, _)
+            | E::Bits(x, _) => sub(x),
             E::Construct(_, fields) | E::Variant(_, _, fields) => {
                 fields.iter().any(|(_, x)| sub(x))
             }
@@ -1856,9 +1949,13 @@ impl Gen {
                 self.returns_in(a, t);
                 self.returns_in(b, t);
             }
-            E::Len(x) | E::Field(x, _) | E::Neg(x) | E::BitNot(x) | E::Not(x) | E::Repeat(x, _) => {
-                self.returns_in(x, t)
-            }
+            E::Len(x)
+            | E::Field(x, _)
+            | E::Neg(x)
+            | E::BitNot(x)
+            | E::Not(x)
+            | E::Repeat(x, _)
+            | E::Bits(x, _) => self.returns_in(x, t),
             E::Construct(_, fields) | E::Variant(_, _, fields) => {
                 for (_, x) in fields.iter_mut() {
                     self.returns_in(x, t);
@@ -2478,14 +2575,29 @@ impl Gen {
     }
 
     /// Whether `g`'s bit operations of literals alone take the type they were written in where
-    /// it stands. As a whole value, which no place gives a type, its own operands give them
-    /// theirs, its class's holder. As a branch of an `if`, an arm of a `match` or an element
-    /// of an array literal (`joined`), the other values join with it to give them one, which
-    /// the generator does not know, so none may be open there.
+    /// it stands (`core-calculus.md`, item 5). A value with operands of a type gives them that
+    /// type wherever it stands, its class's holder: as a whole value, and as a branch of an
+    /// `if`, an arm of a `match` or an element of an array literal (`joined`), whose join gives
+    /// a type only to a value of literals alone. Such a value, as a whole value, takes `i64`;
+    /// joined, it takes the type of the values beside it, which the generator writes after it
+    /// or apart from it, so it may hold none there. `literals_as_written` holds the rule.
     fn closed(g: &G, joined: bool) -> bool {
-        match g.lit {
-            None => true,
-            Some(t) => !joined && g.cls.holder() == Some(t),
+        match (g.lit, g.cls) {
+            (None, _) => true,
+            (Some(_), Cls::Lit) if joined => false,
+            (Some(t), cls) => cls.holder() == Some(t),
+        }
+    }
+
+    /// Whether `x`'s bit operations of literals alone, compared with `other`, take the type they
+    /// were written in (`core-calculus.md`, item 5): a side of literals alone takes the other
+    /// side's type (`Gen::taken`), `i64` beside literals alone too, and a side with operands of
+    /// a type keeps its own (`Gen::closed`). `literals_as_written` holds the rule.
+    fn compared_as_written(x: &G, other: &G) -> bool {
+        match (x.lit, x.cls) {
+            (None, _) => true,
+            (Some(t), Cls::Lit) => Self::taken(other.cls) == Some(t),
+            (Some(_), Cls::One(_) | Cls::Mixed(_)) => Self::closed(x, false),
         }
     }
 
@@ -2533,7 +2645,7 @@ impl Gen {
         };
         G {
             lit: Some(t),
-            e,
+            e: E::Bits(Box::new(e), t),
             cls: Cls::Lit,
             r: t.range(),
             k: Some(v),
@@ -3285,17 +3397,33 @@ impl Gen {
                     .rng
                     .pick(&[Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge]);
                 let m = self.mark();
-                let a = self.int_expr(Want::Any, depth + 1);
-                let b = match self.literal_beside(&a) {
-                    Some(b) => b,
-                    None => self.int_expr(Want::Any, depth + 1),
+                let (a, b) = if self.rng.chance(6) {
+                    // Now and then literals alone first, under a bit operation in a type
+                    // chosen before the other side is written, which gives them its type: in
+                    // that type, or in one of its own, which the rule below refuses where it is
+                    // another.
+                    let t = self.int_ty();
+                    let a = self.literal_bits(t);
+                    let want = if self.rng.chance(50) {
+                        Want::Exact(t)
+                    } else {
+                        Want::Any
+                    };
+                    (a, self.int_expr(want, depth + 1))
+                } else {
+                    let a = self.int_expr(Want::Any, depth + 1);
+                    let b = match self.literal_beside(&a) {
+                        Some(b) => b,
+                        None => self.int_expr(Want::Any, depth + 1),
+                    };
+                    (a, b)
                 };
                 // `compared` keeps an operand's class, so `b` is compared beside `a`'s.
                 let a = self.compared(a, &b);
                 let b = self.compared(b, &a);
-                // Each side gives the other's literals its type, so their bit operations of
-                // literals alone take the type the two join in (`Gen::joined_lit`).
-                if Self::joined_lit(a.cls.join(b.cls), a.lit, b.lit).is_none() {
+                // A side of literals alone takes the other's type, and a typed side keeps its
+                // own (`Gen::compared_as_written`).
+                if !Self::compared_as_written(&a, &b) || !Self::compared_as_written(&b, &a) {
                     self.restore(m);
                     return self.bool_leaf();
                 }
@@ -3383,6 +3511,7 @@ impl Gen {
                 arithmetic(*op, self.fact(a)?, self.fact(b)?)
             }
             // `x << k` is `x * 2^k`, where it does not trap.
+            E::Bits(x, _) => self.fact(x),
             E::Bin(Op::Shl, a, k) => {
                 let k = u32::try_from(constant(k).filter(|k| !k.neg)?.mag).ok()?;
                 let power = Num::new(false, 1u128.checked_shl(k)?);
@@ -4919,16 +5048,16 @@ impl Gen {
             if invariant {
                 // A signed counter needs its lower bound written: the loop's text gives none.
                 clauses.push(if t.signed {
-                    format!("invariant {0} >= 0 and {0} <= {1}", c.text(), bound)
+                    format!("invariant {0} >= 0 and {0} <= {1}", c.marked(), bound)
                 } else {
-                    format!("invariant {} <= {}", c.text(), bound)
+                    format!("invariant {} <= {}", c.marked(), bound)
                 });
             }
             if self.rng.chance(60) {
                 clauses.push(if up {
-                    format!("decreases {} - {}", bound, c.text())
+                    format!("decreases {} - {}", bound, c.marked())
                 } else {
-                    format!("decreases {}", c.text())
+                    format!("decreases {}", c.marked())
                 });
             }
         }
@@ -5516,7 +5645,7 @@ impl Gen {
         match body {
             Body::Expr(e) => {
                 out.push_str(if clauses.is_empty() { " = " } else { "\n= " });
-                out.push_str(&e.text());
+                out.push_str(&e.marked());
                 out.push('\n');
             }
             Body::Block(b) => {
@@ -5649,7 +5778,7 @@ impl Gen {
         }
         if let Some(t) = &b.tail {
             out.push_str(&"  ".repeat(indent));
-            out.push_str(&t.text());
+            out.push_str(&t.marked());
             out.push('\n');
         }
     }
@@ -5669,22 +5798,22 @@ impl Gen {
                 };
                 match ty {
                     Some(ty) => {
-                        out.push_str(&format!("{} {}: {} = {}\n", kw, b.name, ty, init.text()))
+                        out.push_str(&format!("{} {}: {} = {}\n", kw, b.name, ty, init.marked()))
                     }
-                    None => out.push_str(&format!("{} {} = {}\n", kw, b.name, init.text())),
+                    None => out.push_str(&format!("{} {} = {}\n", kw, b.name, init.marked())),
                 }
             }
-            S::Assign(p, op, v) => out.push_str(&format!("{} {} {}\n", p.text(), op, v.text())),
-            S::Discard(e) => out.push_str(&format!("_ = {}\n", e.text())),
-            S::Expr(e) => out.push_str(&format!("{}\n", e.text())),
+            S::Assign(p, op, v) => out.push_str(&format!("{} {} {}\n", p.marked(), op, v.marked())),
+            S::Discard(e) => out.push_str(&format!("_ = {}\n", e.marked())),
+            S::Expr(e) => out.push_str(&format!("{}\n", e.marked())),
             S::If(c, then, els) => {
-                out.push_str(&format!("if {} {{\n", c.header()));
+                out.push_str(&format!("if {} {{\n", c.header_marked()));
                 self.print_block(then, indent + 1, out);
                 let mut els = els.as_ref();
                 while let Some(e) = els {
                     // An `else` block that holds one `if` alone is written `else if`.
                     if let (None, [S::If(c, then, next)]) = (&e.tail, e.stmts.as_slice()) {
-                        out.push_str(&format!("{}}} else if {} {{\n", pad, c.header()));
+                        out.push_str(&format!("{}}} else if {} {{\n", pad, c.header_marked()));
                         self.print_block(then, indent + 1, out);
                         els = next.as_ref();
                     } else {
@@ -5696,7 +5825,7 @@ impl Gen {
                 out.push_str(&format!("{}}}\n", pad));
             }
             S::Match(s, arms) => {
-                out.push_str(&format!("match {} {{\n", s.header()));
+                out.push_str(&format!("match {} {{\n", s.header_marked()));
                 for (p, body) in arms {
                     out.push_str(&format!("{}  {} => {{\n", pad, p));
                     self.print_block(body, indent + 2, out);
@@ -5705,7 +5834,7 @@ impl Gen {
                 out.push_str(&format!("{}}}\n", pad));
             }
             S::While(c, clauses, body) => {
-                out.push_str(&format!("while {}", c.header()));
+                out.push_str(&format!("while {}", c.header_marked()));
                 for k in clauses {
                     out.push(' ');
                     out.push_str(k);
@@ -5715,11 +5844,11 @@ impl Gen {
                 out.push_str(&format!("{}}}\n", pad));
             }
             S::Guard(c, els) => {
-                out.push_str(&format!("guard {} else {{\n", c.header()));
+                out.push_str(&format!("guard {} else {{\n", c.header_marked()));
                 self.print_block(els, indent + 1, out);
                 out.push_str(&format!("{}}}\n", pad));
             }
-            S::Return(Some(e)) => out.push_str(&format!("return {}\n", e.text())),
+            S::Return(Some(e)) => out.push_str(&format!("return {}\n", e.marked())),
             S::Return(None) => out.push_str("return\n"),
             S::Break => out.push_str("break\n"),
             S::Continue => out.push_str("continue\n"),
@@ -6022,6 +6151,55 @@ pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .unwrap_or_else(|| "a panic with no message".to_string())
 }
 
+/// Each bit operation of literals alone of `program` the checker types otherwise than the
+/// generator wrote it (`Program::bits`), as a problem. The generator's model of the type such
+/// literals take (`core-calculus.md`, item 5; `G::lit`) is checked here against the checker's
+/// own table (`Typing::literals`), wherever that model is held, a join it might get wrong
+/// included, so that no caller's check can be dropped unseen. One no expression of the checked
+/// program spans is a problem too.
+pub fn literals_as_written(program: &Program, module: &CheckedModule) -> Vec<String> {
+    let mut out = Vec::new();
+    for (at, t) in &program.bits {
+        let text = program.text.get(at.clone()).unwrap_or("");
+        let spanned: Vec<(mente_syntax::Span, Option<mente_sema::literals::Taken>)> = module
+            .functions
+            .iter()
+            .flatten()
+            .flat_map(|f| {
+                f.syntax
+                    .tree
+                    .exprs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.span.start == at.start && e.span.end == at.end)
+                    .map(|(k, e)| (e.span, f.typing.literals.get(k).copied().flatten()))
+            })
+            .collect();
+        let taken = spanned
+            .iter()
+            .find_map(|(span, taken)| Some((*span, (*taken)?)));
+        let said = match (taken, spanned.first()) {
+            (Some((_, taken)), _) if taken.ty.bits == t.bits && taken.ty.signed == t.signed => {
+                continue;
+            }
+            (Some((span, taken)), _) => format!(
+                "at {}:{} was written in {}, and the checker gives its literals {}",
+                span.line, span.col, t.name, taken.ty.name
+            ),
+            (None, Some((span, None))) => format!(
+                "at {}:{} was written in {}, and the checker gives it no type of literals alone",
+                span.line, span.col, t.name
+            ),
+            (None, Some((_, Some(_)))) | (None, None) => format!(
+                "at byte {} was written in {}, and no expression of the checked program spans it",
+                at.start, t.name
+            ),
+        };
+        out.push(format!("seed {}: `{}` {}", program.seed, text, said));
+    }
+    out
+}
+
 /// A generated program that passes every check, Tier 1 included, so that the three paths run
 /// it: the program of its seed, with each function Tier 1 refused generated again.
 pub struct Checked {
@@ -6199,6 +6377,7 @@ pub fn checked(seed: u64) -> Checked {
                             panic_message(&*payload)
                         )),
                     }
+                    problems.extend(literals_as_written(&program, &module));
                     return Checked {
                         program,
                         module: Some(module),
@@ -7141,6 +7320,7 @@ mod tests {
             mode: Mode::Plain,
             functions: vec![("f".to_string(), 0..text.len())],
             text,
+            bits: Vec::new(),
         }
     }
 
@@ -7177,6 +7357,7 @@ mod tests {
             | E::BitNot(x)
             | E::Not(x)
             | E::Repeat(x, _)
+            | E::Bits(x, _)
             | E::Return(x) => sub(x),
             E::Construct(_, fields) | E::Variant(_, _, fields) => {
                 fields.iter().any(|(_, x)| sub(x))
@@ -7961,7 +8142,7 @@ mod tests {
         // A bit operation, a shift or `~` anywhere in a literal.
         fn works_in_a_type(e: &E) -> bool {
             match e {
-                E::BitNot(_) => true,
+                E::BitNot(_) | E::Bits(..) => true,
                 E::Bin(op, a, b) => {
                     matches!(op, Op::BitAnd | Op::BitOr | Op::BitXor | Op::Shl | Op::Shr)
                         || works_in_a_type(a)
@@ -8080,14 +8261,80 @@ mod tests {
         assert_eq!(said(panic::catch_unwind(|| planted(3))), "3");
     }
 
+    /// The check of the type a bit operation of literals alone takes (`literals_as_written`) holds
+    /// each one the generator wrote against the checker's table: `~0` in `a + 3_u8 * ~0` with
+    /// `a: u16`, written as a `u8`'s, is a problem, since the checker gives it `u16`; written as a
+    /// `u16`'s it is not; and a span no expression has is a problem too.
+    #[test]
+    fn test_a_literal_written_in_another_type_than_the_checker_gives_is_a_problem() {
+        let text = "module m\npub fn f(a: u16) -> u32 = a + 3_u8 * ~0\n".to_string();
+        let start = text.find("~0").unwrap_or(0);
+        let module = mente_sema::check_program(&text).ok();
+        let Some(module) = module else {
+            panic!("the program checks");
+        };
+        let written = |at: Range<usize>, t: &str| Program {
+            seed: 7,
+            mode: Mode::Plain,
+            functions: Vec::new(),
+            text: text.clone(),
+            bits: vec![(at, IntT::named(t).unwrap_or(INTS[0]))],
+        };
+        assert_eq!(
+            literals_as_written(&written(start..start + 2, "u8"), &module),
+            ["seed 7: `~0` at 2:38 was written in u8, and the checker gives its literals u16"]
+        );
+        assert_eq!(
+            literals_as_written(&written(start..start + 2, "u16"), &module),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            literals_as_written(&written(start..start + 1, "u16"), &module),
+            ["seed 7: `~` at byte 46 was written in u16, and no expression of the checked program spans it"]
+        );
+    }
+
+    /// A generated program keeps where each bit operation of literals alone lies and the type it
+    /// was written in (`Program::bits`), read from the marks its functions' texts are stripped of
+    /// (`unmarked`), and holds none of them: the span is the operation's text, its parentheses
+    /// outside it, as the parser's span is.
+    #[test]
+    fn test_a_program_keeps_where_it_writes_literals_alone() {
+        let marked = format!("x + ({}u8{}~3 & 1{}) * 2", MARK_OPEN, MARK_TYPE, MARK_CLOSE);
+        let (text, spans) = unmarked(&marked);
+        assert_eq!(text, "x + (~3 & 1) * 2");
+        assert_eq!(spans, [(5..11, "u8".to_string())]);
+        let mut written = 0;
+        for seed in 0..40 {
+            let p = program(seed);
+            assert!(
+                !p.text.contains([MARK_OPEN, MARK_TYPE, MARK_CLOSE]),
+                "seed {}",
+                seed
+            );
+            for (at, _) in &p.bits {
+                let t = p.text.get(at.clone()).unwrap_or("");
+                assert!(
+                    t.starts_with('~') || t.contains(['&', '|', '^', '<']),
+                    "seed {}: {:?}",
+                    seed,
+                    t
+                );
+                written += 1;
+            }
+        }
+        assert!(written > 0);
+    }
+
     /// A bit operation of literals alone takes the type of the whole arithmetic expression around
     /// it (`core-calculus.md`, item 5), not that of the operand it was written beside: in
     /// `a + 3_u8 * ~0` with `a: u16`, `~0` works in `u16`, and a run of `a = 0` gives 196605, where
     /// the generator, which wrote it as a `u8`'s, believed 765. The generator keeps the type it
     /// wrote such literals in (`G::lit`) and refuses the operation where the operands joined give
     /// them another (`Gen::joined_lit`), as the checker would refuse one with `E0212` or
-    /// `E0222`, or run it otherwise; a comparison, a compound assignment and a value that joins
-    /// others are held alike (root cause 8 of the nightly triage of 2026-11-21, issue 211).
+    /// `E0222`, or run it otherwise; a comparison and a value that joins others are held by the
+    /// checker's rule there, which gives the other values' type only to literals alone (root
+    /// cause 8 of the nightly triage of 2026-11-21, issue 211).
     #[test]
     fn test_literal_bits_take_the_type_of_their_whole_expression() {
         let mut g = Gen::new(1, Mode::Plain);
@@ -8111,12 +8358,38 @@ mod tests {
         assert!(wider.is_none(), "{:?}", wider.map(|w| w.e));
         // Two written in two types never meet.
         assert_eq!(Gen::joined_lit(Cls::One(u8_), Some(u8_), Some(u16_)), None);
-        // A whole value keeps them in its own type; a value that joins others keeps none open.
+        // A whole value of literals alone takes `i64`; joined, it takes the type of the values
+        // beside it, which the generator does not know, so it holds none of a type of its own.
         let alone = g.literal_bits(I64);
         assert!(Gen::closed(&alone, false));
         assert!(!Gen::closed(&alone, true));
         assert!(!Gen::closed(&g.literal_bits(u8_), false));
-        assert!(Gen::closed(&typed(u8_, E::name("a")), true));
+        // A value with operands of a type keeps its own wherever it stands.
+        let open = G {
+            lit: Some(u8_),
+            ..typed(u8_, E::name("a"))
+        };
+        assert!(Gen::closed(&open, false));
+        assert!(Gen::closed(&open, true));
+        assert!(!Gen::closed(
+            &G {
+                lit: Some(u16_),
+                ..typed(u8_, E::name("a"))
+            },
+            true
+        ));
+        // Compared, literals alone take the other side's type, `i64` beside literals alone, and
+        // a side with operands of a type keeps its own.
+        let bits = g.literal_bits(u8_);
+        let plain = G {
+            cls: Cls::Lit,
+            ..typed(u8_, E::Lit("5".into()))
+        };
+        assert!(Gen::compared_as_written(&bits, &typed(u8_, E::name("b"))));
+        assert!(!Gen::compared_as_written(&bits, &typed(u16_, E::name("b"))));
+        assert!(!Gen::compared_as_written(&bits, &plain));
+        assert!(Gen::compared_as_written(&alone, &plain));
+        assert!(Gen::compared_as_written(&open, &typed(u16_, E::name("b"))));
     }
 
     /// A run is held to two bars, whatever its size: the functions it generates again for
