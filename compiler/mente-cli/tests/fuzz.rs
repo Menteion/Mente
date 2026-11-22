@@ -458,11 +458,11 @@ fn test_fuzz_shares_runs_among_jobs_and_keeps_to_its_seconds() {
 }
 
 /// The minimized failures whose fixes have not landed yet, which still fail on the edit seed
-/// their records name (`test_fuzz_pending_regressions_still_fail`): the incremental failure of
-/// the nightly run of 2026-11-15, root cause 4 of the triage of 2026-11-21. A fix removes its
-/// file's name here, and the file joins the main test, as root cause 7's did with pull request
-/// 186 and root cause 5's once its fix reached main.
-const PENDING: [&str; 1] = ["incremental-layout-byte-range-past-usize.mn"];
+/// their records name (`test_fuzz_pending_regressions_still_fail`). None is now: the last,
+/// `incremental-layout-byte-range-past-usize.mn`, the incremental failure of the nightly run of
+/// 2026-11-15, joined the main test with its fix, pull request 187. A fix removes its file's name
+/// here, and the file joins the main test, as root cause 7's did with pull request 186.
+const PENDING: [&str; 0] = [];
 
 fn regressions() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
