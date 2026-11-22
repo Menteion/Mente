@@ -6521,8 +6521,10 @@ mente-dump 3 mir
 f0: fn matched(bool, u8, effect) -> u8 frame 71 {
 block0(v0: bool, v1: u8, v2: effect):
   branch v0, block2(v2), block3(v2)
-block1(v3: u8, v4: effect):
-  return v3 after v4
+block1(v3: i64, v4: effect):
+  v9: i64 = assume within 0..=255 v3, v4 @9:18
+  v10: u8 = cast v9 @9:18
+  return v10 after v9
 block2(v5: effect):
   trap t0 after v5
 block3(v6: effect):
@@ -6531,8 +6533,8 @@ block4(v7: effect):
   trap t2 after v7
 block5(v8: effect):
   trap t2 after v8
-block6(v9: effect):
-  trap t2 after v9
+block6(v11: effect):
+  trap t2 after v11
 t0: todo @8:17 ["todo reached: a"]
 t1: todo @9:18 ["todo reached: b"]
 t2: unreachable @11:3 ["unreachable reached: control left the code the checker allows"]
@@ -6545,14 +6547,16 @@ block1(v3: effect):
   trap t0 after v3
 block2(v4: effect):
   trap t1 after v4
-block3(v5: u8, v6: effect):
-  return v5 after v6
+block3(v5: i64, v6: effect):
+  v9: i64 = assume within 0..=255 v5, v6 @15:45
+  v10: u8 = cast v9 @15:45
+  return v10 after v9
 block4(v7: effect):
   trap t2 after v7
 block5(v8: effect):
   trap t2 after v8
-block6(v9: effect):
-  trap t2 after v9
+block6(v11: effect):
+  trap t2 after v11
 t0: todo @15:22 ["todo reached: a"]
 t1: todo @15:45 ["todo reached: b"]
 t2: unreachable @16:3 ["unreachable reached: control left the code the checker allows"]
@@ -6566,35 +6570,37 @@ block1(v4: effect):
   trap t0 after v4
 block2(v5: effect):
   trap t1 after v5
-block3(v6: u8, v7: effect):
-  v10: u64 = int 0 @20:53
-  v11: addr = elem 1 v3, v10 @20:53
-  v12: unit = store v11, v6, v7 @20:53
-  v13: i64 = int 1 @20:66
-  v14: i64 = assume within 0..=255 v13, v12 @20:66
-  v15: u8 = cast v14 @20:66
-  v16: u64 = int 1 @20:66
-  v17: addr = elem 1 v3, v16 @20:66
-  v18: unit = store v17, v15, v14 @20:66
-  v19: addr = slot 2 @20:66
-  v20: unit = copy 2 v19, v3, v18 @20:66
-  v21: i64 = int 1 @21:5
-  v22: i64 = int 0 @21:3
-  v23: bool = ge v21, v22 @21:3
-  v24: i64 = int 2 @21:3
-  v25: bool = lt v21, v24 @21:3
-  v26: bool = and v23, v25 @21:3
-  v27: i64 = guard t2 within 0..=1 v26, v21, v21, v20 @21:3
-  v28: u64 = cast v27 @21:3
-  v29: addr = elem 1 v19, v28 @21:3
-  v30: u8 = load v29, v27 @21:3
-  return v30 after v30
+block3(v6: i64, v7: effect):
+  v10: i64 = assume within 0..=255 v6, v7 @20:53
+  v11: u8 = cast v10 @20:53
+  v12: u64 = int 0 @20:53
+  v13: addr = elem 1 v3, v12 @20:53
+  v14: unit = store v13, v11, v10 @20:53
+  v15: i64 = int 1 @20:66
+  v16: i64 = assume within 0..=255 v15, v14 @20:66
+  v17: u8 = cast v16 @20:66
+  v18: u64 = int 1 @20:66
+  v19: addr = elem 1 v3, v18 @20:66
+  v20: unit = store v19, v17, v16 @20:66
+  v21: addr = slot 2 @20:66
+  v22: unit = copy 2 v21, v3, v20 @20:66
+  v23: i64 = int 1 @21:5
+  v24: i64 = int 0 @21:3
+  v25: bool = ge v23, v24 @21:3
+  v26: i64 = int 2 @21:3
+  v27: bool = lt v23, v26 @21:3
+  v28: bool = and v25, v27 @21:3
+  v29: i64 = guard t2 within 0..=1 v28, v23, v23, v22 @21:3
+  v30: u64 = cast v29 @21:3
+  v31: addr = elem 1 v21, v30 @21:3
+  v32: u8 = load v31, v29 @21:3
+  return v32 after v32
 block4(v8: effect):
   trap t3 after v8
 block5(v9: effect):
   trap t3 after v9
-block6(v31: effect):
-  trap t3 after v31
+block6(v33: effect):
+  trap t3 after v33
 t0: todo @20:30 ["todo reached: a"]
 t1: todo @20:53 ["todo reached: b"]
 t2: index-out-of-bounds @21:3 ["index ", " is outside an array of length 2"]
@@ -6628,6 +6634,767 @@ t0: stack-overflow @19:8 ["the call stack ran out"]
 t1: unreachable @19:8 ["unreachable reached: control left the code the checker allows"]
 }
 == conformance/core-calculus/branch_with_an_operand_that_leaves_keeps_its_type.mn == (exit 2)
+== conformance/core-calculus/branches_of_no_value_leave_the_hull.mn ==
+mente-dump 3 mir
+f0: fn unreachable_tail(addr, bool, bool, i8, u64, effect) frame 115 {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  branch v1, block1(v5), block2(v5)
+block1(v6: effect):
+  v10: addr = slot 1 @12:78
+  v11: u64 = int 0 @12:79
+  v12: addr = elem 1 v10, v11 @12:79
+  v13: unit = store v12, v3, v6 @12:79
+  v14: addr = slot 16 @12:79
+  v19: u64 = int 0 @12:79
+  jump block4(v19, v13)
+block2(v7: effect):
+  branch v2, block7(v7), block8(v7)
+block3(v8: addr, v9: effect):
+  v55: unit = copy 16 v0, v8, v9 @12:71
+  return after v55
+block4(v15: u64, v16: effect):
+  v20: u64 = int 1 @12:79
+  v21: bool = lt v15, v20 @12:79
+  branch v21, block5(v16), block6(v16)
+block5(v17: effect):
+  v22: u64 = assume within 0..=0 v15, v17 @12:79
+  v23: addr = elem 1 v10, v22 @12:79
+  v24: addr = elem 16 v14, v22 @12:79
+  v25: i8 = load v23, v22 @12:79
+  v26: i128 = cast v25 @12:79
+  v27: unit = store v24, v26, v25 @12:79
+  v28: u64 = int 1 @12:79
+  v29: u64 = add v15, v28, v27 @12:79
+  jump block4(v29, v27)
+block6(v18: effect):
+  jump block3(v14, v18)
+block7(v30: effect):
+  v34: addr = slot 8 @12:96
+  v35: u64 = int 0 @12:97
+  v36: addr = elem 8 v34, v35 @12:97
+  v37: unit = store v36, v4, v30 @12:97
+  jump block9(v34, v37)
+block8(v31: effect):
+  trap t0 after v31
+block9(v32: addr, v33: effect):
+  v39: addr = slot 16 @12:109
+  v44: u64 = int 0 @12:109
+  jump block11(v44, v33)
+block10(v38: effect):
+  trap t1 after v38
+block11(v40: u64, v41: effect):
+  v45: u64 = int 1 @12:109
+  v46: bool = lt v40, v45 @12:109
+  branch v46, block12(v41), block13(v41)
+block12(v42: effect):
+  v47: u64 = assume within 0..=0 v40, v42 @12:109
+  v48: addr = elem 8 v32, v47 @12:109
+  v49: addr = elem 16 v39, v47 @12:109
+  v50: u64 = load v48, v47 @12:109
+  v51: i128 = cast v50 @12:109
+  v52: unit = store v49, v51, v50 @12:109
+  v53: u64 = int 1 @12:109
+  v54: u64 = add v40, v53, v52 @12:109
+  jump block11(v54, v52)
+block13(v43: effect):
+  jump block3(v39, v43)
+block14(v56: effect):
+  trap t1 after v56
+t0: unreachable @12:109 ["unreachable reached: u"]
+t1: unreachable @12:71 ["unreachable reached: control left the code the checker allows"]
+}
+
+f1: fn todo_tail(addr, bool, bool, i8, u64, effect) frame 115 {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  branch v1, block1(v5), block2(v5)
+block1(v6: effect):
+  v10: addr = slot 1 @14:71
+  v11: u64 = int 0 @14:72
+  v12: addr = elem 1 v10, v11 @14:72
+  v13: unit = store v12, v3, v6 @14:72
+  v14: addr = slot 16 @14:72
+  v19: u64 = int 0 @14:72
+  jump block4(v19, v13)
+block2(v7: effect):
+  branch v2, block7(v7), block8(v7)
+block3(v8: addr, v9: effect):
+  v55: unit = copy 16 v0, v8, v9 @14:64
+  return after v55
+block4(v15: u64, v16: effect):
+  v20: u64 = int 1 @14:72
+  v21: bool = lt v15, v20 @14:72
+  branch v21, block5(v16), block6(v16)
+block5(v17: effect):
+  v22: u64 = assume within 0..=0 v15, v17 @14:72
+  v23: addr = elem 1 v10, v22 @14:72
+  v24: addr = elem 16 v14, v22 @14:72
+  v25: i8 = load v23, v22 @14:72
+  v26: i128 = cast v25 @14:72
+  v27: unit = store v24, v26, v25 @14:72
+  v28: u64 = int 1 @14:72
+  v29: u64 = add v15, v28, v27 @14:72
+  jump block4(v29, v27)
+block6(v18: effect):
+  jump block3(v14, v18)
+block7(v30: effect):
+  v34: addr = slot 8 @14:89
+  v35: u64 = int 0 @14:90
+  v36: addr = elem 8 v34, v35 @14:90
+  v37: unit = store v36, v4, v30 @14:90
+  jump block9(v34, v37)
+block8(v31: effect):
+  trap t0 after v31
+block9(v32: addr, v33: effect):
+  v39: addr = slot 16 @14:102
+  v44: u64 = int 0 @14:102
+  jump block11(v44, v33)
+block10(v38: effect):
+  trap t1 after v38
+block11(v40: u64, v41: effect):
+  v45: u64 = int 1 @14:102
+  v46: bool = lt v40, v45 @14:102
+  branch v46, block12(v41), block13(v41)
+block12(v42: effect):
+  v47: u64 = assume within 0..=0 v40, v42 @14:102
+  v48: addr = elem 8 v32, v47 @14:102
+  v49: addr = elem 16 v39, v47 @14:102
+  v50: u64 = load v48, v47 @14:102
+  v51: i128 = cast v50 @14:102
+  v52: unit = store v49, v51, v50 @14:102
+  v53: u64 = int 1 @14:102
+  v54: u64 = add v40, v53, v52 @14:102
+  jump block11(v54, v52)
+block13(v43: effect):
+  jump block3(v39, v43)
+block14(v56: effect):
+  trap t1 after v56
+t0: todo @14:102 ["todo reached: t"]
+t1: unreachable @14:64 ["unreachable reached: control left the code the checker allows"]
+}
+
+f2: fn unreachable_first(addr, bool, bool, i8, u64, effect) frame 123 {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  branch v1, block1(v5), block2(v5)
+block1(v6: effect):
+  trap t0 after v6
+block2(v7: effect):
+  branch v2, block5(v7), block6(v7)
+block3(v8: addr, v9: effect):
+  v55: unit = copy 16 v0, v8, v9 @16:72
+  return after v55
+block4(v10: effect):
+  trap t1 after v10
+block5(v11: effect):
+  v15: addr = slot 1 @16:110
+  v16: u64 = int 0 @16:111
+  v17: addr = elem 1 v15, v16 @16:111
+  v18: unit = store v17, v3, v11 @16:111
+  v19: addr = slot 16 @16:111
+  v24: u64 = int 0 @16:111
+  jump block8(v24, v18)
+block6(v12: effect):
+  v35: addr = slot 8 @16:123
+  v36: u64 = int 0 @16:124
+  v37: addr = elem 8 v35, v36 @16:124
+  v38: unit = store v37, v4, v12 @16:124
+  v39: addr = slot 16 @16:124
+  v44: u64 = int 0 @16:124
+  jump block11(v44, v38)
+block7(v13: addr, v14: effect):
+  jump block3(v13, v14)
+block8(v20: u64, v21: effect):
+  v25: u64 = int 1 @16:111
+  v26: bool = lt v20, v25 @16:111
+  branch v26, block9(v21), block10(v21)
+block9(v22: effect):
+  v27: u64 = assume within 0..=0 v20, v22 @16:111
+  v28: addr = elem 1 v15, v27 @16:111
+  v29: addr = elem 16 v19, v27 @16:111
+  v30: i8 = load v28, v27 @16:111
+  v31: i128 = cast v30 @16:111
+  v32: unit = store v29, v31, v30 @16:111
+  v33: u64 = int 1 @16:111
+  v34: u64 = add v20, v33, v32 @16:111
+  jump block8(v34, v32)
+block10(v23: effect):
+  jump block7(v19, v23)
+block11(v40: u64, v41: effect):
+  v45: u64 = int 1 @16:124
+  v46: bool = lt v40, v45 @16:124
+  branch v46, block12(v41), block13(v41)
+block12(v42: effect):
+  v47: u64 = assume within 0..=0 v40, v42 @16:124
+  v48: addr = elem 8 v35, v47 @16:124
+  v49: addr = elem 16 v39, v47 @16:124
+  v50: u64 = load v48, v47 @16:124
+  v51: i128 = cast v50 @16:124
+  v52: unit = store v49, v51, v50 @16:124
+  v53: u64 = int 1 @16:124
+  v54: u64 = add v40, v53, v52 @16:124
+  jump block11(v54, v52)
+block13(v43: effect):
+  jump block7(v39, v43)
+block14(v56: effect):
+  trap t1 after v56
+t0: unreachable @16:79 ["unreachable reached: u"]
+t1: unreachable @16:72 ["unreachable reached: control left the code the checker allows"]
+}
+
+f3: fn unreachable_arm(addr, u8, i8, u64, effect) frame 163 {
+block0(v0: addr, v1: u8, v2: i8, v3: u64, v4: effect):
+  v7: i64 = int 0 @18:65
+  v8: i64 = cast v1 @18:65
+  v9: bool = eq v8, v7 @18:65
+  branch v9, block2(v4), block3(v4)
+block1(v5: addr, v6: effect):
+  v76: unit = copy 32 v0, v5, v6 @18:59
+  return after v76
+block2(v10: effect):
+  v12: addr = slot 2 @19:9
+  v17: u64 = int 0 @19:9
+  jump block4(v17, v10)
+block3(v11: effect):
+  v41: i64 = int 1 @19:9
+  v42: i64 = cast v1 @19:9
+  v43: bool = eq v42, v41 @19:9
+  branch v43, block10(v11), block11(v11)
+block4(v13: u64, v14: effect):
+  v18: u64 = int 2 @19:9
+  v19: bool = lt v13, v18 @19:9
+  branch v19, block5(v14), block6(v14)
+block5(v15: effect):
+  v20: u64 = assume within 0..=1 v13, v15 @19:9
+  v21: addr = elem 1 v12, v20 @19:9
+  v22: unit = store v21, v2, v20 @19:9
+  v23: u64 = int 1 @19:9
+  v24: u64 = add v13, v23, v22 @19:9
+  jump block4(v24, v22)
+block6(v16: effect):
+  v25: addr = slot 32 @19:9
+  v30: u64 = int 0 @19:9
+  jump block7(v30, v16)
+block7(v26: u64, v27: effect):
+  v31: u64 = int 2 @19:9
+  v32: bool = lt v26, v31 @19:9
+  branch v32, block8(v27), block9(v27)
+block8(v28: effect):
+  v33: u64 = assume within 0..=1 v26, v28 @19:9
+  v34: addr = elem 1 v12, v33 @19:9
+  v35: addr = elem 16 v25, v33 @19:9
+  v36: i8 = load v34, v33 @19:9
+  v37: i128 = cast v36 @19:9
+  v38: unit = store v35, v37, v36 @19:9
+  v39: u64 = int 1 @19:9
+  v40: u64 = add v26, v39, v38 @19:9
+  jump block7(v40, v38)
+block9(v29: effect):
+  jump block1(v25, v29)
+block10(v44: effect):
+  v46: addr = slot 16 @20:9
+  v51: u64 = int 0 @20:9
+  jump block12(v51, v44)
+block11(v45: effect):
+  trap t0 after v45
+block12(v47: u64, v48: effect):
+  v52: u64 = int 2 @20:9
+  v53: bool = lt v47, v52 @20:9
+  branch v53, block13(v48), block14(v48)
+block13(v49: effect):
+  v54: u64 = assume within 0..=1 v47, v49 @20:9
+  v55: addr = elem 8 v46, v54 @20:9
+  v56: unit = store v55, v3, v54 @20:9
+  v57: u64 = int 1 @20:9
+  v58: u64 = add v47, v57, v56 @20:9
+  jump block12(v58, v56)
+block14(v50: effect):
+  v59: addr = slot 32 @20:9
+  v64: u64 = int 0 @20:9
+  jump block15(v64, v50)
+block15(v60: u64, v61: effect):
+  v65: u64 = int 2 @20:9
+  v66: bool = lt v60, v65 @20:9
+  branch v66, block16(v61), block17(v61)
+block16(v62: effect):
+  v67: u64 = assume within 0..=1 v60, v62 @20:9
+  v68: addr = elem 8 v46, v67 @20:9
+  v69: addr = elem 16 v59, v67 @20:9
+  v70: u64 = load v68, v67 @20:9
+  v71: i128 = cast v70 @20:9
+  v72: unit = store v69, v71, v70 @20:9
+  v73: u64 = int 1 @20:9
+  v74: u64 = add v60, v73, v72 @20:9
+  jump block15(v74, v72)
+block17(v63: effect):
+  jump block1(v59, v63)
+block18(v75: effect):
+  trap t1 after v75
+block19(v77: effect):
+  trap t1 after v77
+t0: unreachable @21:8 ["unreachable reached: u"]
+t1: unreachable @18:59 ["unreachable reached: control left the code the checker allows"]
+}
+
+f4: fn nested_tail(addr, bool, bool, i8, u64, effect) frame 115 {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  branch v1, block1(v5), block2(v5)
+block1(v6: effect):
+  v10: addr = slot 1 @25:73
+  v11: u64 = int 0 @25:74
+  v12: addr = elem 1 v10, v11 @25:74
+  v13: unit = store v12, v3, v6 @25:74
+  v14: addr = slot 16 @25:74
+  v19: u64 = int 0 @25:74
+  jump block4(v19, v13)
+block2(v7: effect):
+  branch v2, block7(v7), block8(v7)
+block3(v8: addr, v9: effect):
+  v55: unit = copy 16 v0, v8, v9 @25:66
+  return after v55
+block4(v15: u64, v16: effect):
+  v20: u64 = int 1 @25:74
+  v21: bool = lt v15, v20 @25:74
+  branch v21, block5(v16), block6(v16)
+block5(v17: effect):
+  v22: u64 = assume within 0..=0 v15, v17 @25:74
+  v23: addr = elem 1 v10, v22 @25:74
+  v24: addr = elem 16 v14, v22 @25:74
+  v25: i8 = load v23, v22 @25:74
+  v26: i128 = cast v25 @25:74
+  v27: unit = store v24, v26, v25 @25:74
+  v28: u64 = int 1 @25:74
+  v29: u64 = add v15, v28, v27 @25:74
+  jump block4(v29, v27)
+block6(v18: effect):
+  jump block3(v14, v18)
+block7(v30: effect):
+  v34: addr = slot 8 @26:10
+  v35: u64 = int 0 @26:11
+  v36: addr = elem 8 v34, v35 @26:11
+  v37: unit = store v36, v4, v30 @26:11
+  jump block9(v34, v37)
+block8(v31: effect):
+  trap t0 after v31
+block9(v32: addr, v33: effect):
+  v39: addr = slot 16 @26:23
+  v44: u64 = int 0 @26:23
+  jump block11(v44, v33)
+block10(v38: effect):
+  trap t1 after v38
+block11(v40: u64, v41: effect):
+  v45: u64 = int 1 @26:23
+  v46: bool = lt v40, v45 @26:23
+  branch v46, block12(v41), block13(v41)
+block12(v42: effect):
+  v47: u64 = assume within 0..=0 v40, v42 @26:23
+  v48: addr = elem 8 v32, v47 @26:23
+  v49: addr = elem 16 v39, v47 @26:23
+  v50: u64 = load v48, v47 @26:23
+  v51: i128 = cast v50 @26:23
+  v52: unit = store v49, v51, v50 @26:23
+  v53: u64 = int 1 @26:23
+  v54: u64 = add v40, v53, v52 @26:23
+  jump block11(v54, v52)
+block13(v43: effect):
+  jump block3(v39, v43)
+block14(v56: effect):
+  trap t1 after v56
+t0: unreachable @26:23 ["unreachable reached: u"]
+t1: unreachable @25:66 ["unreachable reached: control left the code the checker allows"]
+}
+
+f5: fn branch_that_leaves(addr, bool, bool, i8, u64, effect) frame 115 {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  branch v1, block1(v5), block2(v5)
+block1(v6: effect):
+  v10: addr = slot 1 @30:80
+  v11: u64 = int 0 @30:81
+  v12: addr = elem 1 v10, v11 @30:81
+  v13: unit = store v12, v3, v6 @30:81
+  v14: addr = slot 16 @30:81
+  v19: u64 = int 0 @30:81
+  jump block4(v19, v13)
+block2(v7: effect):
+  branch v2, block7(v7), block8(v7)
+block3(v8: addr, v9: effect):
+  v62: unit = copy 16 v0, v8, v9 @30:73
+  return after v62
+block4(v15: u64, v16: effect):
+  v20: u64 = int 1 @30:81
+  v21: bool = lt v15, v20 @30:81
+  branch v21, block5(v16), block6(v16)
+block5(v17: effect):
+  v22: u64 = assume within 0..=0 v15, v17 @30:81
+  v23: addr = elem 1 v10, v22 @30:81
+  v24: addr = elem 16 v14, v22 @30:81
+  v25: i8 = load v23, v22 @30:81
+  v26: i128 = cast v25 @30:81
+  v27: unit = store v24, v26, v25 @30:81
+  v28: u64 = int 1 @30:81
+  v29: u64 = add v15, v28, v27 @30:81
+  jump block4(v29, v27)
+block6(v18: effect):
+  jump block3(v14, v18)
+block7(v30: effect):
+  v34: addr = slot 8 @30:98
+  v35: u64 = int 0 @30:99
+  v36: addr = elem 8 v34, v35 @30:99
+  v37: unit = store v36, v4, v30 @30:99
+  jump block9(v34, v37)
+block8(v31: effect):
+  v38: i64 = int 0 @31:11
+  v39: i64 = cast v3 @31:11
+  v40: bool = eq v39, v38 @31:11
+  branch v40, block10(v31), block11(v31)
+block9(v32: addr, v33: effect):
+  v46: addr = slot 16 @31:41
+  v51: u64 = int 0 @31:41
+  jump block15(v51, v33)
+block10(v41: effect):
+  trap t0 after v41
+block11(v42: effect):
+  trap t1 after v42
+block12(v43: effect):
+  trap t2 after v43
+block13(v44: effect):
+  trap t2 after v44
+block14(v45: effect):
+  trap t2 after v45
+block15(v47: u64, v48: effect):
+  v52: u64 = int 1 @31:41
+  v53: bool = lt v47, v52 @31:41
+  branch v53, block16(v48), block17(v48)
+block16(v49: effect):
+  v54: u64 = assume within 0..=0 v47, v49 @31:41
+  v55: addr = elem 8 v32, v54 @31:41
+  v56: addr = elem 16 v46, v54 @31:41
+  v57: u64 = load v55, v54 @31:41
+  v58: i128 = cast v57 @31:41
+  v59: unit = store v56, v58, v57 @31:41
+  v60: u64 = int 1 @31:41
+  v61: u64 = add v47, v60, v59 @31:41
+  jump block15(v61, v59)
+block17(v50: effect):
+  jump block3(v46, v50)
+block18(v63: effect):
+  trap t2 after v63
+t0: unreachable @31:15 ["unreachable reached: u"]
+t1: todo @31:41 ["todo reached: t"]
+t2: unreachable @30:73 ["unreachable reached: control left the code the checker allows"]
+}
+
+f6: fn scalar_unreachable(bool, bool, u8, effect) -> u16 frame 71 {
+block0(v0: bool, v1: bool, v2: u8, v3: effect):
+  branch v0, block1(v3), block2(v3)
+block1(v4: effect):
+  v8: i64 = cast v2 @35:68
+  jump block3(v8, v4)
+block2(v5: effect):
+  branch v1, block4(v5), block5(v5)
+block3(v6: i64, v7: effect):
+  v15: i64 = assume within 0..=65535 v6, v7 @35:97
+  v16: u16 = cast v15 @35:97
+  return v16 after v15
+block4(v9: effect):
+  v13: i64 = int 300 @35:84
+  jump block6(v13, v9)
+block5(v10: effect):
+  trap t0 after v10
+block6(v11: i64, v12: effect):
+  jump block3(v11, v12)
+block7(v14: effect):
+  trap t1 after v14
+block8(v17: effect):
+  trap t1 after v17
+t0: unreachable @35:97 ["unreachable reached: u"]
+t1: unreachable @35:97 ["unreachable reached: control left the code the checker allows"]
+}
+
+f7: fn scalar_todo(bool, bool, u8, effect) -> u16 frame 71 {
+block0(v0: bool, v1: bool, v2: u8, v3: effect):
+  branch v0, block1(v3), block2(v3)
+block1(v4: effect):
+  v8: i64 = cast v2 @37:61
+  jump block3(v8, v4)
+block2(v5: effect):
+  branch v1, block4(v5), block5(v5)
+block3(v6: i64, v7: effect):
+  v15: i64 = assume within 0..=65535 v6, v7 @37:90
+  v16: u16 = cast v15 @37:90
+  return v16 after v15
+block4(v9: effect):
+  v13: i64 = int 300 @37:77
+  jump block6(v13, v9)
+block5(v10: effect):
+  trap t0 after v10
+block6(v11: i64, v12: effect):
+  jump block3(v11, v12)
+block7(v14: effect):
+  trap t1 after v14
+block8(v17: effect):
+  trap t1 after v17
+t0: todo @37:90 ["todo reached: t"]
+t1: unreachable @37:90 ["unreachable reached: control left the code the checker allows"]
+}
+
+f8: fn scalar_arm(u8, u8, effect) -> u16 frame 71 {
+block0(v0: u8, v1: u8, v2: effect):
+  v5: i64 = int 0 @39:48
+  v6: i64 = cast v0 @39:48
+  v7: bool = eq v6, v5 @39:48
+  branch v7, block2(v2), block3(v2)
+block1(v3: i64, v4: effect):
+  v18: i64 = assume within 0..=65535 v3, v4 @42:8
+  v19: u16 = cast v18 @42:8
+  return v19 after v18
+block2(v8: effect):
+  v10: i64 = cast v1 @40:8
+  jump block1(v10, v8)
+block3(v9: effect):
+  v11: i64 = int 1 @40:8
+  v12: i64 = cast v0 @40:8
+  v13: bool = eq v12, v11 @40:8
+  branch v13, block4(v9), block5(v9)
+block4(v14: effect):
+  v16: i64 = int 300 @41:8
+  jump block1(v16, v14)
+block5(v15: effect):
+  trap t0 after v15
+block6(v17: effect):
+  trap t1 after v17
+block7(v20: effect):
+  trap t1 after v20
+t0: unreachable @42:8 ["unreachable reached: u"]
+t1: unreachable @42:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f9: fn scalar_signed(bool, bool, i8, u64, effect) -> i128 frame 115 {
+block0(v0: bool, v1: bool, v2: i8, v3: u64, v4: effect):
+  branch v0, block1(v4), block2(v4)
+block1(v5: effect):
+  v9: i128 = cast v2 @46:72
+  jump block3(v9, v5)
+block2(v6: effect):
+  branch v1, block4(v6), block5(v6)
+block3(v7: i128, v8: effect):
+  return v7 after v8
+block4(v10: effect):
+  jump block6(v3, v10)
+block5(v11: effect):
+  trap t0 after v11
+block6(v12: u64, v13: effect):
+  v15: i128 = cast v12 @46:99
+  jump block3(v15, v13)
+block7(v14: effect):
+  trap t1 after v14
+block8(v16: effect):
+  trap t1 after v16
+t0: unreachable @46:99 ["unreachable reached: u"]
+t1: unreachable @46:99 ["unreachable reached: control left the code the checker allows"]
+}
+
+f10: fn operand_tail(addr, bool, bool, i8, u64, effect) frame 123 {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  branch v1, block1(v5), block2(v5)
+block1(v6: effect):
+  v10: addr = slot 1 @49:74
+  v11: u64 = int 0 @49:75
+  v12: addr = elem 1 v10, v11 @49:75
+  v13: unit = store v12, v3, v6 @49:75
+  v14: addr = slot 16 @49:75
+  v19: u64 = int 0 @49:75
+  jump block4(v19, v13)
+block2(v7: effect):
+  branch v2, block7(v7), block8(v7)
+block3(v8: addr, v9: effect):
+  v56: unit = copy 16 v0, v8, v9 @49:67
+  return after v56
+block4(v15: u64, v16: effect):
+  v20: u64 = int 1 @49:75
+  v21: bool = lt v15, v20 @49:75
+  branch v21, block5(v16), block6(v16)
+block5(v17: effect):
+  v22: u64 = assume within 0..=0 v15, v17 @49:75
+  v23: addr = elem 1 v10, v22 @49:75
+  v24: addr = elem 16 v14, v22 @49:75
+  v25: i8 = load v23, v22 @49:75
+  v26: i128 = cast v25 @49:75
+  v27: unit = store v24, v26, v25 @49:75
+  v28: u64 = int 1 @49:75
+  v29: u64 = add v15, v28, v27 @49:75
+  jump block4(v29, v27)
+block6(v18: effect):
+  jump block3(v14, v18)
+block7(v30: effect):
+  v34: addr = slot 8 @49:92
+  v35: u64 = int 0 @49:93
+  v36: addr = elem 8 v34, v35 @49:93
+  v37: unit = store v36, v4, v30 @49:93
+  jump block9(v34, v37)
+block8(v31: effect):
+  v38: addr = slot 1 @49:105
+  trap t0 after v31
+block9(v32: addr, v33: effect):
+  v40: addr = slot 16 @49:110
+  v45: u64 = int 0 @49:110
+  jump block11(v45, v33)
+block10(v39: effect):
+  trap t1 after v39
+block11(v41: u64, v42: effect):
+  v46: u64 = int 1 @49:110
+  v47: bool = lt v41, v46 @49:110
+  branch v47, block12(v42), block13(v42)
+block12(v43: effect):
+  v48: u64 = assume within 0..=0 v41, v43 @49:110
+  v49: addr = elem 8 v32, v48 @49:110
+  v50: addr = elem 16 v40, v48 @49:110
+  v51: u64 = load v49, v48 @49:110
+  v52: i128 = cast v51 @49:110
+  v53: unit = store v50, v52, v51 @49:110
+  v54: u64 = int 1 @49:110
+  v55: u64 = add v41, v54, v53 @49:110
+  jump block11(v55, v53)
+block13(v44: effect):
+  jump block3(v40, v44)
+block14(v57: effect):
+  trap t1 after v57
+t0: todo @49:110 ["todo reached: t"]
+t1: unreachable @49:67 ["unreachable reached: control left the code the checker allows"]
+}
+
+f11: fn scalar_operand(bool, bool, u8, effect) -> u16 frame 71 {
+block0(v0: bool, v1: bool, v2: u8, v3: effect):
+  branch v0, block1(v3), block2(v3)
+block1(v4: effect):
+  v8: i64 = cast v2 @51:64
+  jump block3(v8, v4)
+block2(v5: effect):
+  branch v1, block4(v5), block5(v5)
+block3(v6: i64, v7: effect):
+  v15: i64 = assume within 0..=65535 v6, v7 @51:97
+  v16: u16 = cast v15 @51:97
+  return v16 after v15
+block4(v9: effect):
+  v13: i64 = int 300 @51:80
+  jump block6(v13, v9)
+block5(v10: effect):
+  trap t0 after v10
+block6(v11: i64, v12: effect):
+  jump block3(v11, v12)
+block7(v14: effect):
+  trap t1 after v14
+block8(v17: effect):
+  trap t1 after v17
+t0: todo @51:97 ["todo reached: t"]
+t1: unreachable @51:97 ["unreachable reached: control left the code the checker allows"]
+}
+
+f12: fn enter unreachable_tail(addr, bool, bool, i8, u64, effect) {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  v6: unit = enter f0 t0 v0, v1, v2, v3, v4, v5 @12:8
+  v7: unit = call f0 v0, v1, v2, v3, v4, v6 @12:8
+  return after v7
+t0: stack-overflow @12:8 ["the call stack ran out"]
+t1: unreachable @12:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f13: fn enter todo_tail(addr, bool, bool, i8, u64, effect) {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  v6: unit = enter f1 t0 v0, v1, v2, v3, v4, v5 @14:8
+  v7: unit = call f1 v0, v1, v2, v3, v4, v6 @14:8
+  return after v7
+t0: stack-overflow @14:8 ["the call stack ran out"]
+t1: unreachable @14:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f14: fn enter unreachable_first(addr, bool, bool, i8, u64, effect) {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  v6: unit = enter f2 t0 v0, v1, v2, v3, v4, v5 @16:8
+  v7: unit = call f2 v0, v1, v2, v3, v4, v6 @16:8
+  return after v7
+t0: stack-overflow @16:8 ["the call stack ran out"]
+t1: unreachable @16:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f15: fn enter unreachable_arm(addr, u8, i8, u64, effect) {
+block0(v0: addr, v1: u8, v2: i8, v3: u64, v4: effect):
+  v5: unit = enter f3 t0 v0, v1, v2, v3, v4 @18:8
+  v6: unit = call f3 v0, v1, v2, v3, v5 @18:8
+  return after v6
+t0: stack-overflow @18:8 ["the call stack ran out"]
+t1: unreachable @18:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f16: fn enter nested_tail(addr, bool, bool, i8, u64, effect) {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  v6: unit = enter f4 t0 v0, v1, v2, v3, v4, v5 @25:8
+  v7: unit = call f4 v0, v1, v2, v3, v4, v6 @25:8
+  return after v7
+t0: stack-overflow @25:8 ["the call stack ran out"]
+t1: unreachable @25:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f17: fn enter branch_that_leaves(addr, bool, bool, i8, u64, effect) {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  v6: unit = enter f5 t0 v0, v1, v2, v3, v4, v5 @30:8
+  v7: unit = call f5 v0, v1, v2, v3, v4, v6 @30:8
+  return after v7
+t0: stack-overflow @30:8 ["the call stack ran out"]
+t1: unreachable @30:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f18: fn enter scalar_unreachable(bool, bool, u8, effect) -> u16 {
+block0(v0: bool, v1: bool, v2: u8, v3: effect):
+  v4: unit = enter f6 t0 v0, v1, v2, v3 @35:8
+  v5: u16 = call f6 v0, v1, v2, v4 @35:8
+  return v5 after v5
+t0: stack-overflow @35:8 ["the call stack ran out"]
+t1: unreachable @35:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f19: fn enter scalar_todo(bool, bool, u8, effect) -> u16 {
+block0(v0: bool, v1: bool, v2: u8, v3: effect):
+  v4: unit = enter f7 t0 v0, v1, v2, v3 @37:8
+  v5: u16 = call f7 v0, v1, v2, v4 @37:8
+  return v5 after v5
+t0: stack-overflow @37:8 ["the call stack ran out"]
+t1: unreachable @37:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f20: fn enter scalar_arm(u8, u8, effect) -> u16 {
+block0(v0: u8, v1: u8, v2: effect):
+  v3: unit = enter f8 t0 v0, v1, v2 @39:8
+  v4: u16 = call f8 v0, v1, v3 @39:8
+  return v4 after v4
+t0: stack-overflow @39:8 ["the call stack ran out"]
+t1: unreachable @39:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f21: fn enter scalar_signed(bool, bool, i8, u64, effect) -> i128 {
+block0(v0: bool, v1: bool, v2: i8, v3: u64, v4: effect):
+  v5: unit = enter f9 t0 v0, v1, v2, v3, v4 @46:8
+  v6: i128 = call f9 v0, v1, v2, v3, v5 @46:8
+  return v6 after v6
+t0: stack-overflow @46:8 ["the call stack ran out"]
+t1: unreachable @46:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f22: fn enter operand_tail(addr, bool, bool, i8, u64, effect) {
+block0(v0: addr, v1: bool, v2: bool, v3: i8, v4: u64, v5: effect):
+  v6: unit = enter f10 t0 v0, v1, v2, v3, v4, v5 @49:8
+  v7: unit = call f10 v0, v1, v2, v3, v4, v6 @49:8
+  return after v7
+t0: stack-overflow @49:8 ["the call stack ran out"]
+t1: unreachable @49:8 ["unreachable reached: control left the code the checker allows"]
+}
+
+f23: fn enter scalar_operand(bool, bool, u8, effect) -> u16 {
+block0(v0: bool, v1: bool, v2: u8, v3: effect):
+  v4: unit = enter f11 t0 v0, v1, v2, v3 @51:8
+  v5: u16 = call f11 v0, v1, v2, v4 @51:8
+  return v5 after v5
+t0: stack-overflow @51:8 ["the call stack ran out"]
+t1: unreachable @51:8 ["unreachable reached: control left the code the checker allows"]
+}
 == conformance/core-calculus/branches_of_two_aggregates_that_leave.mn == (exit 2)
 == conformance/core-calculus/break_outside_a_loop.mn == (exit 2)
 == conformance/core-calculus/call_without_body.mn == (exit 2)

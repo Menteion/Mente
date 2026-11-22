@@ -392,7 +392,10 @@ impl Wide<'_> {
                 let mut hull: Option<Range> = None;
                 let mut ranges = Vec::new();
                 for t in tails.into_iter().flatten() {
-                    let r = self.held(t)?;
+                    // A branch that gives no value holds no integer (item 6).
+                    let Some(r) = self.hull_of(t)? else {
+                        continue;
+                    };
                     hull = Some(hull.map_or(r, |h| h.hull(r)));
                     ranges.push((t, r));
                 }
@@ -425,7 +428,10 @@ impl Wide<'_> {
                     let Some(t) = t else {
                         continue;
                     };
-                    let r = self.held(t)?;
+                    // An arm that gives no value holds no integer (item 6).
+                    let Some(r) = self.hull_of(t)? else {
+                        continue;
+                    };
                     hull = Some(hull.map_or(r, |h| h.hull(r)));
                     ranges.push((t, body, r));
                 }
@@ -572,13 +578,7 @@ impl Wide<'_> {
             return None;
         }
         match &self.tree.expr(e).kind {
-            ExprKind::Array(items) => {
-                let mut ranges = Vec::new();
-                if !self.leaves(&items.clone(), &mut ranges) {
-                    return None;
-                }
-                ranges.into_iter().map(|(_, r)| r).reduce(Range::hull)
-            }
+            ExprKind::Array(_) => self.hull_of(e).flatten(),
             ExprKind::Repeat { value, .. } => self.held(*value),
             ExprKind::Index { base, .. } => self.held(*base),
             ExprKind::If { .. } | ExprKind::Match { .. } => own,
@@ -617,6 +617,28 @@ impl Wide<'_> {
         }
     }
 
+    /// The hull of the integers the value `e` holds, by the one rule of `leaves`, as a join
+    /// takes each of its branches' and arms' values (`core-calculus.md`, item 4): `Some(None)`
+    /// for a value that holds none, one that gives no value (`gives_no_value`), or an array
+    /// of no element; none where one has no range, or where a value nested in it was reported
+    /// `E0222` itself. A branch of no value that dropped the whole hull let MIR meet a `u64`
+    /// above `i64` in an `i64` (the final review of pull request 189).
+    fn hull_of(&mut self, e: ExprId) -> Option<Option<Range>> {
+        let mut ranges = Vec::new();
+        if !self.leaves(&[e], &mut ranges) {
+            return None;
+        }
+        Some(ranges.into_iter().map(|(_, r)| r).reduce(Range::hull))
+    }
+
+    /// Whether `e` gives no value, so that it holds no integer of a hull (`core-calculus.md`,
+    /// items 4 and 6): one of no type, such as `todo`, or an `if` whose branches all leave, and
+    /// one that leaves through an operand, `x + todo("a")`, which keeps its operation's type but
+    /// never ends. Such a branch once had no range, and dropped its join's whole hull.
+    fn gives_no_value(&self, e: ExprId) -> bool {
+        self.typing.exprs[e.0 as usize].has_no_value() || !crate::check::expr_ends(self.tree, e)
+    }
+
     /// Collects into `ranges` the range of each integer the array literal elements `items`
     /// give, through the array literals nested in them; an array of another kind gives its
     /// element type's. False where one has no range, or where a nested literal is reported
@@ -628,9 +650,10 @@ impl Wide<'_> {
             if self.unfit[i.0 as usize] {
                 return false;
             }
-            // An element of no type leaves before the literal holds a value
-            // (`core-calculus.md`, item 6): it holds no integer, and the others are counted.
-            if self.typing.exprs[i.0 as usize].has_no_value() {
+            // An element that gives no value leaves before the literal holds one, as a branch or
+            // an arm that gives none leaves before its join does: it holds no integer, and the
+            // others are counted.
+            if self.gives_no_value(i) {
                 continue;
             }
             match &self.tree.expr(i).kind {
@@ -1368,6 +1391,59 @@ mod tests {
         assert_eq!(interval_of(one, "[a, 1_u8]"), None);
         let copies = "pub fn f(a: u8) -> [4]u8 = [a; 4]";
         assert_eq!(interval_of(copies, "[a; 4]"), None);
+    }
+
+    /// A branch or an arm of no type, an `unreachable`, a `todo` or an `if` whose branches all
+    /// leave, gives no value and holds no integer, so a join's hull is the others' alone, by the
+    /// rule an array literal's elements of no type follow (`core-calculus.md`, items 4 and 6):
+    /// an `i8`'s integers beside a `u128`'s are `E0222` whatever the third branch is, and beside
+    /// a `u64`'s meet in a hull that `i128` holds. The final review of pull request 189 found
+    /// such a branch dropping the whole hull, which skipped `E0222` and let MIR meet a `u64`
+    /// above `i64` in an `i64`, and 300 in a `u8`.
+    #[test]
+    fn test_a_branch_of_no_type_leaves_the_hull_of_the_others() {
+        let iv = |lo: i128, hi: u128| {
+            Some(super::Interval {
+                lo: (lo < 0, lo.unsigned_abs()),
+                hi: (false, hi),
+            })
+        };
+        let joins = [
+            "if c { [x] } else if d { [y] } else { unreachable(\"u\") }",
+            "if c { [x] } else if d { [y] } else { todo(\"t\") }",
+            "if c { unreachable(\"u\") } else if d { [x] } else { [y] }",
+            "if c { [x] } else {\n  if d { [y] } else { unreachable(\"u\") }\n}",
+            "if c { [x] } else if d { [y] } else {\n  if c { unreachable(\"u\") } else { todo(\"t\") }\n}",
+            "match k {\n  0 => [x]\n  1 => [y]\n  _ => unreachable(\"u\")\n}",
+            // A branch that leaves through an operand keeps its type, and gives no value either.
+            "if c { [x] } else if d { [y] } else { [x + todo(\"t\")] }",
+        ];
+        for join in joins {
+            let wide =
+                format!("pub fn f(c: bool, d: bool, k: u8, x: i8, y: u128) -> [1]i64 = {join}");
+            assert_eq!(codes(&wide), ["E0222"], "{}", wide);
+            let fits =
+                format!("pub fn f(c: bool, d: bool, k: u8, x: i8, y: u64) -> [1]i128 = {join}");
+            assert_eq!(
+                interval_of(&fits, join),
+                iv(-128, u64::MAX.into()),
+                "{}",
+                fits
+            );
+        }
+        let scalar = "if c { x } else if d { 300 } else { unreachable(\"u\") }";
+        let src = format!("pub fn f(c: bool, d: bool, x: u8) -> u16 = {scalar}");
+        assert_eq!(interval_of(&src, scalar), iv(0, 300));
+        let arm = "match k {\n  0 => x\n  1 => 300\n  _ => todo(\"t\")\n}";
+        let src = format!("pub fn f(k: u8, x: u8) -> u16 = {arm}");
+        assert_eq!(interval_of(&src, arm), iv(0, 300));
+        let operand = "if c { x } else if d { 300 } else { x + todo(\"t\") }";
+        let src = format!("pub fn f(c: bool, d: bool, x: u8) -> u16 = {operand}");
+        assert_eq!(interval_of(&src, operand), iv(0, 300));
+        // Branches that all give no value leave the join's type its range.
+        let none = "if c { x + todo(\"a\") } else { x + todo(\"b\") }";
+        let src = format!("pub fn f(c: bool, x: u8) -> u8 = {none}");
+        assert_eq!(interval_of(&src, none), iv(0, 255));
     }
 
     #[test]

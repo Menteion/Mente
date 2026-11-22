@@ -301,10 +301,13 @@ const CONDITIONS: &[&str] = &["condition that assigns or passes mut"];
 /// building such a row in the outer literal's type, where the reference interpreter narrowed it.
 /// And branches, or arms, that give arrays whose integers meet past 64 bits, in an `i128` or a
 /// `u128`, the edge E0222 holds them to (the review of PR 189 found lowering refusing arrays one
-/// bit past it, which the checker let through).
+/// bit past it, which the checker let through). And a branch or an arm of no type beside two that
+/// give values, through an `else if` too, which holds no integer of their hull (the final review
+/// of PR 189 found one dropping the whole hull, and MIR meeting the others in `i64`).
 const ROWS: &[&str] = &[
     "row of one integer type beside rows of others",
     "branches of arrays meeting in a 128-bit machine type",
+    "branch of no type beside two that give values",
 ];
 
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
@@ -1129,7 +1132,9 @@ fn a_condition_changes_state(f: &FnSyntax) -> bool {
 /// The rows of [`ROWS`] a checked function reaches: an array literal whose elements are arrays
 /// of integers of no one type, one of them a literal of one integer type; and an `if` or a
 /// `match` that gives arrays whose integers, by the checker's hull of them, need more than 64
-/// bits together.
+/// bits together; and an `if` or a `match` with a branch or an arm of no type beside two that
+/// give values, an `else if` and a branch that is itself an `if` or a `match` counted as more
+/// branches of the one join.
 fn reached_rows(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     let tree = &f.syntax.tree;
     let ty = |e: ExprId| &f.typing.exprs[e.0 as usize];
@@ -1145,6 +1150,50 @@ fn reached_rows(f: &CheckedFn, seen: &mut BTreeSet<String>) {
         let above = |limit: u128| !hi.0 && hi.1 > limit;
         if (lo.0 && above(i64::MAX as u128)) || above(u64::MAX as u128) {
             seen.insert("branches of arrays meeting in a 128-bit machine type".to_string());
+        }
+    }
+    // The values the branches of the join `e` give, through the joins among them.
+    fn values(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
+        let tail = |b| match &tree.stmt(*tree.block(b).stmts.last()?).kind {
+            StmtKind::Expr(x) => Some(*x),
+            _ => None,
+        };
+        let tails: Vec<Option<ExprId>> = match &tree.expr(e).kind {
+            ExprKind::If {
+                then, otherwise, ..
+            } => vec![
+                tail(*then),
+                match otherwise {
+                    Some(Else::Block(b)) => tail(*b),
+                    Some(Else::If(i)) => Some(*i),
+                    None => None,
+                },
+            ],
+            ExprKind::Match { arms, .. } => arms
+                .iter()
+                .map(|a| match a.body {
+                    ArmBody::Expr(x) => Some(x),
+                    ArmBody::Block(b) => tail(b),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for t in tails.into_iter().flatten() {
+            match tree.expr(t).kind {
+                ExprKind::If { .. } | ExprKind::Match { .. } => values(tree, t, out),
+                _ => out.push(t),
+            }
+        }
+    }
+    for (k, e) in tree.exprs.iter().enumerate() {
+        if !matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. }) {
+            continue;
+        }
+        let mut given = Vec::new();
+        values(tree, ExprId(k as u32), &mut given);
+        let none = given.iter().filter(|v| ty(**v).has_no_value()).count();
+        if none > 0 && given.len() - none >= 2 {
+            seen.insert("branch of no type beside two that give values".to_string());
         }
     }
     // The integer type an array of integers holds, at its innermost depth.

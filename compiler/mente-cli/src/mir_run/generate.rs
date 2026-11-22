@@ -5642,7 +5642,11 @@ const MEETING_CHANCE: u64 = 20;
 /// literal it holds, a row read from a literal of integers of no one type, and an element of one
 /// inside another (`core-calculus.md`, item 4). MIR once built such an array in one shape and read
 /// it in another (the nightly triage's root causes 2 and 11, and the review of PR 189); the MIR
-/// verifier now refuses any access of another shape (`cfg::check_memory`).
+/// verifier now refuses any access of another shape (`cfg::check_memory`). Now and then a branch
+/// or an arm of no type stands beside those that meet, an `unreachable`, a `todo` or an `if`
+/// that leaves both ways, and an integer `if` meets beyond its type as an array's does: such a
+/// branch once dropped the whole hull, and MIR met a `u64` above `i64` in an `i64`, and 300 in
+/// a `u8` (the final review of PR 189).
 fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
     let name = format!("f{}", k);
     let small = ["u8", "i8", "u16", "i16", "u32", "i32"];
@@ -5654,6 +5658,14 @@ fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
             format!("-{}", n.max(1))
         } else {
             n.to_string()
+        }
+    };
+    // A value of no type, which a branch or an arm may give beside the others.
+    let no_value = |rng: &mut Rng| -> String {
+        match rng.below(3) {
+            0 => "unreachable(\"ruled out\")".to_string(),
+            1 => "todo(\"not handled\")".to_string(),
+            _ => "if c { unreachable(\"ruled out\") } else { todo(\"not handled\") }".to_string(),
         }
     };
     let roll = rng.below(4);
@@ -5671,16 +5683,36 @@ fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
             b = "i64";
         }
         let (la, lb) = (literal(a, rng), literal(b, rng));
+        let (first, second) = (format!("[x, {}_{}]", la, a), format!("[y, {}_{}]", lb, b));
         if rng.chance(50) {
+            // Two branches, or those two beside a third of no type, first or last.
+            let body = match rng.below(4) {
+                0 => format!(
+                    "if c {{ {} }} else if d {{ {} }} else {{ {} }}",
+                    first,
+                    second,
+                    no_value(rng)
+                ),
+                1 => format!(
+                    "if c {{ {} }} else if d {{ {} }} else {{ {} }}",
+                    no_value(rng),
+                    first,
+                    second
+                ),
+                _ => format!("if c {{ {} }} else {{ {} }}", first, second),
+            };
             format!(
-                "pub fn {}(c: bool, x: {}, y: {}) -> [2]i64 = if c {{ [x, {}_{}] }} else {{ [y, {}_{}] }}\n",
-                name, a, b, la, a, lb, b
+                "pub fn {}(c: bool, d: bool, x: {}, y: {}) -> [2]i64 = {}\n",
+                name, a, b, body
             )
         } else {
-            let rest = rng.below(1001);
+            let rest = match rng.below(3) {
+                0 => no_value(rng),
+                _ => format!("[{}; 2]", rng.below(1001)),
+            };
             format!(
-                "pub fn {}(k: u8, x: {}, y: {}) -> [2]i64 = match k {{\n  0 => [x, {}_{}]\n  1 => [y, {}_{}]\n  _ => [{}; 2]\n}}\n",
-                name, a, b, la, a, lb, b, rest
+                "pub fn {}(c: bool, k: u8, x: {}, y: {}) -> [2]i64 = match k {{\n  0 => {}\n  1 => {}\n  _ => {}\n}}\n",
+                name, a, b, first, second, rest
             )
         }
     } else if roll == 1 {
@@ -5694,17 +5726,34 @@ fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
         } else {
             format!("{{ [x; {}] }}", n)
         };
-        format!(
-            "pub fn {}(c: bool, x: u8) -> {} {{\n  val a: [{}]{} = if c {} else {{ [{}; {}] }}\n  a[{}]\n}}\n",
-            name,
-            wide,
-            n,
-            wide,
-            bytes,
-            held,
-            n,
-            n - 1
-        )
+        // The literal's branch, or it and a branch of no type after it.
+        let rest = if rng.chance(30) {
+            format!("if d {{ [{}; {}] }} else {{ {} }}", held, n, no_value(rng))
+        } else {
+            format!("[{}; {}]", held, n)
+        };
+        if rng.chance(25) {
+            // The integer sibling: an `if` of a `u8` to the checker that holds more until it
+            // lands, beside a branch of no type.
+            format!(
+                "pub fn {}(c: bool, d: bool, x: u8) -> {} = if c {{ x }} else if d {{ {} }} else {{ {} }}\n",
+                name,
+                wide,
+                held,
+                no_value(rng)
+            )
+        } else {
+            format!(
+                "pub fn {}(c: bool, d: bool, x: u8) -> {} {{\n  val a: [{}]{} = if c {} else {{ {} }}\n  a[{}]\n}}\n",
+                name,
+                wide,
+                n,
+                wide,
+                bytes,
+                rest,
+                n - 1
+            )
+        }
     } else {
         // A literal of a signed type beside a `u128` keeps its integers exact: a row of it read
         // by index, or an element of it inside another literal.
@@ -7595,7 +7644,10 @@ mod tests {
     /// `meeting_arrays` writes each of its forms, every one of which checks: branches of arrays of
     /// two element types, as an `if` and as a `match`, at the edge of 128 bits too, a `u64`
     /// beside a signed type and a `u128` beside an unsigned one, an `if` of a `[n]u8` holding a literal past
-    /// `u8`, a row of an exact literal read by index, and an element of one inside another. The
+    /// `u8`, a row of an exact literal read by index, and an element of one inside another; and
+    /// branches and arms of no type beside those that meet, an `unreachable`, a `todo` and an
+    /// `if` that leaves both ways, first or last, and an integer `if` holding a literal past
+    /// `u8` beside one (the final review of PR 189). The
     /// first functions are pinned, so that a change to a choice shows. In a program the function
     /// lies before the recursion, which ends a program, named past the recursion's two.
     #[test]
@@ -7634,6 +7686,15 @@ mod tests {
             "_u128][if k { 1 } else { 0 }], ",
             ", y: u64) -> [2]i64 = ",
             ", y: u128) -> [2]i64 = ",
+            "] } else { unreachable(",
+            "] } else { todo(",
+            " = if c { unreachable(",
+            " = if c { todo(",
+            "else { if c { unreachable(\"ruled out\") } else { todo(",
+            "  _ => unreachable(",
+            "  _ => todo(",
+            " = if c { x } else if d { ",
+            " } else { if d { [",
         ] {
             assert!(texts.iter().any(|t| t.contains(form)), "no `{}`", form);
         }
@@ -7652,9 +7713,8 @@ mod tests {
                 let text = &p.text[at.clone()];
                 let meeting = text.contains("]][if k { 1 } else { 0 }]")
                     || text.contains("_u128][if k { 1 } else { 0 }], ")
-                    || (text.contains("(c: bool, x: ") && text.contains(", y: "))
-                    || text.contains("(k: u8, x: ")
-                    || text.contains("(c: bool, x: u8) -> ");
+                    || text.contains("(c: bool, d: bool, x: ")
+                    || text.contains("(c: bool, k: u8, x: ");
                 if !meeting {
                     continue;
                 }
@@ -7676,14 +7736,14 @@ mod tests {
 
     /// The first functions of `meeting_arrays`, from random sources 0 and on.
     const PINNED: [&str; 8] = [
-        "pub fn f3(k: u8, x: i8, y: u64) -> [2]i64 = match k {\n  0 => [x, -87_i8]\n  1 => [y, 81_u64]\n  _ => [117; 2]\n}\n",
+        "pub fn f3(c: bool, k: u8, x: i8, y: u64) -> [2]i64 = match k {\n  0 => [x, -87_i8]\n  1 => [y, 81_u64]\n  _ => [565; 2]\n}\n",
         "pub fn f3(k: bool) -> [2]i128 = [[-62_i32, 967083533817693959653399905997_u128][if k { 1 } else { 0 }], 16_i8]\n",
         "pub fn f3(k: bool) -> [2]i128 = [[-50_i64, 33], [439395929139861948437874669498_u128, 936904490330284766988950014917]][if k { 1 } else { 0 }]\n",
-        "pub fn f3(c: bool, x: u8) -> i64 {\n  val a: [2]i64 = if c {\n    val t: [2]u8 = [x; 2]\n    t\n  } else { [562; 2] }\n  a[1]\n}\n",
-        "pub fn f3(k: u8, x: i16, y: u64) -> [2]i64 = match k {\n  0 => [x, -52_i16]\n  1 => [y, 72_u64]\n  _ => [381; 2]\n}\n",
-        "pub fn f3(k: u8, x: i32, y: i64) -> [2]i64 = match k {\n  0 => [x, -50_i32]\n  1 => [y, 35_i64]\n  _ => [81; 2]\n}\n",
-        "pub fn f3(c: bool, x: u8) -> u16 {\n  val a: [3]u16 = if c { [x; 3] } else { [353; 3] }\n  a[2]\n}\n",
-        "pub fn f3(k: u8, x: u8, y: i16) -> [2]i64 = match k {\n  0 => [x, 64_u8]\n  1 => [y, 30_i16]\n  _ => [217; 2]\n}\n",
+        "pub fn f3(c: bool, d: bool, x: u8) -> i64 {\n  val a: [2]i64 = if c {\n    val t: [2]u8 = [x; 2]\n    t\n  } else { [562; 2] }\n  a[1]\n}\n",
+        "pub fn f3(c: bool, k: u8, x: i16, y: u64) -> [2]i64 = match k {\n  0 => [x, -52_i16]\n  1 => [y, 72_u64]\n  _ => [346; 2]\n}\n",
+        "pub fn f3(c: bool, k: u8, x: i32, y: i64) -> [2]i64 = match k {\n  0 => [x, -50_i32]\n  1 => [y, 35_i64]\n  _ => todo(\"not handled\")\n}\n",
+        "pub fn f3(c: bool, d: bool, x: u8) -> u16 {\n  val a: [3]u16 = if c { [x; 3] } else { if d { [353; 3] } else { unreachable(\"ruled out\") } }\n  a[2]\n}\n",
+        "pub fn f3(c: bool, k: u8, x: u8, y: i16) -> [2]i64 = match k {\n  0 => [x, 64_u8]\n  1 => [y, 30_i16]\n  _ => [363; 2]\n}\n",
     ];
 
     /// Beside integers no standard type holds, a literal compared is a plain value, compared

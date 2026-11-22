@@ -283,7 +283,18 @@ impl Shape {
 
     pub fn of(t: &SemaTy, shapes: &Shapes) -> Result<Shape, String> {
         Ok(match t {
-            SemaTy::Int(i) => Shape::Int(int_ty(i).unwrap_or(I64)),
+            SemaTy::Int(i) => Shape::Int(match i {
+                SemaInt::One(t) | SemaInt::Mixed(Some(t)) => *t,
+                // Literals alone take `i64` where nothing gives them a type (`Ty::settled`).
+                SemaInt::Literal => I64,
+                // Integers of no one type stay exact only in a value whose shape their hull
+                // gives (`Lower::shape`), never in one their type would give.
+                SemaInt::Mixed(None) => {
+                    return Err(
+                        "integers of no one type outside a value that keeps them exact".into(),
+                    )
+                }
+            }),
             SemaTy::Bool => Shape::Bool,
             SemaTy::Array(n, e) => Shape::Array(
                 u32::try_from(*n).map_err(|_| format!("an array of {} elements", n))?,
@@ -510,9 +521,8 @@ enum Arg<'t> {
     Place(NodeId, Shape, Declared<'t>, Span),
 }
 
-/// Lowers every function of `m` that has a body, and gives each its entry.
-pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
-    let shapes = Shapes::of(&m.structs)?;
+/// The signature of each function of `m` that has a body, numbered in order.
+fn signatures(m: &CheckedModule, shapes: &Shapes) -> Result<Vec<Option<Sig>>, String> {
     let mut sigs = Vec::new();
     let mut count = 0u32;
     for f in &m.functions {
@@ -523,10 +533,10 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
                     .syntax
                     .params
                     .iter()
-                    .map(|p| Ok((p.is_mut, Shape::of(&SemaTy::of(tree, p.ty), &shapes)?)))
+                    .map(|p| Ok((p.is_mut, Shape::of(&SemaTy::of(tree, p.ty), shapes)?)))
                     .collect::<Result<Vec<_>, String>>()?;
                 let result = match f.syntax.result {
-                    Some(t) => Shape::of(&SemaTy::of(tree, t), &shapes)?,
+                    Some(t) => Shape::of(&SemaTy::of(tree, t), shapes)?,
                     None => Shape::Unit,
                 };
                 count += 1;
@@ -539,6 +549,13 @@ pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
             None => None,
         });
     }
+    Ok(sigs)
+}
+
+/// Lowers every function of `m` that has a body, and gives each its entry.
+pub fn lower(m: &CheckedModule) -> Result<Lowered, String> {
+    let shapes = Shapes::of(&m.structs)?;
+    let sigs = signatures(m, &shapes)?;
     // The budget and each function's frame are the checker's (`core-calculus.md`, item 25); an
     // entry, which no program calls, counts none.
     let mut module = cfg::Module {
@@ -2108,7 +2125,24 @@ impl<'a> Lower<'a> {
             | ExprKind::Call { .. }
             | ExprKind::Construct { .. }
             | ExprKind::Variant { .. }
-            | ExprKind::Error => Shape::of(t, self.shapes),
+            | ExprKind::Error => match t {
+                // An integer of no one type, an operation's over operands of two types, in the
+                // machine type that holds its static range, never one of its own.
+                SemaTy::Int(SemaInt::Mixed(None)) => {
+                    let iv = self.interval(e).ok_or_else(|| self.no_hull(e))?;
+                    let lo = Num::new(iv.lo.0, iv.lo.1);
+                    let hi = Num::new(iv.hi.0, iv.hi.1);
+                    let m = machine(lo, hi).ok_or("an integer beyond 128 bits")?;
+                    Ok(Shape::Int(named(m)?))
+                }
+                SemaTy::Int(SemaInt::One(_) | SemaInt::Mixed(Some(_)) | SemaInt::Literal)
+                | SemaTy::Bool
+                | SemaTy::Array(..)
+                | SemaTy::Struct(_)
+                | SemaTy::Enum(_)
+                | SemaTy::Unit
+                | SemaTy::Any => Shape::of(t, self.shapes),
+            },
         }
     }
 
@@ -2129,15 +2163,13 @@ impl<'a> Lower<'a> {
                     Some(_) => self.holding(e, t),
                 }
             }
-            SemaTy::Int(_) => match self.interval(e) {
-                Some(iv) => {
-                    let lo = Num::new(iv.lo.0, iv.lo.1);
-                    let hi = Num::new(iv.hi.0, iv.hi.1);
-                    let m = machine(lo, hi).ok_or("an `if` or a `match` beyond 128 bits")?;
-                    Ok(Shape::Int(named(m)?))
-                }
-                None => Shape::of(t, self.shapes),
-            },
+            SemaTy::Int(_) => {
+                let iv = self.interval(e).ok_or_else(|| self.no_hull(e))?;
+                let lo = Num::new(iv.lo.0, iv.lo.1);
+                let hi = Num::new(iv.hi.0, iv.hi.1);
+                let m = machine(lo, hi).ok_or("an `if` or a `match` beyond 128 bits")?;
+                Ok(Shape::Int(named(m)?))
+            }
             SemaTy::Bool | SemaTy::Struct(_) | SemaTy::Enum(_) | SemaTy::Unit | SemaTy::Any => {
                 Shape::of(t, self.shapes)
             }
@@ -2145,16 +2177,27 @@ impl<'a> Lower<'a> {
     }
 
     /// `t`, an array type, with the machine type that holds every integer of the branches of
-    /// the `if` or the `match` `e` at its leaves, `i64` where they hold none. The hull is the
+    /// the `if` or the `match` `e` at its leaves, or of the exact literal `e`. The hull is the
     /// checker's (`mente_sema::wide`, `held`), which `E0222` holds to 128 bits, so a module
     /// that checks always meets in one.
     fn holding(&self, e: ExprId, t: &SemaTy) -> Result<Shape, String> {
-        let m = match self.interval(e) {
-            Some(iv) => machine(Num::new(iv.lo.0, iv.lo.1), Num::new(iv.hi.0, iv.hi.1)),
-            None => Some(IntTy::new(64, true)),
-        }
-        .ok_or("integers that meet beyond 128 bits")?;
+        let iv = self.interval(e).ok_or_else(|| self.no_hull(e))?;
+        let m = machine(Num::new(iv.lo.0, iv.lo.1), Num::new(iv.hi.0, iv.hi.1))
+            .ok_or("integers that meet beyond 128 bits")?;
         with_leaf(t, named(m)?)
+    }
+
+    /// The error of a value whose integers meet in one machine type, a join's or an exact
+    /// literal's, with no static range to give it: a module that checks gives every such value
+    /// one (`mente_sema::wide`), a branch of no type counted with none, so this is the
+    /// compiler's fault. A default width in its place, `i64`, met a `u64` above `i64` in it
+    /// and gave native code wrong values (the final review of pull request 189).
+    fn no_hull(&self, e: ExprId) -> String {
+        let span = self.tree().expr(e).span;
+        format!(
+            "integers that meet at bytes {}..{} with no static range",
+            span.start, span.end
+        )
     }
 
     /// The expressions whose values the branches of the `if` or the arms of the `match` `e`
@@ -3224,7 +3267,7 @@ impl<'a> Lower<'a> {
                 w,
             ));
         }
-        let m = self.op_type(&[self.interval(operand), self.interval(e)], t)?;
+        let m = self.op_type(&[self.interval(operand), self.interval(e)])?;
         let x = self.cast(x, t, m);
         Ok(V::Int(
             self.inst(Op::Neg { trap: None }, Ty::Int(m), &[x]),
@@ -3234,12 +3277,15 @@ impl<'a> Lower<'a> {
 
     /// The machine type of an exact operation: the narrowest that holds its operands' and its
     /// result's ranges.
-    fn op_type(&self, ranges: &[Option<Interval>], fallback: IntTy) -> Result<IntTy, String> {
+    fn op_type(&self, ranges: &[Option<Interval>]) -> Result<IntTy, String> {
         let mut lo: Option<Num> = None;
         let mut hi: Option<Num> = None;
         for r in ranges {
+            // A module that checks gives every operand and value of an exact operation a static
+            // range (`mente_sema::wide`): computing in a type that need not hold it would give a
+            // wrong value with no check.
             let Some(r) = r else {
-                return Ok(fallback);
+                return Err("an exact operation with no static range".into());
             };
             let (l, h) = (Num::new(r.lo.0, r.lo.1), Num::new(r.hi.0, r.hi.1));
             lo = Some(lo.map_or(l, |x| x.min(l)));
@@ -3249,7 +3295,7 @@ impl<'a> Lower<'a> {
             (Some(lo), Some(hi)) => {
                 machine(lo, hi).ok_or_else(|| "an operation beyond 128 bits".into())
             }
-            _ => Ok(fallback),
+            _ => Err("an exact operation of no operand".into()),
         }
     }
 
@@ -3389,7 +3435,7 @@ impl<'a> Lower<'a> {
                 let wide = [lt, rt].into_iter().flatten().find(|t| t.bits == 128);
                 let m = match wide {
                     Some(w) => mir(w),
-                    None => self.op_type(&[li, ri, ctx], ta)?,
+                    None => self.op_type(&[li, ri, ctx])?,
                 };
                 // An operand whose type the operation's does not hold, an `i32` beside a `u128`,
                 // keeps its own: only a checked operation, which computes its exact result
@@ -3642,6 +3688,70 @@ mod tests {
         signed: false,
         bits: 16,
     };
+
+    /// Every machine type the lowering takes from a static range refuses a value that has none,
+    /// never giving it a width of its own: an array join, an exact literal, a scalar join and an
+    /// exact operation, each lowered with its range taken away, and an integer of no one type
+    /// outside a value that keeps it exact. A module that checks gives each one a range, a
+    /// branch of no type counted with none (`mente_sema::wide`); a branch of no type that dropped
+    /// the hull once met a `u64` above `i64` in the `i64` the lowering fell back to, and 300 in
+    /// a `u8`, and native code gave wrong values (the final review of pull request 189).
+    #[test]
+    fn test_a_width_taken_from_a_static_range_is_refused_without_one() {
+        let source = "module m\n\
+                      pub fn arrays(c: bool, x: i8, y: u64) -> [1]i128 = if c { [x] } else { [y] }\n\
+                      pub fn literal(x: i8, y: u128[0..=1000]) -> [2]i128 = [x, y]\n\
+                      pub fn scalar(c: bool, x: u8) -> u16 = if c { x } else { 300 }\n\
+                      pub fn exact(x: u8, y: u8) -> u16 = x + y\n";
+        let m = mente_sema::check_program_without_proofs(source).unwrap();
+        assert!(lower(&m).is_ok());
+        let shapes = Shapes::of(&m.structs).unwrap();
+        let sigs = signatures(&m, &shapes).unwrap();
+        // The lowering of function `index`, and the expression of it whose text is `text`.
+        let lowering = |index: usize, text: &str| {
+            let l = Lower::new(&m, &sigs, &shapes, Mems::default(), index, false).unwrap();
+            let at = l
+                .tree()
+                .exprs
+                .iter()
+                .position(|e| source.get(e.span.start..e.span.end) == Some(text))
+                .unwrap();
+            assert!(l.s.iv[at].is_some(), "{text} has a range");
+            (l, at)
+        };
+        // Its shape, with its range taken away.
+        let without = |index: usize, text: &str| {
+            let (mut l, at) = lowering(index, text);
+            l.s.iv[at] = None;
+            l.shape(ExprId(at as u32)).map(|_| ())
+        };
+        let refused = without(0, "if c { [x] } else { [y] }").unwrap_err();
+        assert!(
+            refused.contains("meet at bytes") && refused.contains("no static range"),
+            "{refused}"
+        );
+        let refused = without(1, "[x, y]").unwrap_err();
+        assert!(refused.contains("no static range"), "{refused}");
+        let refused = without(2, "if c { x } else { 300 }").unwrap_err();
+        assert!(refused.contains("no static range"), "{refused}");
+        // An exact operation's machine type, from its operands' ranges and its own, one taken
+        // away; and from none, which no operation has.
+        let (l, at) = lowering(3, "x + y");
+        let own = l.s.iv[at];
+        assert_eq!(l.op_type(&[own, own]), Ok(IntTy::new(64, true)));
+        let refused = l.op_type(&[own, None]).unwrap_err();
+        assert!(
+            refused.contains("an exact operation with no static range"),
+            "{refused}"
+        );
+        let refused = l.op_type(&[]).unwrap_err();
+        assert!(refused.contains("of no operand"), "{refused}");
+        let mixed = SemaTy::Int(SemaInt::Mixed(None));
+        let refused = Shape::of(&mixed, &shapes).unwrap_err();
+        assert!(refused.contains("no one type"), "{refused}");
+        let literal = Shape::of(&SemaTy::Int(SemaInt::Literal), &shapes);
+        assert_eq!(literal, Ok(Shape::Int(I64)));
+    }
 
     /// Lowering and verifying take time that grows with the function, not with its square: a body
     /// of 3,000 `if`s, each a branch and a join and a call, threading its effects through every
