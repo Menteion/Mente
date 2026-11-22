@@ -932,6 +932,12 @@ struct G {
     r: R,
     /// Its value, when it reads no binding and the generator can tell it.
     k: Option<Num>,
+    /// The type its bit operations of literals alone were written in ([`Gen::literal_bits`]),
+    /// while the expression around them may still give their literals another
+    /// (`core-calculus.md`, item 5): a literal takes the type of the smallest expression around
+    /// it that has one, which arithmetic and unary `-` carry up to the operands they join, and a
+    /// bit operation, a shift or `~` of a typed operand ends. None when it has none open.
+    lit: Option<IntT>,
 }
 
 /// What an integer expression must be: any integer, or one whose operands all have one type,
@@ -1660,9 +1666,9 @@ impl Gen {
             self.zero_divisor = false;
             let g = self.int_expr(Want::Exact(t), depth);
             let u = match g.cls {
-                Cls::One(u) => u,
-                Cls::Lit => I64,
-                Cls::Mixed(_) => {
+                Cls::One(u) if Self::closed(&g, false) => u,
+                Cls::Lit if Self::closed(&g, false) => I64,
+                Cls::One(_) | Cls::Lit | Cls::Mixed(_) => {
                     self.restore(m);
                     continue;
                 }
@@ -2407,6 +2413,7 @@ impl Gen {
             Want::Exact(t) if self.rng.chance(30) => {
                 let n = self.value_in(t.range());
                 G {
+                    lit: None,
                     e: E::num(n),
                     cls: Cls::Lit,
                     r: R::point(n),
@@ -2425,9 +2432,12 @@ impl Gen {
     }
 
     /// `a op b` for an arithmetic `op`, with its operands' type, its static range and its
-    /// value; none when the range might leave 128 bits, which `E0222` rejects.
+    /// value; none when the range might leave 128 bits, which `E0222` rejects, and none when a
+    /// bit operation of literals alone inside was written in another type than the operands now
+    /// joined give its literals ([`Gen::joined_lit`]).
     fn combined(op: Op, a: G, b: G) -> Option<G> {
         let cls = a.cls.join(b.cls);
+        let lit = Self::joined_lit(cls, a.lit, b.lit)?;
         let wide = a.cls.wide().or(b.cls.wide());
         let r = match wide {
             Some(t) => t.range(),
@@ -2441,11 +2451,42 @@ impl Gen {
             _ => None,
         };
         Some(G {
+            lit,
             e: E::bin(op, a.e, b.e),
             cls,
             r,
             k,
         })
+    }
+
+    /// Where operands of the joined class `cls` meet, with bit operations of literals alone
+    /// written in `a` and `b` open among them: the type those were written in, none when none
+    /// is open. `None` when it is not the one the literals take there, `cls`'s holder, or when
+    /// two were written in two types: the checker would give their literals another type, so
+    /// that the operation works in it, is refused (`E0212`, `E0222`) or has another value
+    /// (`core-calculus.md`, item 5), none of which the generator models.
+    fn joined_lit(cls: Cls, a: Option<IntT>, b: Option<IntT>) -> Option<Option<IntT>> {
+        let lit = match (a, b) {
+            (None, x) | (x, None) => x,
+            (Some(x), Some(y)) if x == y => Some(x),
+            (Some(_), Some(_)) => return None,
+        };
+        match lit {
+            Some(t) if cls.holder() != Some(t) => None,
+            Some(_) | None => Some(lit),
+        }
+    }
+
+    /// Whether `g`'s bit operations of literals alone take the type they were written in where
+    /// it stands. As a whole value, which no place gives a type, its own operands give them
+    /// theirs, its class's holder. As a branch of an `if`, an arm of a `match` or an element
+    /// of an array literal (`joined`), the other values join with it to give them one, which
+    /// the generator does not know, so none may be open there.
+    fn closed(g: &G, joined: bool) -> bool {
+        match g.lit {
+            None => true,
+            Some(t) => !joined && g.cls.holder() == Some(t),
+        }
     }
 
     /// A bit operation, a shift or `~` over literals alone, written where its literals take
@@ -2491,6 +2532,7 @@ impl Gen {
             }
         };
         G {
+            lit: Some(t),
             e,
             cls: Cls::Lit,
             r: t.range(),
@@ -2537,6 +2579,7 @@ impl Gen {
             };
             let n = self.value_in(range);
             return Some(G {
+                lit: None,
                 e: self.literal(n, None),
                 cls: Cls::Lit,
                 r: R::point(n),
@@ -2564,6 +2607,7 @@ impl Gen {
         }
         let n = self.value_in(t.range());
         G {
+            lit: None,
             e: self.literal(n, None),
             cls: Cls::Lit,
             r: R::point(n),
@@ -2590,6 +2634,7 @@ impl Gen {
             return self.int_literal(Want::Any);
         };
         G {
+            lit: None,
             e: self.read(id),
             cls: Cls::One(t),
             r: self.binds[id].range.unwrap_or(t.range()),
@@ -2619,6 +2664,7 @@ impl Gen {
             let id = *self.rng.pick(&there);
             if let (Ty::Int(t), Some(r)) = (self.binds[id].ty.clone(), self.binds[id].range) {
                 return G {
+                    lit: None,
                     e: self.read(id),
                     cls: Cls::One(t),
                     r,
@@ -2635,6 +2681,7 @@ impl Gen {
         };
         let literal = Num::new(false, base);
         let lit = G {
+            lit: None,
             e: E::Lit(base.to_string()),
             cls: Cls::Lit,
             r: R::point(literal),
@@ -2652,6 +2699,7 @@ impl Gen {
             let id = *self.rng.pick(&small);
             let name = match self.binds[id].ty {
                 Ty::Int(t) => G {
+                    lit: None,
                     e: E::name(&self.binds[id].name),
                     cls: Cls::One(t),
                     r: self.binds[id].range.unwrap_or(t.range()),
@@ -2682,6 +2730,7 @@ impl Gen {
             };
             if r.hull(g.r).fits() {
                 return G {
+                    lit: None,
                     e: E::Neg(Box::new(g.e)),
                     cls: g.cls,
                     r,
@@ -2752,6 +2801,7 @@ impl Gen {
         }
         if zero {
             let one = G {
+                lit: None,
                 e: E::Lit("1".into()),
                 cls: Cls::Lit,
                 r: R::point(Num::small(1)),
@@ -2818,6 +2868,7 @@ impl Gen {
             _ => None,
         };
         Some(G {
+            lit: None,
             e: E::bin(op, a.e, b),
             cls: Cls::One(t),
             r: t.range(),
@@ -2842,6 +2893,7 @@ impl Gen {
             };
             let k = 64 + self.rng.below(64);
             return Some(G {
+                lit: None,
                 e: E::bin(Op::Shr, self.literal(x, Some(t)), E::Lit(k.to_string())),
                 cls: Cls::One(t),
                 r: t.range(),
@@ -2882,7 +2934,7 @@ impl Gen {
             },
             _ => {
                 let k = self.int_expr(Want::Any, depth + 1);
-                if k.r.magnitude() > 1 << 64 {
+                if k.r.magnitude() > 1 << 64 || !Self::closed(&k, false) {
                     return None;
                 }
                 k.e
@@ -2907,6 +2959,7 @@ impl Gen {
             _ => None,
         };
         Some(G {
+            lit: None,
             e: E::bin(op, a.e, k),
             cls: Cls::One(t),
             r: t.range(),
@@ -2939,6 +2992,7 @@ impl Gen {
                 a.k.filter(|x| t.range().holds(*x))
                     .map(|x| unbits(t, !bits(t, x)));
             return Some(G {
+                lit: None,
                 e: E::BitNot(Box::new(a.e)),
                 cls: Cls::One(t),
                 r: t.range(),
@@ -2962,6 +3016,7 @@ impl Gen {
             a.k.map(Num::negated)
                 .filter(|v| wide.is_none_or(|t| t.range().holds(*v)));
         Some(G {
+            lit: a.lit,
             e: E::Neg(Box::new(a.e)),
             cls: a.cls,
             r,
@@ -2977,6 +3032,7 @@ impl Gen {
         })?;
         let Ty::Int(t) = ty else { return None };
         Some(G {
+            lit: None,
             e,
             cls: Cls::One(t),
             r: t.range(),
@@ -3024,6 +3080,7 @@ impl Gen {
                     .root(&e)
                     .is_some_and(|id| self.binds[id].kind == Kind::Pattern);
                 return G {
+                    lit: None,
                     e,
                     cls: Cls::One(t),
                     r: if pattern { t.range() } else { r },
@@ -3048,6 +3105,7 @@ impl Gen {
                 let base = self.read(id);
                 let len = Num::new(false, u128::from(n));
                 return G {
+                    lit: None,
                     e: E::Len(Box::new(base)),
                     cls: Cls::One(USIZE),
                     r: R::point(len),
@@ -3066,6 +3124,7 @@ impl Gen {
                     hi: t.max(),
                 });
                 G {
+                    lit: None,
                     e: self.literal(n, Some(t)),
                     cls: Cls::One(t),
                     r: R::point(n),
@@ -3076,6 +3135,7 @@ impl Gen {
                 let t = self.int_ty();
                 let n = self.value_in(t.range());
                 G {
+                    lit: None,
                     e: self.literal(n, None),
                     cls: Cls::Lit,
                     r: R::point(n),
@@ -3096,6 +3156,7 @@ impl Gen {
         let (e, ty) = self.part(&accept, true)?;
         let Ty::Int(t) = ty else { return None };
         Some(G {
+            lit: None,
             e,
             cls: Cls::One(t),
             r: t.range(),
@@ -3223,6 +3284,7 @@ impl Gen {
                 let op = *self
                     .rng
                     .pick(&[Op::Eq, Op::Ne, Op::Lt, Op::Le, Op::Gt, Op::Ge]);
+                let m = self.mark();
                 let a = self.int_expr(Want::Any, depth + 1);
                 let b = match self.literal_beside(&a) {
                     Some(b) => b,
@@ -3231,6 +3293,12 @@ impl Gen {
                 // `compared` keeps an operand's class, so `b` is compared beside `a`'s.
                 let a = self.compared(a, &b);
                 let b = self.compared(b, &a);
+                // Each side gives the other's literals its type, so their bit operations of
+                // literals alone take the type the two join in (`Gen::joined_lit`).
+                if Self::joined_lit(a.cls.join(b.cls), a.lit, b.lit).is_none() {
+                    self.restore(m);
+                    return self.bool_leaf();
+                }
                 // Now and then the literal, or what stands there, on the left.
                 if self.rng.chance(30) {
                     E::bin(turned(op), b.e, a.e)
@@ -3398,13 +3466,19 @@ impl Gen {
     }
 
     /// An integer expression whose static range meets `t`'s, since one wholly outside it would
-    /// always trap where it lands (`E0508`).
+    /// always trap where it lands (`E0508`), as a whole value ([`Gen::closed`]).
     fn narrowed(&mut self, t: IntT, depth: u32) -> E {
-        self.narrowed_range(t, depth).0
+        self.narrowed_value(t, depth, false).0
     }
 
-    /// [`Gen::narrowed`], with the expression's static range.
+    /// [`Gen::narrowed`], with the expression's static range, as one of values that join: a
+    /// branch, an arm or an element ([`Gen::closed`]).
     fn narrowed_range(&mut self, t: IntT, depth: u32) -> (E, R) {
+        self.narrowed_value(t, depth, true)
+    }
+
+    /// [`Gen::narrowed_range`], `joined` or as a whole value.
+    fn narrowed_value(&mut self, t: IntT, depth: u32, joined: bool) -> (E, R) {
         // Now and then a value computed at the edge of Tier 1's domain.
         let edge = self.rng.chance(6);
         for _ in 0..6 {
@@ -3421,6 +3495,7 @@ impl Gen {
             };
             if g.r.meets(t.range())
                 && g.k.is_none_or(|v| t.range().holds(v))
+                && Self::closed(&g, joined)
                 && self.may_fit(&g.e, t)
             {
                 return (g.e, g.r);
@@ -4605,8 +4680,11 @@ impl Gen {
             Cls::Lit => I64,
             Cls::Mixed(_) => return None,
         };
-        (g.r.meets(t.range()) && g.k.is_none_or(|v| t.range().holds(v)) && self.may_fit(&g.e, t))
-            .then_some((Ty::Int(t), g.e))
+        (g.r.meets(t.range())
+            && g.k.is_none_or(|v| t.range().holds(v))
+            && Self::closed(&g, false)
+            && self.may_fit(&g.e, t))
+        .then_some((Ty::Int(t), g.e))
     }
 
     /// `x + k` or `x - k`, guarded so that it fits `t`; no guard when `x`'s range already makes
@@ -4703,7 +4781,10 @@ impl Gen {
                             || v.cls.wide().is_some()
                             || arithmetic(op, place_range, v.r)
                                 .is_some_and(|r| r.hull(place_range).hull(v.r).fits());
-                        if !fits {
+                        // `p op= v` is one expression of the place and the value, whose type
+                        // their literals take (`Gen::joined_lit`).
+                        let typed = Self::joined_lit(Cls::One(*t).join(v.cls), None, v.lit);
+                        if !fits || typed.is_none() {
                             return Vec::new();
                         }
                         (compound(op), v.e)
@@ -7141,6 +7222,7 @@ mod tests {
         // The divisor: one known to be zero is replaced most of the time, and dooms the
         // statement when it is kept.
         let zero = G {
+            lit: None,
             e: E::Lit("0".into()),
             cls: Cls::Lit,
             r: R::point(Num::ZERO),
@@ -7177,6 +7259,7 @@ mod tests {
         let rem = E::bin(Op::Rem, E::Lit("16".into()), E::name("x"));
         assert_eq!(h.fact(&rem), Some(R::point(Num::ZERO)));
         let known = G {
+            lit: None,
             e: rem,
             cls: Cls::One(U8),
             r: R {
@@ -7863,12 +7946,14 @@ mod tests {
             hi: Num::new(false, u128::MAX),
         };
         let unheld = G {
+            lit: None,
             e: E::Name("s".to_string()),
             cls: Cls::Mixed(None),
             r: wide,
             k: None,
         };
         let typed = G {
+            lit: None,
             cls: Cls::One(IntT::named("u8").unwrap()),
             r: IntT::named("u8").unwrap().range(),
             ..unheld.clone()
@@ -7993,6 +8078,45 @@ mod tests {
             "a panic with no message"
         );
         assert_eq!(said(panic::catch_unwind(|| planted(3))), "3");
+    }
+
+    /// A bit operation of literals alone takes the type of the whole arithmetic expression around
+    /// it (`core-calculus.md`, item 5), not that of the operand it was written beside: in
+    /// `a + 3_u8 * ~0` with `a: u16`, `~0` works in `u16`, and a run of `a = 0` gives 196605, where
+    /// the generator, which wrote it as a `u8`'s, believed 765. The generator keeps the type it
+    /// wrote such literals in (`G::lit`) and refuses the operation where the operands joined give
+    /// them another (`Gen::joined_lit`), as the checker would refuse one with `E0212` or
+    /// `E0222`, or run it otherwise; a comparison, a compound assignment and a value that joins
+    /// others are held alike (root cause 8 of the nightly triage of 2026-11-21, issue 211).
+    #[test]
+    fn test_literal_bits_take_the_type_of_their_whole_expression() {
+        let mut g = Gen::new(1, Mode::Plain);
+        let typed = |t: IntT, e: E| G {
+            lit: None,
+            e,
+            cls: Cls::One(t),
+            r: t.range(),
+            k: None,
+        };
+        let u8_ = INTS[0];
+        let u16_ = IntT::named("u16").unwrap_or(u8_);
+        let bits = g.literal_bits(u8_);
+        assert_eq!(bits.lit, Some(u8_));
+        // Beside a `u8` alone, it works in `u8` as written.
+        let three = typed(u8_, E::Lit("3_u8".into()));
+        let product = Gen::combined(Op::Mul, three, bits);
+        assert_eq!(product.as_ref().map(|p| p.lit), Some(Some(u8_)));
+        // Beside a `u16` around it, it would work in `u16`: refused.
+        let wider = product.and_then(|p| Gen::combined(Op::Add, typed(u16_, E::name("a")), p));
+        assert!(wider.is_none(), "{:?}", wider.map(|w| w.e));
+        // Two written in two types never meet.
+        assert_eq!(Gen::joined_lit(Cls::One(u8_), Some(u8_), Some(u16_)), None);
+        // A whole value keeps them in its own type; a value that joins others keeps none open.
+        let alone = g.literal_bits(I64);
+        assert!(Gen::closed(&alone, false));
+        assert!(!Gen::closed(&alone, true));
+        assert!(!Gen::closed(&g.literal_bits(u8_), false));
+        assert!(Gen::closed(&typed(u8_, E::name("a")), true));
     }
 
     /// A run is held to two bars, whatever its size: the functions it generates again for
