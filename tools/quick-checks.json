@@ -10,7 +10,9 @@
     "harness": "^benchmark/harness/",
     "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/",
     "local limits": "^tools/(local-limits(\\.test)?\\.mjs|capped\\.(ps1|mjs)|cargo\\.mjs|mn\\.mjs|raw-build(-guard)?\\.mjs|store-apps\\.mjs)$|^\\.github/scripts/(job-limits\\.ps1|lib/job-object\\.cs)$",
-    "generator": "^compiler/mente-cli/src/mir_run/"
+    "generator": "^compiler/mente-cli/src/mir_run/",
+    "quick": "^tools/(quick(\\.test)?\\.mjs|quick-checks\\.json|local-limits\\.mjs|store-apps\\.mjs)$",
+    "push": "^tools/(push(-guard)?(\\.test)?\\.mjs|raw-build\\.mjs|local-limits\\.mjs|git-hooks/.*)$|^\\.claude/settings\\.json$"
   },
   "checks": [
     { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
@@ -57,6 +59,18 @@
       "when": "local limits",
       "run": ["node", "--test", "tools/local-limits.test.mjs"],
       "why": "The local limits proved on this machine: a process past its memory dies alone, a command past its time ends with its children, a third build waits for a slot, a killed holder frees its slot, and -MenteOnly leaves other projects untouched. They run on Windows alone, so CI does not run them. The policy's check \"the quick checks run every command in one of the machine's build slots, under the local limits\" holds this."
+    },
+    {
+      "name": "quick's own report",
+      "when": "quick",
+      "run": ["node", "--test", "tools/quick.test.mjs"],
+      "why": "tools/quick.mjs says, at the end of a listing and of a run, whether its checks read HEAD's tree, before them and after, or a tree that differs from it or changed while they ran, and writes the tree a passing run read (#174's merge c94b58e left two resolved files unstaged, and these checks passed on the working tree). Its test runs the real script in a repository it makes, with shims for the checks' commands, so it depends on local-limits.mjs and store-apps.mjs too. CI runs it in the Documentation job."
+    },
+    {
+      "name": "the push guard",
+      "when": "push",
+      "run": ["node", "--test", "tools/push.test.mjs"],
+      "why": "git's pre-push hook of this repository (tools/git-hooks/pre-push, tools/push.mjs), which refuses a push of a commit whose tree tools/quick.mjs has not passed, run by real pushes to a bare remote its test makes, and the narrow rule of .claude/settings.json against bypassing it. It reads commands with raw-build.mjs and the record's name from local-limits.mjs. CI runs it in the Documentation job."
     }
   ]
 }
