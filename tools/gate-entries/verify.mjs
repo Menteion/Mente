@@ -21,12 +21,42 @@ const WINDOWS = process.platform === "win32";
 /// with no argument) is fixed, and a change to it needs a new bootstrap.
 export const INTERFACE = 1;
 
+/// The versions of node this repository declares (package.json, engines) and the refresher
+/// requires, which every process that starts the refresher checks first: those with import.meta.main, by which it runs its command only as node's entry point,
+/// which came in node 24.2.0 and was carried into 22.18.0, but never into the 23 line.
+export const NODE_ENGINES = "^22.18.0 || >=24.2.0";
+
+/// Whether node `version` (process.versions.node) is one of NODE_ENGINES.
+export function nodeMeetsFloor(version) {
+  const [major, minor] = String(version).split(".").map(Number);
+  return (major === 22 && minor >= 18) || (major === 24 && minor >= 2) || major > 24;
+}
+
+/// Whether `dir` lies in a checkout of this repository: it or a parent holds Cargo.toml and
+/// tools/capped.ps1. Cargo's runner entry decides `--mente-only` by it before it checks any copy,
+/// since the runner line serves every Rust project of the machine.
+export function inMente(dir) {
+  for (let at = path.resolve(dir); ; at = path.dirname(at)) {
+    if (fs.existsSync(path.join(at, "Cargo.toml")) && fs.existsSync(path.join(at, "tools", "capped.ps1"))) return true;
+    if (path.dirname(at) === at) return false;
+  }
+}
+
 /// The ref the copy's commit must be, or an ancestor of, and that the refresher compares with
 /// `current` before it asks the remote anything.
 export const MAIN_REF = "refs/remotes/origin/main";
 
 /// A commit's full id.
 export const COMMIT = /^[0-9a-f]{40}$/;
+
+/// A staging directory of a commit's set, which no entry runs.
+export const STAGING = /^staging-([0-9a-f]{40})-[0-9a-f]+$/;
+
+/// The commit a copy's directory name stands for: the commit itself, or a staging directory of it.
+export const commitOf = (name) => (COMMIT.test(name) ? name : (STAGING.exec(name)?.[1] ?? null));
+
+/// The stable entries, written from a copy's tools/gate-entries/ into mente-gates/entry/.
+export const ENTRIES = ["verify.mjs", "refresh.mjs", "capped.mjs", "hook.mjs", "hooks/pre-push"];
 
 /// Variables removed from every process the refresher starts and every git command of the entries'
 /// checks: git's own, node's (NODE_OPTIONS preloads code), and those that name certificate files.
@@ -216,20 +246,26 @@ export const declaredUrl = (copy) => JSON.parse(fs.readFileSync(path.join(copy, 
  * local origin/main or one of its ancestors; with no git, the manifest alone, and it says so. Unless
  * `exempt` (the refresh entry), the copy's interface version must be INTERFACE.
  *
- * Returns { copy, commit, notes } to run it, or { refusal, command } with the one command that
- * clears the refusal: the bootstrap for no copy or a bad one, the refresh for a stale entry. `bin`
- * is the system's git unless given; null stands for a machine where none of the list is found.
+ * Returns { copy, commit, notes, files } to run it, or { refusal, command } with the one command
+ * that clears the refusal: the bootstrap for no copy or a bad one, the refresh for a stale entry;
+ * `missing` says that no copy is current at all. `bin` is the system's git unless given; null
+ * stands for a machine where none of the list is found.
  */
-export function verifyCopy(gates, { exempt = false, bin = systemGit() } = {}) {
-  const common = path.dirname(gates);
-  const bootstrap = (why) => ({ refusal: why, command: "bootstrap" });
+export function verifyCopy(gates, options = {}) {
   let commit;
   try {
     commit = fs.readFileSync(path.join(gates, "current"), "utf8").trim();
   } catch {
-    return bootstrap(`no copy of main's gates is installed in ${gates}`);
+    return { refusal: `no copy of main's gates is installed in ${gates}`, command: "bootstrap", missing: true };
   }
-  if (!COMMIT.test(commit)) return bootstrap(`${path.join(gates, "current")} names no commit`);
+  if (!COMMIT.test(commit)) return { refusal: `${path.join(gates, "current")} names no commit`, command: "bootstrap" };
+  return verifyDir(gates, commit, options);
+}
+
+/// The check verifyCopy makes, of the copy of `commit` in `gates`, current or not.
+export function verifyDir(gates, commit, { exempt = false, bin = systemGit() } = {}) {
+  const common = path.dirname(gates);
+  const bootstrap = (why) => ({ refusal: why, command: "bootstrap" });
   const copy = path.join(gates, commit);
   let files;
   try {
@@ -273,7 +309,70 @@ export function verifyCopy(gates, { exempt = false, bin = systemGit() } = {}) {
     notes.push(`no git is found at ${gitLocations().join(" or ")}, so the copy of ${commit.slice(0, 12)} is held to its manifest alone${since ? `, and has lagged ${MAIN_REF} since ${since.toISOString()}` : ""}; add the location to gitLocations in tools/gate-entries/verify.mjs, then run the bootstrap`);
   }
   if (!exempt && declared.interface !== INTERFACE) return { refusal: `this entry speaks version ${INTERFACE} of the interface with a copy, and the copy of ${commit.slice(0, 12)} version ${declared.interface}: the entry is stale`, command: "refresh" };
-  return { copy, commit, notes };
+  return { copy, commit, notes, files };
+}
+
+/// Whether the entry `to` holds `bytes` and, off Windows, the executable bit of `mode`.
+export function entryHolds(to, bytes, mode) {
+  try {
+    return fs.readFileSync(to).equals(bytes) && (WINDOWS || Boolean(fs.statSync(to).mode & 0o100) === (mode === "100755"));
+  } catch {
+    return false;
+  }
+}
+
+/// Whether every entry of `gates` holds the file of `copy`'s tools/gate-entries/ that `files`,
+/// its manifest, names, with its mode.
+export function entriesHold(gates, copy, files) {
+  return ENTRIES.every((name) => {
+    const file = files.find((f) => f.path === `tools/gate-entries/${name}`);
+    if (!file) return false;
+    try {
+      return entryHolds(path.join(gates, "entry", ...name.split("/")), fs.readFileSync(path.join(copy, "tools", "gate-entries", ...name.split("/"))), file.mode);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/// Whether a refresh would do nothing, the refresh entry's fast path: the local origin/main names
+/// the verified copy `checked`, so no remote is asked, and every entry holds that copy's file, so
+/// none is restored.
+export function nothingToRefresh(gates, checked) {
+  return localMain(path.dirname(gates)) === checked.commit && entriesHold(gates, checked.copy, checked.files);
+}
+
+/**
+ * The copy an install left in `gates` but not yet current, for the refresh entry to finish it: a
+ * directory named by a commit that verifyDir accepts, or a staging directory of a commit whose
+ * files are exactly its tree's, the local origin/main's first; null when there is none, or no git.
+ */
+export function pendingCopy(gates, { bin = systemGit() } = {}) {
+  if (!bin) return null;
+  const common = path.dirname(gates);
+  const main = localMain(common);
+  let names = [];
+  try {
+    names = fs.readdirSync(gates).filter((name) => commitOf(name) !== null);
+  } catch {
+    return null;
+  }
+  names.sort((a, b) => Number(commitOf(b) === main) - Number(commitOf(a) === main));
+  for (const name of names) {
+    const commit = commitOf(name);
+    if (COMMIT.test(name)) {
+      if (!verifyDir(gates, commit, { exempt: true, bin }).refusal) return { dir: path.join(gates, name), commit };
+      continue;
+    }
+    try {
+      const declared = JSON.parse(git(common, ["cat-file", "blob", `${commit}:tools/gate-set.json`], { bin }));
+      const files = filesOf(git(common, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...declared.set], { bin }), declared.set);
+      if (mismatch(path.join(gates, name), files) === null) return { dir: path.join(gates, name), commit };
+    } catch {
+      // Not a staged set of that commit.
+    }
+  }
+  return null;
 }
 
 /// The URL the copies in `gates` declare, the current one first, for the bootstrap line an entry

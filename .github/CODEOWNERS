@@ -95,6 +95,7 @@
 # The gates' copy of main, its refresher and its stable entries (briefs/gate-tools-from-main.md):
 # every checkout's builds, tests and pushes run what they install and check.
 /tools/gates.mjs @Dancraft3746
+/tools/gate-processes.mjs @Dancraft3746
 /tools/gate-set.json @Dancraft3746
 /tools/gate-entries/ @Dancraft3746
 

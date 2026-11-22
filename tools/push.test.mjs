@@ -16,8 +16,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PASSED, capped } from "./local-limits.mjs";
-import { INTERFACE, blobId, bootstrapLine, filesOf, gateEnv, gitLocations, localMain, manifestText, mismatch, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
-import { ENTRIES, GET_URL_MS, LOCK_FD_VARIABLE, NODE_ENGINES, REFRESH_MS, REMOTE_MS, TREE_RUNNER, WAIT_MS, WRITE_MS, lockHolder, nodeMeetsFloor, refresh, takeLock } from "./gates.mjs";
+import { ENTRIES, INTERFACE, NODE_ENGINES, blobId, bootstrapLine, filesOf, gateEnv, gitLocations, localMain, manifestText, mismatch, nodeMeetsFloor, nothingToRefresh, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
+import { LOCK_FD_VARIABLE, TREE_RUNNER, lockHolder, takeLock } from "./gate-processes.mjs";
+import { GET_URL_MS, REFRESH_MS, REMEMBER_MS, REMOTE_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
@@ -443,7 +444,7 @@ test("the settings refuse the ways around the hook, and only those", () => {
 // The gates' processes (briefs/gate-tools-from-main.md, "How the refresher's processes are run").
 
 /// The module of the lock, which the lock's programs below import as `L`.
-const LIMITS = new URL("./gates.mjs", import.meta.url).href;
+const LIMITS = new URL("./gate-processes.mjs", import.meta.url).href;
 
 test("the gates' environment drops git's, node's and the certificate variables, and closes the system and user configuration", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-env-"));
@@ -496,7 +497,7 @@ test("a blob's id is git's, for any bytes, line ends kept as they are", () => {
   }
 });
 
-/** The source of a node program that imports gates.mjs as `L`, then runs `code`. */
+/** The source of a node program that imports gate-processes.mjs as `L`, then runs `code`. */
 const source = (code) => `import * as L from ${JSON.stringify(LIMITS)};\n${code}`;
 
 /** A node program of `code` (source), started with `options`. */
@@ -624,7 +625,7 @@ function fixtureEnv(dir) {
  * the set as this checkout holds it, then `changes` ({ path: text, or a function of the old bytes,
  * or null to remove }), commits it, and unless `push` is false pushes main and fetches it.
  */
-async function withGates(body) {
+async function withGates(body, { patched = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gates-"));
   try {
     const env = fixtureEnv(dir);
@@ -646,6 +647,12 @@ async function withGates(body) {
         fs.copyFileSync(path.join(TREE, rel), at);
       }
       fs.writeFileSync(path.join(work, "tools", "gate-set.json"), `${JSON.stringify({ ...SET, url: remote }, null, 2)}\n`);
+      if (patched) {
+        const at = path.join(work, "tools", "gates.mjs");
+        const text = fs.readFileSync(at, "utf8");
+        assert.equal(text.split(COMMAND_POLICY).length, 2, "the command's policy is not as a patched fixture knows it");
+        fs.writeFileSync(at, text.replace(COMMAND_POLICY, COMMAND_POLICY.replace("allowLocal: false", "allowLocal: true")));
+      }
       for (const [rel, content] of Object.entries(changes)) {
         const at = path.join(work, rel);
         if (content === null) fs.rmSync(at, { force: true });
@@ -783,7 +790,7 @@ test("a refresher run by hand installs nothing", async () => {
     // A refresher copied outside any repository.
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
     try {
-      for (const rel of ["tools/gates.mjs", "tools/local-limits.mjs", "tools/store-apps.mjs", "tools/capped.ps1", "tools/gate-entries/verify.mjs"]) {
+      for (const rel of ["tools/gates.mjs", "tools/gate-processes.mjs", "tools/local-limits.mjs", "tools/store-apps.mjs", "tools/capped.ps1", "tools/gate-entries/verify.mjs"]) {
         fs.mkdirSync(path.dirname(path.join(outside, rel)), { recursive: true });
         fs.copyFileSync(path.join(TREE, rel), path.join(outside, rel));
       }
@@ -1012,7 +1019,7 @@ test("the set is its own load closure, of files of mode 100644 or 100755, and a 
     fs.rmSync(planted, { recursive: true, force: true });
   }
   // A commit whose set holds a symlink, and one whose set holds a submodule.
-  await withGates(async ({ work, git, seam, current, base }) => {
+  await withGates(async ({ work, git, seam, said, current, base }) => {
     assert.equal(await seam(), 0);
     for (const [mode, type] of [["120000", "a symlink"], ["160000", "a submodule"]]) {
       const id = mode === "160000" ? base : git(work, "hash-object", "-w", "--stdin");
@@ -1020,7 +1027,9 @@ test("the set is its own load closure, of files of mode 100644 or 100755, and a 
       git(work, "commit", "-q", "-m", type);
       git(work, "push", "-q", "origin", "main");
       git(work, "fetch", "-q", "origin");
-      await assert.rejects(seam(), /tools\/raw-build\.mjs is a \w+ of mode \d+, not a file of mode 100644 or 100755/, type);
+      said.length = 0;
+      assert.equal(await seam(), 0, type);
+      assert.match(said.join("\n"), /tools\/raw-build\.mjs is a \w+ of mode \d+, not a file of mode 100644 or 100755/, type);
       assert.equal(current(), base);
       git(work, "reset", "-q", "--hard", base);
       git(work, "push", "-q", "-f", "origin", "main");
@@ -1084,7 +1093,7 @@ test("no PATH, NODE_OPTIONS or certificate variable reaches a process the gates 
   });
   // Every process the refresher and the entries start has the gates' environment, the one place
   // that removes the certificate variables; none hands on this process's own.
-  for (const rel of ["tools/gates.mjs", "tools/gate-entries/verify.mjs", "tools/gate-entries/refresh.mjs"]) {
+  for (const rel of ["tools/gates.mjs", "tools/gate-processes.mjs", "tools/gate-entries/verify.mjs", "tools/gate-entries/refresh.mjs"]) {
     // The tree runner's own program spawns its command with the environment inTime built from
     // its caller's.
     const text = fs.readFileSync(path.join(TREE, rel), "utf8").replace(/export const TREE_RUNNER = `[\s\S]*?`;/, "");
@@ -1339,4 +1348,177 @@ test("the node versions package.json declares are the ones the refresher require
   for (const [version, meets] of Object.entries(cases)) assert.equal(nodeMeetsFloor(version), meets, version);
   assert.ok(nodeMeetsFloor(process.versions.node), `this node, ${process.versions.node}, is outside ${NODE_ENGINES}`);
   assert.equal(typeof import.meta.main, "boolean", "this node has no import.meta.main");
+});
+
+// The first review of #218.
+
+/// The text of the command's context, which a patched fixture's commits turn to admit the fixture's
+/// local remote, so that the command's own path, its two processes and its retry, runs in a test.
+const COMMAND_POLICY = 'lockFile: path.join(gates, "lock"), say, allowLocal: false, seam: false';
+
+test("the command hands the lock to the new set's refresher, in a process of its own, which installs", async () => {
+  await withGates(
+    async ({ work, gates, seam, current, commit, entry }) => {
+      assert.equal(await seam(), 0);
+      const next = commit("next");
+      const r = entry("refresh.mjs");
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stderr, new RegExp(`installed main's gates at ${next.slice(0, 12)}`));
+      assert.equal(current(), next);
+      assert.equal(verifyCopy(gates).refusal, undefined);
+      assert.ok(fs.readFileSync(path.join(gates, "lock.who"), "utf8").includes(`a refresh to ${next.slice(0, 12)}`), "the lock was not taken for the refresh");
+      assert.ok(fs.readFileSync(path.join(work, "tools", "gates.mjs"), "utf8").includes(COMMAND_POLICY.replace("allowLocal: false", "allowLocal: true")));
+    },
+    { patched: true },
+  );
+});
+
+test("a first install killed at any step is finished by the next start's refresh entry, or by the bootstrap", async () => {
+  await withGates(
+    async ({ gates, seam, seamChild, current, entry, base }) => {
+      for (const step of ["halfway", "locked", "manifest", "rename", ...ENTRIES.map((name) => `entry:${name}`)]) {
+        fs.rmSync(gates, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+        const killed = seamChild({ bootstrap: true, stopAt: step });
+        assert.notEqual(killed.status, 0, `${step}: the install was not killed: ${killed.stderr}`);
+        assert.ok(!fs.existsSync(path.join(gates, "current")), `${step}: current was written`);
+        const lock = await takeLock(path.join(gates, "lock"), { waitMs: 3000, label: "after a kill" });
+        assert.ok(lock, `${step}: the lock stayed taken after the kill`);
+        lock.release();
+        if (fs.existsSync(path.join(gates, "entry", "refresh.mjs"))) {
+          const r = entry("refresh.mjs");
+          assert.equal(r.status, 0, `${step}: ${r.stderr}`);
+        } else {
+          assert.equal(await seam({ bootstrap: true }), 0, step);
+        }
+        assert.equal(current(), base, step);
+        assert.equal(verifyCopy(gates).refusal, undefined, step);
+      }
+    },
+    { patched: true },
+  );
+});
+
+test("a new refresher writes nothing where the local origin/main names another commit than the remote's", async () => {
+  await withGates(
+    async ({ work, git, gates, seam, current, commit, base }) => {
+      assert.equal(await seam(), 0);
+      const next = commit("next");
+      git(work, "update-ref", "refs/remotes/origin/main", base);
+      const staging = path.join(gates, `staging-${next}-0c`);
+      stageByHand(repo(work), next, staging);
+      const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { encoding: "utf8" });
+      assert.equal(r.status, 1, r.stderr);
+      assert.match(r.stderr, new RegExp(`writes nothing: the remote's main is ${next.slice(0, 12)}, and refs/remotes/origin/main ${base.slice(0, 12)}`));
+      assert.equal(current(), base);
+    },
+    { patched: true },
+  );
+});
+
+test("a file beyond the set in a copy is refused", async () => {
+  await withGates(async ({ gates, seam, entry, base }) => {
+    assert.equal(await seam(), 0);
+    fs.writeFileSync(path.join(gates, base, "tools", "beyond.mjs"), "export {};\n");
+    const r = entry("capped.mjs", ["--", process.execPath, "-e", "0"]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /tools\/beyond\.mjs is not a file of the set/);
+  });
+});
+
+test("an answer that keeps the copy is remembered for its time, and asked again after it", async () => {
+  await withGates(async ({ remote, gates, seam, said, commit }) => {
+    assert.equal(await seam(), 0);
+    const next = commit("next");
+    fs.renameSync(remote, `${remote}.away`);
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /could not be asked/);
+    said.length = 0;
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /as it did at the last ask/);
+    const kept = path.join(gates, "kept");
+    const answer = JSON.parse(fs.readFileSync(kept, "utf8"));
+    assert.equal(answer.local, next);
+    fs.writeFileSync(kept, JSON.stringify({ ...answer, at: Date.now() - REMEMBER_MS - 1000 }));
+    said.length = 0;
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /could not be asked/);
+    assert.doesNotMatch(said.join("\n"), /as it did at the last ask/);
+  });
+});
+
+test("cargo's runner entry runs a command outside this repository untouched, before it checks any copy", async () => {
+  await withGates(async ({ dir, work, gates, seam, entry }) => {
+    assert.equal(await seam(), 0);
+    drift(gates, "tools/push.mjs");
+    const elsewhere = path.join(dir, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    const outside = spawnSync(process.execPath, [path.join(gates, "entry", "capped.mjs"), "--mente-only", "--", process.execPath, "-e", "process.exit(7)"], { cwd: elsewhere, encoding: "utf8" });
+    assert.equal(outside.status, 7, outside.stderr);
+    assert.doesNotMatch(outside.stderr, /mente-gates/, "a project outside this repository heard of its gates");
+    // Inside a checkout of this repository, the drifted copy is refused.
+    fs.writeFileSync(path.join(work, "Cargo.toml"), "[workspace]\n");
+    const inside = entry("capped.mjs", ["--mente-only", "--", process.execPath, "-e", "process.exit(7)"]);
+    assert.equal(inside.status, 2);
+    assert.match(inside.stderr, /has drifted from its manifest/);
+  });
+});
+
+test("a new main whose install fails is remembered, and its staging is swept by the next refresh", async () => {
+  await withGates(async ({ dir, gates, seam, said, current, commit, copies, base }) => {
+    assert.equal(await seam(), 0);
+    const staged = () => copies().filter((name) => name.startsWith("staging-"));
+    // A set that fails before anything is staged.
+    commit("no refresher", { "tools/gate-set.json": () => `${JSON.stringify({ ...SET, set: SET.set.filter((p) => p !== "tools/gates.mjs") }, null, 2)}\n` });
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /cannot be installed: the tools\/gate-set\.json of [0-9a-f]{12} declares no set/);
+    assert.deepEqual(staged(), []);
+    // A set whose install fails after it is staged: its own remote cannot be asked.
+    const failing = commit("unreachable", { "tools/gate-set.json": () => `${JSON.stringify({ ...SET, url: path.join(dir, "nowhere.git").replace(/\\/g, "/") }, null, 2)}\n` });
+    said.length = 0;
+    assert.equal(await seam(), 1);
+    assert.match(said.join("\n"), new RegExp(`the refresher of ${failing.slice(0, 12)} writes nothing`));
+    assert.equal(staged().length, 1);
+    // Remembered for that local commit: no ask, no second staging.
+    said.length = 0;
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /as it did at the last ask/);
+    assert.equal(staged().length, 1, "a remembered failure staged its set again");
+    // Once the answer expires, the failing install is tried again: its earlier staging goes first,
+    // under the lock, so a main that stays broken leaves one staging directory, not one a try.
+    const kept = path.join(gates, "kept");
+    fs.writeFileSync(kept, JSON.stringify({ ...JSON.parse(fs.readFileSync(kept, "utf8")), at: Date.now() - REMEMBER_MS - 1000 }));
+    assert.equal(await seam(), 1);
+    assert.equal(staged().length, 1, "a failed install's staging was left beside the next try's");
+    // The next refresh sweeps the failed staging under the lock.
+    const next = commit("next");
+    assert.equal(await seam(), 0);
+    assert.equal(current(), next);
+    assert.deepEqual(copies(), [base, next].sort(), "the failed staging was left behind");
+  });
+});
+
+test("the refresh entry's fast path holds only where a refresh would do nothing", async () => {
+  await withGates(async ({ work, git, gates, seam, commit, base }) => {
+    assert.equal(await seam(), 0);
+    assert.equal(nothingToRefresh(gates, verifyCopy(gates)), true);
+    const hook = path.join(gates, "entry", "hook.mjs");
+    const kept = fs.readFileSync(hook);
+    fs.appendFileSync(hook, "// edited\n");
+    assert.equal(nothingToRefresh(gates, verifyCopy(gates)), false, "an edited entry took the fast path");
+    fs.writeFileSync(hook, kept);
+    commit("next");
+    assert.equal(nothingToRefresh(gates, verifyCopy(gates)), false, "a moved origin/main took the fast path");
+    git(work, "update-ref", "refs/remotes/origin/main", base);
+    assert.equal(nothingToRefresh(gates, verifyCopy(gates)), true);
+  });
+});
+
+test("no module the hooks or the settings' guard import has an effect at import", () => {
+  const processes = fs.readFileSync(path.join(TREE, "tools", "gate-processes.mjs"), "utf8");
+  assert.doesNotMatch(processes, /process\.exit/);
+  // The refresher's command runs only as node's entry point: its one statement beyond declarations.
+  const gates = fs.readFileSync(path.join(TREE, "tools", "gates.mjs"), "utf8");
+  const top = gates.split("\n").filter((line) => /^[a-z]/.test(line) && !/^(import|export|const|let|function|async function|\}|\/\/)/.test(line));
+  assert.deepEqual(top, ["if (import.meta.main) {"]);
+  assert.doesNotMatch(fs.readFileSync(path.join(TREE, "tools", "push.mjs"), "utf8"), /from "\.\/gates\.mjs"/, "push.mjs imports the refresher's command");
 });

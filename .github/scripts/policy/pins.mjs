@@ -187,6 +187,7 @@ export const GATE_FILES = [
   "/tools/push.test.mjs",
   "/tools/git-hooks/",
   "/tools/gates.mjs",
+  "/tools/gate-processes.mjs",
   "/tools/gate-set.json",
   "/tools/gate-entries/",
   "/tools/local-limits.mjs",

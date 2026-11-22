@@ -2,7 +2,7 @@
 id: gate-tools-from-main
 status: active
 type: chore
-affectedFiles: [tools/gates.mjs, tools/gate-set.json, tools/gate-entries/**, tools/local-limits.mjs, tools/capped.mjs, tools/cargo.mjs, tools/mn.mjs, tools/quick.mjs, tools/push.mjs, tools/git-hooks/**, tools/quick.test.mjs, tools/push.test.mjs, tools/local-limits.test.mjs, tools/quick-checks.json, package.json, package-lock.json, .github/scripts/policy/local-tools.test.mjs, .github/scripts/policy/pins.mjs, .github/CODEOWNERS, CLAUDE.md, briefs/gate-tools-from-main.md, briefs/archive/gate-tools-from-main.md]
+affectedFiles: [tools/gates.mjs, tools/gate-processes.mjs, tools/gate-set.json, tools/gate-entries/**, tools/local-limits.mjs, tools/capped.mjs, tools/cargo.mjs, tools/mn.mjs, tools/quick.mjs, tools/push.mjs, tools/git-hooks/**, tools/quick.test.mjs, tools/push.test.mjs, tools/local-limits.test.mjs, tools/quick-checks.json, package.json, package-lock.json, .github/scripts/policy/local-tools.test.mjs, .github/scripts/policy/pins.mjs, .github/CODEOWNERS, CLAUDE.md, briefs/gate-tools-from-main.md, briefs/archive/gate-tools-from-main.md]
 protectedFiles: [spec/**, compiler/**, .github/workflows/**, .claude/settings.json]
 ---
 
@@ -42,7 +42,7 @@ A process with full shell access can still rewrite anything local, and no local 
 **The set.** The copy holds exactly the load closure of the two gates and the refresher, at their paths in the repository, so that relative imports and loads resolve inside the copy:
 - cargo's runner: `tools/capped.mjs` → `tools/local-limits.mjs` → `tools/store-apps.mjs`; `local-limits.mjs` starts `tools/capped.ps1` by its path, which loads `.github/scripts/lib/job-object.cs`;
 - the hook: `tools/git-hooks/pre-push` → `tools/git-hooks/pre-push.mjs` → `tools/push.mjs` → `tools/local-limits.mjs` and `tools/raw-build.mjs`;
-- the refresher, `tools/gates.mjs`, its declaration, `tools/gate-set.json`, and the entries' sources, `tools/gate-entries/`.
+- the refresher, `tools/gates.mjs`, its processes and its lock, `tools/gate-processes.mjs`, a module with no effect at import, since the hook's code and the settings' guard import it, its declaration, `tools/gate-set.json`, and the entries' sources, `tools/gate-entries/`.
 
 `tools/gate-set.json` declares, once, three things:
 - the set;
@@ -105,7 +105,7 @@ A refusal names the one command that clears it:
 - a stale entry, or a copy behind the local `origin/main`, names the refresh;
 - a bad current copy names the bootstrap, since the refresh entry refuses it too. A bad copy is a drifted file, from antivirus or a stray edit, a manifest that disagrees with the commit, or a commit that is not `origin/main` or its ancestor.
 
-The runner line of `~/.cargo/config.toml` names `mente-gates/entry/capped.mjs`, and `core.hooksPath` names `mente-gates/entry/hooks`. Both paths are stable, so Norman writes his two lines once. The hook's sh entry removes `NODE_OPTIONS` before it starts node.
+The runner line of `~/.cargo/config.toml` names `mente-gates/entry/capped.mjs`, and `core.hooksPath` names `mente-gates/entry/hooks`. Both paths are stable, so Norman writes his two lines once. The hook's sh entry removes `NODE_OPTIONS` before it starts node. The runner line serves every Rust project of the machine, so with `--mente-only` the runner entry runs a command outside a checkout of this repository untouched, decided before it checks or reads any copy.
 
 **Who writes it.** Only the refresher of the commit being installed, never the branch's own `tools/gates.mjs`.
 - The refresher starts only from a copy under `mente-gates/`, and refuses when run from a working tree. It takes no argument and refuses any.
@@ -132,7 +132,7 @@ The command admits only https however it is started, and a test holds that no ar
 - That refresher takes the lock and confirms the commit itself, at the URL its own `gate-set.json` declares, which must be https and which the test on main holds equal to CLAUDE.md's. It then installs as above, moving a bad `<commit>/` aside.
 
 **The rollout.** This round lands in two pull requests, so that a bootstrap that fails after the merge locks no session out.
-- The first lands everything but CLAUDE.md's change. While no copy is installed, and only then, quick, cargo and mn print the bootstrap line and Norman's two lines as a loud warning and keep today's working-tree gates, which is exactly what main does before this round.
+- The first lands everything but CLAUDE.md's change. The tools take their mode from what Norman's lines name, never from what `.git/mente-gates` holds, so that a copy any session installs early, or a kill leaves half installed, changes nothing until he points them at it. While `core.hooksPath` names today's working-tree hooks, quick, cargo and mn print the bootstrap line and Norman's two lines as a loud warning, refresh a copy if one is installed, and keep today's working-tree gates, which is exactly what main does before this round. Once it names the stable entry, they require the copy. Before Norman's lines change, every open branch merges main, since a branch from before this round asks for today's lines.
 - Norman then runs the bootstrap and writes his two lines, and a session builds, tests and pushes through the copy.
 - The second pull request, triggered by that, removes the fallback, so that no copy means refuse, and lands CLAUDE.md's change, so that CLAUDE.md never describes a state that is not live. The invariants below hold from it on.
 

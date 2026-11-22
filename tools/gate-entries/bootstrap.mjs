@@ -17,6 +17,7 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const commit = process.argv[2];
 
@@ -49,6 +50,10 @@ for (const entry of git(["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...
   fs.writeFileSync(at, git(["cat-file", "blob", id], "buffer"), { mode: bits });
   if (process.platform !== "win32") fs.chmodSync(at, bits);
 }
+// The staged refresher runs its command only as node's entry point, which a node outside the
+// staged set's NODE_ENGINES cannot tell it.
+const { NODE_ENGINES, nodeMeetsFloor } = await import(pathToFileURL(path.join(staging, "tools", "gate-entries", "verify.mjs")).href);
+if (!nodeMeetsFloor(process.versions.node)) fail(`the refresher needs node ${NODE_ENGINES}, not ${process.versions.node}`);
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GIT_|NODE_)/i.test(key)));
 const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { stdio: "inherit", env });
 process.exit(r.status ?? 1);

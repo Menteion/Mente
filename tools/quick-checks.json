@@ -12,7 +12,7 @@
     "local limits": "^tools/(local-limits(\\.test)?\\.mjs|capped\\.(ps1|mjs)|cargo\\.mjs|mn\\.mjs|raw-build(-guard)?\\.mjs|store-apps\\.mjs|gate-entries/verify\\.mjs|gate-set\\.json)$|^\\.github/scripts/(job-limits\\.ps1|lib/job-object\\.cs)$",
     "generator": "^compiler/mente-cli/src/mir_run/",
     "quick": "^tools/(quick(\\.test)?\\.mjs|quick-checks\\.json|local-limits\\.mjs|store-apps\\.mjs|gate-entries/verify\\.mjs|gate-set\\.json)$",
-    "push": "^tools/(push(-guard)?(\\.test)?\\.mjs|raw-build\\.mjs|local-limits\\.mjs|store-apps\\.mjs|capped\\.(ps1|mjs)|git-hooks/.*|gates\\.mjs|gate-set\\.json|gate-entries/.*)$|^\\.claude/settings\\.json$|^\\.github/scripts/lib/job-object\\.cs$|^package(-lock)?\\.json$"
+    "push": "^tools/(push(-guard)?(\\.test)?\\.mjs|raw-build\\.mjs|local-limits\\.mjs|store-apps\\.mjs|capped\\.(ps1|mjs)|git-hooks/.*|gates\\.mjs|gate-processes\\.mjs|gate-set\\.json|gate-entries/.*)$|^\\.claude/settings\\.json$|^\\.github/scripts/lib/job-object\\.cs$|^package(-lock)?\\.json$"
   },
   "checks": [
     { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },

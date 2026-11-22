@@ -22,7 +22,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { inTime } from "./gates.mjs";
+import { inTime } from "./gate-processes.mjs";
 import { PASSED } from "./local-limits.mjs";
 import { simpleCommands } from "./raw-build.mjs";
 

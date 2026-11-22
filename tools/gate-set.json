@@ -12,6 +12,7 @@
     "tools/gate-entries/hooks/pre-push",
     "tools/gate-entries/refresh.mjs",
     "tools/gate-entries/verify.mjs",
+    "tools/gate-processes.mjs",
     "tools/gate-set.json",
     "tools/gates.mjs",
     "tools/git-hooks/pre-push",

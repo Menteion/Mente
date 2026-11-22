@@ -231,7 +231,7 @@ test("a new file staged executable is recorded as a commit takes it, so the reco
   });
 });
 
-test("a run refuses to start until core.hooksPath names the gates' stable hook entry by its absolute path, holding the hook, and says what to do", (t) => {
+test("a run takes its gates from what core.hooksPath names, and refuses where that holds no hook, saying what to do", (t) => {
   withRepository((r) => {
     const first = r.quick();
     if (noRunner(first)) return t.skip("cargo's runner is not the capped one here, so quick.mjs runs no check");
@@ -242,17 +242,26 @@ test("a run refuses to start until core.hooksPath names the gates' stable hook e
     const inOther = r.quick([], "pass", other);
     assert.equal(inOther.status, 0, `a worktree runs the gates' hook entry: ${inOther.stdout}
 ${inOther.stderr}`);
+    // Until the round's second pull request, a core.hooksPath that names no stable entry means
+    // today's working-tree gates (FALLBACK): the main checkout's hooks, with its runner, which a
+    // stand-in here is, since on Windows the runner is read first.
+    fs.mkdirSync(path.join(r.work, "tools"), { recursive: true });
+    fs.appendFileSync(path.join(r.work, ".git", "info", "exclude"), "tools/\n");
+    fs.writeFileSync(path.join(r.work, "tools", "capped.mjs"), "process.exit(0);\n");
+    const today = { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: `node ${path.join(r.work, "tools", "capped.mjs").replace(/\\/g, "/")} --mente-only --` };
+    const mainHooks = path.join(r.work, "tools", "git-hooks").replace(/\\/g, "/");
     for (const [value, words] of [
-      [null, /core\.hooksPath is not set/],
-      ["tools/git-hooks", /core\.hooksPath is "tools\/git-hooks", not the gates' stable hook entry/],
-      [path.join(r.work, "tools", "git-hooks").replace(/\\/g, "/"), /not the gates' stable hook entry/],
+      [null, /core\.hooksPath is not set, not the main checkout's hooks/],
+      ["tools/git-hooks", /core\.hooksPath is "tools\/git-hooks", not the main checkout's hooks/],
+      [path.join(other, "tools", "git-hooks").replace(/\\/g, "/"), /not the main checkout's hooks/],
     ]) {
       if (value === null) r.git("config", "--unset", "core.hooksPath");
       else r.git("config", "core.hooksPath", value);
-      const run = r.quick();
+      const run = r.quick([], "pass", r.work, today);
       assert.equal(run.status, 2, `${value}: ${run.stdout}\n${run.stderr}`);
+      assert.match(run.stderr, /WARNING: a copy of main's gates is installed/);
       assert.match(run.stderr, words);
-      assert.ok(run.stderr.includes(`git config core.hooksPath ${r.hooks}`), run.stderr);
+      assert.ok(run.stderr.includes(`git config core.hooksPath ${mainHooks}`), run.stderr);
       assert.doesNotMatch(run.stdout, /\n== /, "no check ran");
     }
     r.git("config", "core.hooksPath", r.hooks);
@@ -342,11 +351,32 @@ test("with no copy installed, a run warns with the bootstrap and Norman's two li
     assert.match(kept.stderr, /\$c = \(git ls-remote https:\/\/\S+ refs\/heads\/main\)/);
     assert.match(kept.stderr, /runner = \["node", ".*\/mente-gates\/entry\/capped\.mjs", "--mente-only", "--"\]/);
     assert.match(kept.stderr, /git config core\.hooksPath .*\/mente-gates\/entry\/hooks/);
-    // The gates' entries named before a copy is installed are not today's gates: refused.
+    // core.hooksPath naming the stable entry asks for a copy: with none installed, it names the
+    // bootstrap.
     r.git("config", "core.hooksPath", r.hooks);
     const early = r.quick([], "pass", r.work, { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: runner });
     assert.equal(early.status, 2);
-    assert.match(early.stderr, /not the main checkout's hooks/);
+    assert.match(early.stderr, /core\.hooksPath names the gates' stable hook entry, but no copy of main's gates is installed .*the bootstrap/s);
+  });
+});
+
+test("a copy installed while Norman's lines name today's gates is refreshed, and changes nothing until they name it", () => {
+  withRepository((r) => {
+    // The stand-in refresh entry says it ran.
+    const ran = path.join(r.dir, "refreshed");
+    fs.writeFileSync(path.join(r.gates, "entry", "refresh.mjs"), `require("node:fs").writeFileSync(${JSON.stringify(ran)}, ""); process.exit(2);\n`.replace('require("node:fs")', '(await import("node:fs"))'));
+    fs.appendFileSync(path.join(r.work, ".git", "info", "exclude"), "tools/\n");
+    const hooks = path.join(r.work, "tools", "git-hooks").replace(/\\/g, "/");
+    fs.mkdirSync(hooks, { recursive: true });
+    fs.writeFileSync(path.join(hooks, "pre-push"), "#!/bin/sh\nexit 0\n");
+    fs.writeFileSync(path.join(r.work, "tools", "capped.mjs"), "process.exit(0);\n");
+    r.git("config", "core.hooksPath", hooks);
+    const run = r.quick([], "pass", r.work, { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: `node ${path.join(r.work, "tools", "capped.mjs").replace(/\\/g, "/")} --mente-only --` });
+    assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+    assert.ok(fs.existsSync(ran), "the installed copy was not refreshed");
+    assert.match(run.stderr, /WARNING: a copy of main's gates is installed in .*, but Norman's lines still name today's working-tree gates/s);
+    assert.match(run.stderr, /every open branch merges main/);
+    assert.match(run.stderr, /was not refreshed, which changes nothing until Norman's lines name it/);
   });
 });
 

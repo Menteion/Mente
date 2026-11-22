@@ -21,7 +21,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bootstrapLine, declaredUrl, gateEnv, systemGit } from "./gate-entries/verify.mjs";
+import { bootstrapLine, declaredUrl, gateEnv, inMente, systemGit } from "./gate-entries/verify.mjs";
+
+export { inMente };
 import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "./store-apps.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -97,14 +99,44 @@ function workingTreeHooks(cwd) {
   return path.join(mainCheckout(top), "tools", "git-hooks");
 }
 
+/// Two paths, the same directory: Windows' are compared without case.
+const fold = (p) => (WINDOWS ? path.resolve(p).toLowerCase() : path.resolve(p));
+
+/// The value of core.hooksPath for the repository of `cwd`, or "".
+function hooksPathOf(cwd) {
+  try {
+    return execFileSync("git", ["config", "--get", "core.hooksPath"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return "";
+  }
+}
+
+/// FALLBACK: whether Norman's lines name the gates' copy for the repository of `cwd`: core.hooksPath
+/// names the stable hook entry. Until the round's second pull request the tools take their mode
+/// from his lines, never from what .git/mente-gates holds, so that a copy installed early by any
+/// session, or half installed, changes nothing until he points his lines at it.
+function namesCopy(cwd, gates) {
+  const value = hooksPathOf(cwd);
+  return value !== "" && path.isAbsolute(value) && fold(value) === fold(hooksDir(gates));
+}
+
+/// FALLBACK: what the tools say while Norman's lines name today's working-tree gates.
+function fallbackWords(gates, installed) {
+  const lines = `cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n\nand git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n`;
+  const branches = "Before Norman's lines change, every open branch merges main: a branch from before this round asks for today's lines, and refuses once they change.";
+  if (installed) return `local-limits: WARNING: a copy of main's gates is installed in ${gates}, but Norman's lines still name today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change, so these tools run those. ${branches} Norman then points, in his own terminal, ${lines}`;
+  return `local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. ${branches} Norman, once, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nthen sets ${lines}`;
+}
+
 /**
  * Refreshes the gates of the repository of `cwd` (briefs/gate-tools-from-main.md, "Who writes it"):
  * runs the stable refresh entry, by this node and with the gates' environment, which checks the
  * copy in use and runs its refresher, before requireRunner and requireHooks, since the runner line
- * and the hooks name entries a first install writes. Returns "copy" when a verified copy is in
- * place, and false when the entry refuses, having said the one command that clears it. With no
- * copy installed, says the bootstrap and Norman's two lines, loudly, and returns "fallback": the
- * tools then keep today's working-tree gates (FALLBACK, until the round's second pull request).
+ * and the hooks name entries a first install writes. Where Norman's lines name the copy, returns
+ * "copy" when a verified copy is in place, and false when none is, having said the one command that
+ * clears it. Where they name today's working-tree gates, it still refreshes a copy if one is
+ * installed, says loudly what is left to do, and returns "fallback": the tools then keep today's
+ * gates (FALLBACK, until the round's second pull request).
  */
 export function refreshGates({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
   let gates;
@@ -115,16 +147,22 @@ export function refreshGates({ cwd = process.cwd(), say = (line) => console.erro
     return false;
   }
   const entry = path.join(gates, "entry", "refresh.mjs");
-  if (!fs.existsSync(entry)) {
-    say(`local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. Norman, once, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nthen sets cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n\nand git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n`);
-    return "fallback";
+  const installed = fs.existsSync(entry);
+  const refreshed = () => {
+    const r = spawnSync(process.execPath, [entry], { stdio: "inherit", env: gateEnv(), cwd, windowsHide: true });
+    if (r.error) say(`local-limits: the refresh entry did not start: ${r.error.message}`);
+    return !r.error && r.status === 0;
+  };
+  if (namesCopy(cwd, gates)) {
+    if (!installed) {
+      say(`local-limits: core.hooksPath names the gates' stable hook entry, but no copy of main's gates is installed in ${gates}, so nothing here runs until Norman, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n`);
+      return false;
+    }
+    return refreshed() ? "copy" : false;
   }
-  const r = spawnSync(process.execPath, [entry], { stdio: "inherit", env: gateEnv(), cwd, windowsHide: true });
-  if (r.error) {
-    say(`local-limits: the refresh entry did not start: ${r.error.message}`);
-    return false;
-  }
-  return r.status === 0 ? "copy" : false;
+  say(fallbackWords(gates, installed));
+  if (installed && !refreshed()) say(`local-limits: the copy of main's gates in ${gates} was not refreshed, which changes nothing until Norman's lines name it`);
+  return "fallback";
 }
 
 /**
@@ -144,13 +182,7 @@ export function requireHooks({ cwd = process.cwd(), say = (line) => console.erro
     say(`local-limits: git could not name the repository of ${cwd}, so whether its pre-push hook runs is unknown, and nothing here runs: ${e.message}`);
     return false;
   }
-  let value = "";
-  try {
-    value = execFileSync("git", ["config", "--get", "core.hooksPath"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    value = "";
-  }
-  const fold = (p) => (WINDOWS ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const value = hooksPathOf(cwd);
   if (value === "" || !path.isAbsolute(value) || fold(value) !== fold(want)) {
     say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, not ${fallback ? "the main checkout's hooks" : "the gates' stable hook entry"}, so git's pre-push hook, which refuses a push of a tree the quick checks have not passed, does not run main's gates for every checkout, and nothing here runs until it does. Norman runs, once, in his own terminal:\n\ngit config core.hooksPath ${want.replace(/\\/g, "/")}\n`);
     return false;
@@ -226,14 +258,6 @@ export function capped(run, limits) {
   return { cmd: WINDOWS_POWERSHELL, args: ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", CAPPED], env: { MENTE_CAPPED: JSON.stringify(call) } };
 }
 
-/// Whether `dir` lies in a checkout of this repository: it or a parent holds Cargo.toml and this
-/// very tool.
-export function inMente(dir) {
-  for (let at = path.resolve(dir); ; at = path.dirname(at)) {
-    if (fs.existsSync(path.join(at, "Cargo.toml")) && fs.existsSync(path.join(at, "tools", "capped.ps1"))) return true;
-    if (path.dirname(at) === at) return false;
-  }
-}
 
 /// Runs `run` under `limits`, its output this process's, at the slot's share of the cores, in
 /// `cwd`; returns its status, 1 when it could not start. With `menteOnly`, a command whose
