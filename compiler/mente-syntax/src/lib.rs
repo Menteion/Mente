@@ -804,7 +804,7 @@ pub struct ParsedStruct {
 /// Whether a struct is one of M2's calculus (`core-calculus.md`, item 13): every struct but one
 /// with `@layout`, whose declaration `morphic-layouts.md` governs and whose values come in M3.
 pub fn is_value_struct(s: &StructDecl) -> bool {
-    !s.attrs.iter().any(|a| a.name == "layout")
+    !s.attrs.iter().any(|a| "layout" == a.name)
 }
 
 /// Every struct of `module` that is one of M2's calculus ([`is_value_struct`]), in order, parsed
