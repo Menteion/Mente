@@ -6154,8 +6154,11 @@ pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// Each bit operation of literals alone of `program` the checker types otherwise than the
 /// generator wrote it (`Program::bits`), as a problem. The generator's model of the type such
 /// literals take (`core-calculus.md`, item 5; `G::lit`) is checked here against the checker's
-/// own table (`Typing::literals`), wherever that model is held, a join it might get wrong
-/// included, so that no caller's check can be dropped unseen. One no expression of the checked
+/// own table (`Typing::literals`), wherever that model is held, so that a check dropped where
+/// it lets a wrong type through fails at once. One that guards only what no generated program
+/// writes is held by `test_literal_bits_take_the_type_of_their_whole_expression` instead: the
+/// arithmetic of two types around literals alone, which the generator writes only rarely, and
+/// literals alone as a joined value, which it never writes. One no expression of the checked
 /// program spans is a problem too.
 pub fn literals_as_written(program: &Program, module: &CheckedModule) -> Vec<String> {
     let mut out = Vec::new();
