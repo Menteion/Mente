@@ -4633,7 +4633,8 @@ impl<'a> Fx<'a> {
                 let mut current = scalar.map_or_else(|| self.summary(st, &shape), var_val);
                 self.read_before(st, value, [&mut current]);
                 let r = self.eval(st, value);
-                let v = self.binary(st, value, bop, (place, &current), (value, &r));
+                // The operation is the statement's, not `value`'s own (`Fx::binary`).
+                let v = self.binary(st, (value, false), bop, (place, &current), (value, &r));
                 let p = prec(&ExprKind::Binary {
                     op: bop,
                     lhs: place,
@@ -4851,7 +4852,7 @@ impl<'a> Fx<'a> {
                     let mut l = self.eval(st, *lhs);
                     self.read_before(st, *rhs, [&mut l]);
                     let r = self.eval(st, *rhs);
-                    self.binary(st, e, *op, (*lhs, &l), (*rhs, &r))
+                    self.binary(st, (e, true), *op, (*lhs, &l), (*rhs, &r))
                 }
             },
             ExprKind::Index { base, index } => {
@@ -4944,10 +4945,15 @@ impl<'a> Fx<'a> {
         int_of(&self.typing.exprs[e.0 as usize]).or(taken.map(|t| t.ty))
     }
 
+    /// An arithmetic or bit operation on `l` and `r`, the values of `le` and `re`, reported at
+    /// `e`. `own` says whether it is `e`'s own operation, which gives its value `e`'s site
+    /// variable. A compound assignment `p op= e` reports at `e` but is no operation of `e`'s:
+    /// its value takes no site variable, so that it never overwrites the one that holds `e`'s
+    /// value, which its right operand `r` reads.
     fn binary(
         &mut self,
         st: &mut Octagon,
-        e: ExprId,
+        (e, own): (ExprId, bool),
         op: BinaryOp,
         (le, l): (ExprId, &Val),
         (re, r): (ExprId, &Val),
@@ -4997,7 +5003,7 @@ impl<'a> Fx<'a> {
                     (BinaryOp::Div, true) => lin(Vec::new(), 0),
                     (_, true) => l.clone(),
                     (BinaryOp::Div, false) => div_vals(st, l, r),
-                    (_, false) => self.rem(st, e, l, r),
+                    (_, false) => self.rem(st, own.then_some(e), l, r),
                 }
             }
             BinaryOp::Sub => add_vals(st, l, &negate(r)),
@@ -5041,10 +5047,15 @@ impl<'a> Fx<'a> {
         }
     }
 
-    /// `x % y`, with the facts `core-calculus.md` item 8 gives it.
-    fn rem(&mut self, st: &mut Octagon, e: ExprId, l: &Val, r: &Val) -> Val {
+    /// `x % y`, with the facts `core-calculus.md` item 8 gives it, as the value of the site
+    /// variable of `site`, the remainder expression it evaluates, where there is one.
+    fn rem(&mut self, st: &mut Octagon, site: Option<ExprId>, l: &Val, r: &Val) -> Val {
         let (lo, hi) = rem_interval(st, l, r);
-        let Site::Value(var) = self.sites[e.0 as usize] else {
+        let var = site.and_then(|e| match self.sites[e.0 as usize] {
+            Site::Value(var) => Some(var),
+            Site::None | Site::Call(_) => None,
+        });
+        let Some(var) = var else {
             return Val::Itv(lo, hi);
         };
         let ((llo, lhi), (rlo, rhi)) = (interval(st, l), interval(st, r));
@@ -8353,6 +8364,34 @@ mod tests {
             let mut joined = one.join(&two);
             fx.assume(&mut joined, &c, true);
         });
+    }
+
+    /// A compound remainder `y %= e` whose right side is a site value, an index, a field, a
+    /// remainder, an `if`, a `match` or a call, gives its value no site variable (`Fx::binary`): it
+    /// once took `e`'s own, and related the remainder to its divisor, the same variable, `v <= v -
+    /// 1`, which emptied the state, so that Tier 1 proved whatever followed. Since the stamps,
+    /// the read of `e` after the write stopped the compile, which the 4000 generated programs of
+    /// pull request 204 met in 18. The remainder lies in `[0, 8]` for each: `u8[0..9]` holds, and
+    /// `u8[0..5]` is not proven.
+    #[test]
+    fn test_a_compound_remainder_keeps_the_value_it_divides_by() {
+        let with = |rhs: &str, result: &str| {
+            format!(
+                "fn g(x: u8) -> u8[1..=9] = x % 9 + 1\npub struct S {{\n  d: u8[1..=9]\n}}\npub fn f(x: u8, a: [2]u8[1..=9], s: S, c: bool) -> {} {{\n  var y = x\n  y %= {}\n  y\n}}",
+                result, rhs
+            )
+        };
+        for rhs in [
+            "a[1]",
+            "s.d",
+            "x % 7",
+            "(if c { 3 } else { 9 })",
+            "match c {\n    true => 3\n    false => 9\n  }",
+            "g(x)",
+        ] {
+            assert_eq!(codes(&with(rhs, "u8[0..9]")), NONE, "{}", rhs);
+            assert_eq!(codes(&with(rhs, "u8[0..5]")), ["E0502"], "{}", rhs);
+        }
     }
 
     /// Where the left operand of `and` decided that the right one does not run, only the right

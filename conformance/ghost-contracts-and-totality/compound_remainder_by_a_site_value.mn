@@ -1,0 +1,51 @@
+// expect: pass
+module conformance
+// A compound remainder whose right side is a site value gives its value no site variable of its
+// own (spec item 2): it once took the right side's, and related the remainder to its divisor, the
+// same variable, which emptied the state, so that Tier 1 proved whatever followed; since the
+// stamps, the read of the right side stopped the compile. The forms: an index, a field, a
+// remainder, an `if`, a `match` and a call. Each remainder lies in 0 to 8, which its result holds.
+fn divisor(x: u8) -> u8[1..=9] = x % 9 + 1
+
+pub struct S {
+  d: u8[1..=9]
+}
+
+pub fn index(x: u8, a: [2]u8[1..=9]) -> u8[0..9] {
+  var y = x
+  y %= a[1]
+  y
+}
+
+pub fn field(x: u8, s: S) -> u8[0..9] {
+  var y = x
+  y %= s.d
+  y
+}
+
+pub fn remainder(x: u8) -> u8[0..9] {
+  var y = x
+  y %= x % 7
+  y
+}
+
+pub fn branch(x: u8, c: bool) -> u8[0..9] {
+  var y = x
+  y %= (if c { 3 } else { 9 })
+  y
+}
+
+pub fn arms(x: u8, c: bool) -> u8[0..9] {
+  var y = x
+  y %= match c {
+    true => 3
+    false => 9
+  }
+  y
+}
+
+pub fn call(x: u8) -> u8[0..9] {
+  var y = x
+  y %= divisor(x)
+  y
+}
