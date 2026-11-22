@@ -5,14 +5,16 @@
 //! of `mente_sema::tier1::smt` writes each such proof as a query built from the very facts Tier 1
 //! decided it on. That checks the decision, not the facts: a wrong fact at a loop's head passed
 //! it. This crate encodes each check from the program itself, as the reference interpreter runs
-//! it (`spec/core-calculus.md`, items 2 to 10), and asks whether some input reaches the check and
-//! fails it. A solver's `sat` is a counterexample to Tier 1's proof, which `mn smt --confirm`
+//! it (`spec/core-calculus.md`, items 2 to 10, and the stack budget of item 25), and asks whether
+//! some input reaches the check and fails it. A solver's `sat` is a counterexample to Tier 1's proof, which `mn smt --confirm`
 //! runs on the interpreter.
 //!
 //! Its independence is held by the crate graph: it depends on `mente-syntax` alone, so it can
 //! name nothing of Tier 1, its octagons or its facts (`test_crates_depend_only_on_allowed_crates`).
 //! What it reads besides the syntax tree comes as plain data ([`Facts`]): the type the checker
-//! gives each expression and the type its literals take.
+//! gives each expression and the type its literals take; and each function's frame, with the
+//! run's stack budget ([`Function::frame`], [`Module::budget`]), as the checker computes them for
+//! every execution path to read.
 //!
 //! The encoding follows every path of a function from its entry, its inputs any values its
 //! parameters' types, refinements and `requires` admit:
@@ -187,13 +189,19 @@ pub struct Facts {
 pub struct Function<'a> {
     pub syntax: &'a FnSyntax,
     pub facts: Facts,
+    /// The bytes a call of it counts against the stack budget (`spec/core-calculus.md`, item
+    /// 25), as the checker computes them for every execution path to read.
+    pub frame: u128,
 }
 
 /// The functions of one module, in its order: each with a body, or `None` for a declaration
 /// without one.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Module<'a> {
     pub functions: Vec<Option<Function<'a>>>,
+    /// The run's stack budget (`spec/core-calculus.md`, item 25): a call traps where the frames
+    /// of the calls begun and not returned and the callee's together exceed it.
+    pub budget: u128,
 }
 
 impl Module<'_> {

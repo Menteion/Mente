@@ -74,13 +74,16 @@ pub fn module_of(m: &CheckedModule) -> Module<'_> {
         functions: m
             .functions
             .iter()
-            .map(|f| {
+            .zip(&m.frames)
+            .map(|(f, frame)| {
                 f.as_ref().map(|f| Function {
                     syntax: &f.syntax,
                     facts: facts(f),
+                    frame: frame.as_ref().map_or(0, |fr| fr.bytes),
                 })
             })
             .collect(),
+        budget: mente_sema::frames::BUDGET,
     }
 }
 
@@ -3004,6 +3007,22 @@ mod tests {
                 obligation
             );
         }
+    }
+
+    /// A call past the stack budget ends its path, as the run traps at it (`core-calculus.md`,
+    /// item 25): on every input, the encoding returns where the run returns, with its value, and
+    /// returns nowhere the run runs out of stack, at a call inside the program or at the name of
+    /// a function whose own frame passes the budget. The frames are the checker's, which the
+    /// harness hands the encoding as it hands it the types.
+    #[test]
+    fn test_a_call_past_the_stack_budget_ends_its_path_as_the_run_traps() {
+        let src = "module m\nfn huge(k: u8) -> u8 {\n  _ = [[0_u8; 1]; 4294967295]\n  k\n}\npub fn call(c: bool, k: u8) -> u8 = if c { huge(k) } else { k }\npub fn past(k: u8) -> u8 {\n  _ = [[0_u8; 1]; 4294967295]\n  k\n}\n";
+        let checked = mente_sema::check_program_without_proofs(src).unwrap();
+        let huge = checked.index("huge").unwrap();
+        assert!(checked.frames[huge].as_ref().unwrap().bytes > mente_sema::frames::BUDGET);
+        let runs = agreement(src, &[]);
+        assert!(runs.wrong.is_empty(), "{:#?}", runs.wrong);
+        assert!(runs.compared > 0, "no input was compared");
     }
 
     /// A check none of whose sites fails is unreachable only where no path of its function is

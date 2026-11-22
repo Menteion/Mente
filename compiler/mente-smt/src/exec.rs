@@ -9,7 +9,10 @@
 //! path and the bindings join after it as `ite` terms of the condition that chose. A `return`, a
 //! `break` and a `continue` keep the path and the bindings they leave with, which join where
 //! control resumes. A call runs the callee's body in a frame of its own; its checks end its
-//! caller's paths too, but only the encoded function's own are sites.
+//! caller's paths too, but only the encoded function's own are sites. Each call is counted
+//! against the stack budget before its arguments are narrowed (item 25): where the frames of the
+//! calls begun and not returned and the callee's together exceed it, every run that reaches the
+//! call traps there, and its path ends, neither a site nor a cut.
 
 use std::collections::BTreeMap;
 
@@ -382,6 +385,9 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
     x.recording = true;
     x.enter(values, None, entry);
     let admitted = x.active;
+    // A call from outside the program counts the function's own frame against an empty stack:
+    // a frame past the budget traps at the function's name, whatever the arguments (item 25).
+    x.overflows(entry, false);
     x.run_body();
     let mut cuts = x.cut.clone();
     cuts.extend(x.lacked.iter().copied());
@@ -570,6 +576,34 @@ impl<'m> Exec<'m> {
         }
         self.lacked.push(self.active);
         self.active = self.t.bool(false);
+    }
+
+    /// Whether a call of `callee` runs out of stack (`spec/core-calculus.md`, item 25): the
+    /// frames of the calls begun and not returned, if `nested`, and the callee's together exceed
+    /// the budget. The frames are the checker's and a path's calls are known, so where they do,
+    /// every run that reaches the call traps there: the path ends, neither a site nor a cut.
+    fn overflows(&mut self, callee: usize, nested: bool) -> bool {
+        let frame = |i: usize| {
+            self.module
+                .functions
+                .get(i)
+                .and_then(Option::as_ref)
+                .map_or(0, |f| f.frame)
+        };
+        let in_use: u128 = if nested {
+            self.callers
+                .iter()
+                .chain(std::iter::once(&self.frame))
+                .map(|fr| frame(fr.func))
+                .sum()
+        } else {
+            0
+        };
+        if in_use.saturating_add(frame(callee)) > self.module.budget {
+            self.active = self.t.bool(false);
+            return true;
+        }
+        false
     }
 
     /// Cuts the path off past the bounds.
@@ -1056,6 +1090,10 @@ impl<'m> Exec<'m> {
                 values.push(self.eval(a.value));
                 places.push(None);
             }
+        }
+        // The call is counted against the stack budget before its arguments are narrowed.
+        if self.overflows(func, true) {
+            return self.default(&shape);
         }
         let depth = self
             .callers
