@@ -375,6 +375,8 @@ check("every test's share of its stop is reported on every runner, and only a br
   // NOTICE as itself.
   assert.match(noticed({ "mente-cli::reproducible t": 18.001 })[0], /, 45\.1%25 of its stop of 40 s$/, "a share just past 45% reads as 45%");
   assert.equal(times.pct(times.NOTICE), "45.0%");
+  // A share that is a whole tenth reads as it, though its floating-point product lies a hair above.
+  assert.equal(times.pct(1.04 / 40), "2.6%", "a whole tenth reads a tenth more");
   // Past the notices GitHub keeps for a step, one notice says how many there are, first.
   const crowd = (n) => noticed(Object.fromEntries(Array.from({ length: n }, (_, k) => [`mente-sema t${k}`, 30])));
   assert.equal(crowd(times.ANNOTATIONS).length, times.ANNOTATIONS, "as many notices as GitHub keeps draw one more");

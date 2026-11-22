@@ -89,8 +89,9 @@ export function shares(current, longer) {
 }
 
 /// A share as a percentage, rounded up to a tenth of one, so that a share past NOTICE never reads
-/// as NOTICE itself; the noise of the floating-point product is dropped first, so a share of
-/// exactly NOTICE reads as it.
+/// as NOTICE itself. The product in tenths of a percent is first cut to six decimals, below any
+/// time JUnit writes, so that a share that is a whole tenth reads as it: 1.04 s of 40 is 26 tenths,
+/// which the product gives as 26.000000000000004, and rounding that up would read 2.7%.
 export const pct = (x) => `${(Math.ceil(Number((x * 1000).toFixed(6))) / 10).toFixed(1)}%`;
 /// A message of a workflow command, as GitHub reads one: `%`, CR and LF escaped.
 export const commandData = (s) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
