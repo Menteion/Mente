@@ -59,8 +59,38 @@ pub struct ModuleVerificationReport {
 
 /// Parses and checks the source of one module: what `mn check` reports for it.
 pub fn check_source(src: &str) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
-    let module = parse_module(src).map_err(|d| vec![d])?;
-    check_module(src, &module)
+    check_source_listed(src).verdict.map(|(_, report)| report)
+}
+
+/// One module's source as `mn check` reports it, from one run of the checker, Tier 1 included:
+/// the checker's verdict, the parsed module with its report when it checks, and every `todo` and
+/// trusted clause it lists. A module that does not parse gives its parse diagnostic, and lists
+/// nothing.
+#[derive(Clone, Debug)]
+pub struct SourceChecked {
+    pub verdict: Result<(ModuleFile, ModuleVerificationReport), Vec<Diagnostic>>,
+    pub listings: Listings,
+}
+
+/// Parses and checks the source of one module, once: [`SourceChecked`]. It alone hands out a
+/// module's [`Listings`], with the verdict of the same run. Asked for apart, the listings ran the
+/// checker again, so `mn check` proved every module twice, and a function whose proof takes
+/// seconds made the corpus's diagnostics test run past its limit (pull request 183 brought the
+/// program, 207 the first fix, and its review this structure).
+pub fn check_source_listed(src: &str) -> SourceChecked {
+    match parse_module(src) {
+        Err(d) => SourceChecked {
+            verdict: Err(vec![d]),
+            listings: Listings::default(),
+        },
+        Ok(module) => {
+            let (verdict, listings) = check_module_listed(src, &module);
+            SourceChecked {
+                verdict: verdict.map(|report| (module, report)),
+                listings,
+            }
+        }
+    }
 }
 
 /// Checks a parsed module: the declaration checks of [`verify_module`], then every function
@@ -74,18 +104,23 @@ pub fn check_module(
 }
 
 /// [`check_module`]'s verdict on a parsed module and its [`Listings`], from one run of the
-/// checker, Tier 1 included: what `mn check` reports and lists for a module. Taking them apart,
-/// each ran the checker on its own, so `mn check` proved every module twice; a large function
-/// whose proof takes seconds made the corpus's diagnostics test twice as slow as its proofs.
-pub fn check_module_listed(
+/// checker, Tier 1 included, each moved out of the run.
+fn check_module_listed(
     src: &str,
     module: &ModuleFile,
 ) -> (Result<ModuleVerificationReport, Vec<Diagnostic>>, Listings) {
-    let b = bodies(src, module, true);
-    let listed = listed(&b);
+    let Bodies {
+        errors,
+        reports,
+        todos,
+        structs,
+        ..
+    } = bodies(src, module, true);
+    let mut axioms: Vec<(Span, String)> = reports.into_iter().flat_map(|(_, r)| r.axioms).collect();
+    axioms.sort_by_key(|t| t.0.start);
     (
-        combine(verify_module_with(module, &b.structs), b.errors),
-        listed,
+        combine(verify_module_with(module, &structs), errors),
+        Listings { todos, axioms },
     )
 }
 
@@ -168,27 +203,6 @@ pub fn tier1_loop_replays(src: &str) -> Vec<(String, usize, Vec<Span>)> {
 pub struct Listings {
     pub todos: Vec<(Span, String)>,
     pub axioms: Vec<(Span, String)>,
-}
-
-pub fn listings(src: &str) -> Listings {
-    let Ok(module) = parse_module(src) else {
-        return Listings::default();
-    };
-    listed(&bodies(src, &module, true))
-}
-
-/// The [`Listings`] of a module's checked bodies.
-fn listed(b: &Bodies) -> Listings {
-    let mut axioms: Vec<(Span, String)> = b
-        .reports
-        .iter()
-        .flat_map(|(_, r)| r.axioms.iter().cloned())
-        .collect();
-    axioms.sort_by_key(|t| t.0.start);
-    Listings {
-        todos: b.todos.clone(),
-        axioms,
-    }
 }
 
 /// A function whose body parsed, with its names resolved and its types checked.
@@ -681,7 +695,7 @@ mod tests {
     #[test]
     fn test_listings_name_every_todo_and_trusted_clause() {
         let src = "module m\n@prove\npub fn h(x: u8) -> u8\n  requires x != 3\n= todo(\"b\")\npub fn f(x: u8) -> u8 = if x > 2 { todo(\"a\") } else { todo(\"c\") }\npub fn g() -> u8 = zz + todo(\"d\")\n";
-        let l = listings(src);
+        let l = check_source_listed(src).listings;
         let todos: Vec<(u32, u32, &str)> = l
             .todos
             .iter()
@@ -694,9 +708,16 @@ mod tests {
         let axioms: Vec<(u32, &str)> = l.axioms.iter().map(|(s, t)| (s.line, t.as_str())).collect();
         assert_eq!(axioms, [(4, "requires x != 3 of h")]);
         let two = "module m\n@prove\npub fn b(x: u8)\n  requires x != 1\n{\n}\n@prove\npub fn a(x: u8)\n  requires x != 2\n{\n}\n";
-        let lines: Vec<u32> = listings(two).axioms.iter().map(|t| t.0.line).collect();
+        let lines: Vec<u32> = check_source_listed(two)
+            .listings
+            .axioms
+            .iter()
+            .map(|t| t.0.line)
+            .collect();
         assert_eq!(lines, [4, 9]);
-        assert_eq!(listings("module m\nlet x = 1\n"), Listings::default());
+        let unparsed = check_source_listed("module m\nlet x = 1\n");
+        assert_eq!(unparsed.listings, Listings::default());
+        assert_eq!(unparsed.verdict.map(|_| ()).map_err(|d| d.len()), Err(1));
         // Tier 1 reports on each function whose names and types check.
         let names: Vec<String> = tier1_reports(src).into_iter().map(|r| r.0).collect();
         assert_eq!(names, ["h", "f"]);

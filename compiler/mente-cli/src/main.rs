@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use mente_ast::project_spec_blueprint;
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
-use mente_sema::{check_module, check_module_listed, Listings};
+use mente_sema::{Listings, SourceChecked};
 use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
 
@@ -730,28 +730,88 @@ fn cmd_check(args: &[String]) {
         process::exit(1);
     }
 
+    let run = check_files(&files, json, mente_sema::check_source_listed);
+    for (stream, text) in &run.printed {
+        match stream {
+            Stream::Out => print!("{}", text),
+            Stream::Err => eprint!("{}", text),
+        }
+    }
+    if !run.ok() {
+        process::exit(1);
+    }
+}
+
+/// Where a piece of `mn check`'s output goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stream {
+    Out,
+    Err,
+}
+
+/// One file as `mn check` reports it: its name as shown, its source, its diagnostics and what it
+/// lists.
+struct FileChecked {
+    shown: String,
+    src: String,
+    diagnostics: Vec<Diagnostic>,
+    listings: Listings,
+}
+
+/// What `mn check` does over its files: what it prints, in order and to which stream, each file
+/// it checked, and how many it could not read.
+struct CheckRun {
+    printed: Vec<(Stream, String)>,
+    files: Vec<FileChecked>,
+    unread: usize,
+}
+
+impl CheckRun {
+    /// Whether every file read and checked, with no diagnostic.
+    fn ok(&self) -> bool {
+        self.unread == 0 && self.files.iter().all(|f| f.diagnostics.is_empty())
+    }
+}
+
+/// The whole of `mn check` over `files`, bar printing: each read, checked by `prove`, which parses
+/// a module's source and checks it in one run of the checker, Tier 1 included
+/// (`mente_sema::check_source_listed`), and reported in the text form or the JSON form. Nothing
+/// else checks a file, so a test that counts `prove`'s runs holds `mn check` to one proof of each
+/// module: it once ran the checker for a module's verdict and again for what it lists, and a corpus
+/// program whose proof takes seconds made the diagnostics test run past its limit on Windows (pull
+/// request 183 brought the program, 207 the first fix, and its review this structure).
+fn check_files(
+    files: &[PathBuf],
+    json: bool,
+    mut prove: impl FnMut(&str) -> SourceChecked,
+) -> CheckRun {
     let t0 = Instant::now();
-    let mut all_ok = true;
-    // Each file with its source and its diagnostics, for the JSON form.
-    let mut checked: Vec<(String, String, Vec<Diagnostic>, mente_sema::Listings)> = Vec::new();
-    for file in &files {
+    let mut printed = Vec::new();
+    let mut checked = Vec::new();
+    let mut unread = 0;
+    for file in files {
         let shown = file.display().to_string();
         let src = match fs::read_to_string(file) {
             Ok(src) => src,
             Err(e) => {
-                eprintln!("error: cannot read `{}`: {}", shown, e);
-                all_ok = false;
+                printed.push((
+                    Stream::Err,
+                    format!("error: cannot read `{}`: {}\n", shown, e),
+                ));
+                unread += 1;
                 continue;
             }
         };
-        let (checked_module, listings) = check_source_listed(&src);
-        let diagnostics = match checked_module {
-            Err(d) => d,
+        let SourceChecked { verdict, listings } = prove(&src);
+        let diagnostics = match verdict {
+            Err(diagnostics) => diagnostics,
             Ok((module, rep)) => {
                 if !json {
                     let proj = project_spec_blueprint(&module);
-                    println!(
-                            "[PASS] [{}] module `{}` | spec_hash: {}.. | layouts: {} | bitstructs: {} | @branchless: {} | @total: {} | @kernel: {}",
+                    printed.push((
+                        Stream::Out,
+                        format!(
+                            "[PASS] [{}] module `{}` | spec_hash: {}.. | layouts: {} | bitstructs: {} | @branchless: {} | @total: {} | @kernel: {}\n",
                             shown,
                             rep.module_path,
                             &proj.hashes.spec_hash[..12],
@@ -760,95 +820,66 @@ fn cmd_check(args: &[String]) {
                             rep.branchless_functions_verified,
                             rep.total_functions_verified,
                             rep.kernel_functions_verified,
-                        );
+                        ),
+                    ));
                     for lp in &rep.layout_proofs {
-                        println!(
-                                "       Proven @layout `{}` ({} bytes, align {} bytes — 0 padding holes)",
+                        printed.push((
+                            Stream::Out,
+                            format!(
+                                "       Proven @layout `{}` ({} bytes, align {} bytes — 0 padding holes)\n",
                                 lp.struct_name, lp.total_bytes, lp.align_bytes
-                            );
+                            ),
+                        ));
                     }
                 }
                 Vec::new()
             }
         };
-        if !diagnostics.is_empty() {
-            all_ok = false;
-            if !json {
-                for d in &diagnostics {
-                    eprint!("{}", render_text(d, &shown, &src));
-                }
+        if !json {
+            for d in &diagnostics {
+                printed.push((Stream::Err, render_text(d, &shown, &src)));
             }
         }
         // Every todo and every trusted clause, which change nothing in the verdict, from the
         // same run of the checker.
         if !json {
             for line in listing_lines(&shown, &src, &listings) {
-                println!("{}", line);
+                printed.push((Stream::Out, format!("{}\n", line)));
             }
         }
-        checked.push((shown, src, diagnostics, listings));
+        checked.push(FileChecked {
+            shown,
+            src,
+            diagnostics,
+            listings,
+        });
     }
     if json {
-        let files: Vec<FileDiagnostics> = checked
+        let reports: Vec<FileDiagnostics> = checked
             .iter()
-            .map(|(file, src, diagnostics, listings)| FileDiagnostics {
-                file,
-                src,
-                diagnostics,
-                todos: &listings.todos,
-                axioms: &listings.axioms,
+            .map(|f| FileDiagnostics {
+                file: &f.shown,
+                src: &f.src,
+                diagnostics: &f.diagnostics,
+                todos: &f.listings.todos,
+                axioms: &f.listings.axioms,
             })
             .collect();
-        println!("{}", render_json(&files));
+        printed.push((Stream::Out, format!("{}\n", render_json(&reports))));
     } else {
-        println!(
-            "
-Checked {} `.mn` file(s) in {:.2} ms.",
-            files.len(),
-            t0.elapsed().as_secs_f64() * 1000.0
-        );
+        printed.push((
+            Stream::Out,
+            format!(
+                "\nChecked {} `.mn` file(s) in {:.2} ms.\n",
+                files.len(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            ),
+        ));
     }
-    if !all_ok {
-        process::exit(1);
-    }
-}
-
-/// What `mn check` reports for one module's source: the parsed module with the checker's report,
-/// or the diagnostics; and every `todo` and trusted clause it lists. One run of the checker gives
-/// both, Tier 1 included, so each module is proved once (`mente_sema::check_module_listed`).
-type Checked = (
-    Result<
-        (
-            mente_syntax::ModuleFile,
-            mente_sema::ModuleVerificationReport,
-        ),
-        Vec<Diagnostic>,
-    >,
-    Listings,
-);
-
-fn check_source_listed(src: &str) -> Checked {
-    checked_by(src, check_module_listed)
-}
-
-/// One run of the checker over a parsed module: its verdict and what it lists.
-type Proof = (
-    Result<mente_sema::ModuleVerificationReport, Vec<Diagnostic>>,
-    Listings,
-);
-
-/// [`check_source_listed`] by `prove`, which runs the checker over a parsed module and gives its
-/// verdict and listings: `check_module_listed` there, and in a test a prover that counts its runs.
-fn checked_by(
-    src: &str,
-    mut prove: impl FnMut(&str, &mente_syntax::ModuleFile) -> Proof,
-) -> Checked {
-    match parse_module(src) {
-        Err(d) => (Err(vec![d]), Listings::default()),
-        Ok(module) => {
-            let (verdict, listings) = prove(src, &module);
-            (verdict.map(|rep| (module, rep)), listings)
-        }
+    CheckRun {
+        printed,
+        files: checked,
+        unread,
     }
 }
 
@@ -880,11 +911,9 @@ fn cmd_explain(args: &[String]) {
 /// What `mn check` reports for one module's source, one diagnostic per line as `line:col code`:
 /// the form of a module's `.expected` file.
 fn diagnostic_lines(src: &str) -> Vec<String> {
-    let diagnostics = match parse_module(src) {
-        Err(d) => vec![d],
-        Ok(module) => check_module(src, &module).err().unwrap_or_default(),
-    };
-    diagnostics
+    mente_sema::check_source(src)
+        .err()
+        .unwrap_or_default()
         .iter()
         .map(|d| format!("{}:{} {}", d.primary.line, d.primary.col, d.code))
         .collect()
@@ -1311,40 +1340,107 @@ mod tests {
     use super::*;
     use mente_sema::verify_module;
 
-    /// `mn check` proves each module once: its verdict and what it lists come from one run of the
-    /// checker, Tier 1 included, the same verdict and listings the two give apart. It once ran the
-    /// checker for the verdict and again for the listings, and a corpus program whose proof takes
-    /// seconds made the diagnostics test run past its limit on Windows (pull request 183 brought
-    /// the program; the guard of this one, 2026-11-22).
+    /// `mn check` proves each module once: the whole of its work over its files, read, checked and
+    /// printed in either form, runs the prover once for each file, and what it reports and lists of
+    /// a file is what that run gave, never a second check's. The prover here marks the listings it
+    /// gives with a `todo` of its own, which every file's listings and output must show: listings
+    /// taken from another run of the checker, as `mn check` once took them, lack it. A module that
+    /// checks, one with a `todo`, a trusted clause and an error, and one that does not parse, each
+    /// with the diagnostics `check_source` gives. A corpus program whose proof takes seconds made the
+    /// diagnostics test run past its limit on Windows while `mn check` proved it twice; the review
+    /// of pull request 207 found its first test pinned a helper, not the path `mn check` takes.
     #[test]
     fn test_mn_check_proves_each_module_once() {
-        let src = "module m\npub fn f(x: u8) -> u8 = if x > 2 { todo(\"a\") } else { x }\npub fn g(xs: [4]u8, i: usize) -> u8 = xs[i]\n";
-        // The prover `mn check` uses, counting its runs.
-        let checked = |src: &str| {
-            let mut runs = 0;
-            let out = checked_by(src, |s, m| {
-                runs += 1;
-                check_module_listed(s, m)
-            });
-            (out, runs)
+        let dir = std::env::temp_dir().join(format!("mente-check-once-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let sources = [
+            "module m\npub fn f(x: u8) -> u8 = x\n",
+            "module m\n@prove\npub fn h(x: u8) -> u8\n  requires x != 3\n= todo(\"b\")\npub fn k(x: u8) -> u8 = y\n",
+            "module m\nlet x = 1\n",
+        ];
+        let files: Vec<PathBuf> = sources
+            .iter()
+            .enumerate()
+            .map(|(k, src)| {
+                let file = dir.join(format!("f{}.mn", k));
+                fs::write(&file, src).unwrap();
+                file
+            })
+            .collect();
+        const MARK: &str = "from the one run";
+        let mark = mente_syntax::Span {
+            start: 0,
+            end: 0,
+            line: 1,
+            col: 1,
         };
-        let ((verdict, listings), runs) = checked(src);
-        assert_eq!(runs, 1);
-        assert_eq!(check_source_listed(src).1, listings);
-        let module = parse_module(src).unwrap();
-        assert_eq!(
-            verdict.map(|(_, rep)| rep.module_path).map_err(|d| d.len()),
-            check_module(src, &module)
-                .map(|rep| rep.module_path)
-                .map_err(|d| d.len())
-        );
-        assert_eq!(listings, mente_sema::listings(src));
-        assert_eq!(listings.todos.len(), 1);
-        // A module that does not parse is proved never, and lists nothing.
-        let ((verdict, listings), runs) = checked("module m\nlet x = 1\n");
-        assert!(verdict.is_err());
-        assert_eq!(listings, Listings::default());
-        assert_eq!(runs, 0);
+        for json in [false, true] {
+            let mut runs = 0;
+            let run = check_files(&files, json, |src| {
+                runs += 1;
+                let mut checked = mente_sema::check_source_listed(src);
+                checked.listings.todos.push((mark, MARK.to_string()));
+                checked
+            });
+            assert_eq!(runs, files.len(), "json: {json}");
+            assert!(!run.ok());
+            for (f, src) in run.files.iter().zip(sources) {
+                assert_eq!(
+                    f.diagnostics,
+                    mente_sema::check_source(src).err().unwrap_or_default()
+                );
+                assert_eq!(
+                    f.listings.todos.last().map(|t| t.1.as_str()),
+                    Some(MARK),
+                    "{}",
+                    f.shown
+                );
+            }
+            let [pass, listed, unparsed] = &run.files[..] else {
+                panic!("three files")
+            };
+            assert!(pass.diagnostics.is_empty());
+            assert!(!listed.diagnostics.is_empty());
+            assert_eq!(unparsed.diagnostics.len(), 1);
+            assert_eq!(unparsed.listings.todos.len(), 1);
+            assert!(unparsed.listings.axioms.is_empty());
+            let todos: Vec<(u32, &str)> = listed
+                .listings
+                .todos
+                .iter()
+                .map(|(s, r)| (s.line, r.as_str()))
+                .collect();
+            assert_eq!(todos, [(5, "b"), (1, MARK)]);
+            let axioms: Vec<(u32, &str)> = listed
+                .listings
+                .axioms
+                .iter()
+                .map(|(s, a)| (s.line, a.as_str()))
+                .collect();
+            assert_eq!(axioms, [(4, "requires x != 3 of h")]);
+            let printed = |stream: Stream| -> String {
+                run.printed
+                    .iter()
+                    .filter(|(s, _)| *s == stream)
+                    .map(|(_, t)| t.as_str())
+                    .collect()
+            };
+            let (out, err) = (printed(Stream::Out), printed(Stream::Err));
+            assert_eq!(out.matches(MARK).count(), files.len(), "{out}");
+            if json {
+                assert!(out.contains("\"reason\":\"b\""), "{out}");
+                assert!(err.is_empty(), "{err}");
+            } else {
+                assert!(out.contains("[PASS] ["), "{out}");
+                for d in &listed.diagnostics {
+                    assert!(
+                        err.contains(&render_text(d, &listed.shown, sources[1])),
+                        "{err}"
+                    );
+                }
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
     }
 
     /// Whether a function of the module has a loop inside another loop, in its body or its
