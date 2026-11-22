@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { gatesDir } from "./local-limits.mjs";
+import { gatesDir, mainCheckout } from "./local-limits.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -215,22 +215,24 @@ test("when a parent that is not node ends, the wrapper ends the command too", { 
  * hooks alone (local-limits.mjs, requireHooks), which they read from their own checkout after the
  * runner, so that this proof of the runner holds whatever this machine's hooks are.
  */
-/// The gates' stable runner entry of this checkout, which the runner line names.
-const ENTRY = path.join(gatesDir(ROOT), "entry", "capped.mjs").replace(/\\/g, "/");
+/// Whether a copy of main's gates is installed here: until one is, the tools keep today's
+/// working-tree gates (FALLBACK, until the round's second pull request).
+const COPY = fs.existsSync(path.join(gatesDir(ROOT), "entry", "refresh.mjs"));
+/// The runner the tools require here: the gates' stable runner entry, or with no copy installed
+/// the main checkout's tools/capped.mjs.
+const ENTRY = (COPY ? path.join(gatesDir(ROOT), "entry", "capped.mjs") : path.join(mainCheckout(ROOT), "tools", "capped.mjs")).replace(/\\/g, "/");
+const RUNNER_TAIL = COPY ? String.raw`\/mente-gates\/entry\/capped\.mjs` : String.raw`\/tools\/capped\.mjs`;
 
 const pastRunner = (r) => r.status === 0 || (r.status === 2 && /core\.hooksPath/.test(r.stderr) && !/cargo's runner|_RUNNER is set/.test(r.stderr));
 
-test("the tools refuse to run until cargo's runner is the gates' capped one, and name the lines to add", { skip }, (t) => {
+test("the tools refuse to run until cargo's runner is the gates' capped one, or today's while no copy is installed, and name the lines to add", { skip }, () => {
   // The review of round 4: CLAUDE.md called cargo's runner the wall, which nothing set or checked.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cargo-home-"));
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER"));
   const cargo = () => spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home }, encoding: "utf8", timeout: 60000 });
   const none = cargo();
-  // The tools refresh the gates before they read the runner: with no copy installed, they refuse
-  // for that alone, and this proof waits for the bootstrap.
-  if (/no copy of main's gates is installed/.test(none.stderr)) return t.skip("no copy of main's gates is installed here: the bootstrap has not run");
   assert.equal(none.status, 2, `${none.stdout}${none.stderr}`);
-  assert.match(none.stderr, /\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*\/mente-gates\/entry\/capped\.mjs", "--mente-only", "--"\]/);
+  assert.match(none.stderr, new RegExp(String.raw`\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*${RUNNER_TAIL}", "--mente-only", "--"\]`));
   assert.ok(none.stderr.includes(path.join(home, "config.toml")), none.stderr);
   for (const [runner, what] of [
     ['["node", "C:/nowhere/tools/capped.mjs", "--mente-only", "--"]', "a capped.mjs that does not exist"],
@@ -265,7 +267,7 @@ test("the tools refuse to run until cargo's runner is the gates' capped one, and
   // The refusal names the variable, which is what to change, not the file, which is right (the
   // review of PR 195's last round).
   assert.match(over.stderr, /CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER is set to "wine"/);
-  assert.match(over.stderr, /\nCARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=node .*\/mente-gates\/entry\/capped\.mjs --mente-only --\n/);
+  assert.match(over.stderr, new RegExp(String.raw`\nCARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=node .*${RUNNER_TAIL} --mente-only --\n`));
 });
 
 test("the hook's command refuses when the guard cannot load", () => {

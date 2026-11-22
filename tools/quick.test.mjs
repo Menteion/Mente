@@ -107,8 +107,8 @@ function withRepository(body) {
     fs.writeFileSync(path.join(work, "hidden.md"), "h\n");
     git("add", "b.md", "hidden.md");
     git("commit", "-q", "-m", "committed");
-    const quick = (args = [], shim = "pass", cwd = work) =>
-      spawnSync(process.execPath, [QUICK, ...args], { cwd, env: { ...env, QUICK_SHIM: shim }, encoding: "utf8" });
+    const quick = (args = [], shim = "pass", cwd = work, extra = {}) =>
+      spawnSync(process.execPath, [QUICK, ...args], { cwd, env: { ...env, QUICK_SHIM: shim, ...extra }, encoding: "utf8" });
     const passed = () => {
       const file = path.join(work, git("rev-parse", "--git-path", "quick-passed"));
       return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : null;
@@ -307,28 +307,46 @@ test("the tools refresh and require the gates of their own checkout, wherever th
     for (const tool of ["cargo.mjs", "mn.mjs"]) {
       const text = fs.readFileSync(path.join(ROOT, "tools", tool), "utf8");
       assert.match(text, /refreshGates\(\{ cwd: ROOT \}\)/, `${tool} refreshes its own checkout's gates`);
-      assert.match(text, /requireHooks\(\{ cwd: ROOT \}\)/, `${tool} asks for its own checkout's hooks`);
+      assert.match(text, /requireHooks\(\{ cwd: ROOT(, fallback)? \}\)/, `${tool} asks for its own checkout's hooks`);
     }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("a run refreshes the gates first: with no copy installed it names the bootstrap and Norman's two lines, and a refusing refresh entry stops it", () => {
+test("a run refreshes the gates first, and a refusing refresh entry stops it", () => {
   withRepository((r) => {
     fs.writeFileSync(path.join(r.gates, "entry", "refresh.mjs"), 'console.error("the copy has drifted"); process.exit(2);\n');
     const refused = r.quick();
     assert.equal(refused.status, 2, `${refused.stdout}\n${refused.stderr}`);
     assert.match(refused.stderr, /the copy has drifted/);
     assert.doesNotMatch(refused.stdout, /\n== /, "a check ran past a refusing refresh entry");
+  });
+});
+
+test("with no copy installed, a run warns with the bootstrap and Norman's two lines and keeps today's working-tree gates, until the round's second pull request", () => {
+  withRepository((r) => {
     fs.rmSync(path.join(r.gates, "entry"), { recursive: true });
-    const none = r.quick();
-    assert.equal(none.status, 2);
-    assert.match(none.stderr, /no copy of main's gates is installed/);
-    assert.match(none.stderr, /\$c = \(git ls-remote https:\/\/\S+ refs\/heads\/main\)/);
-    assert.match(none.stderr, /runner = \["node", ".*\/mente-gates\/entry\/capped\.mjs", "--mente-only", "--"\]/);
-    assert.match(none.stderr, /git config core\.hooksPath .*\/mente-gates\/entry\/hooks/);
-    assert.doesNotMatch(none.stdout, /\n== /, "a check ran with no copy installed");
+    // Today's working-tree gates: the main checkout's tools/capped.mjs, which cargo's runner names,
+    // and its tools/git-hooks, which core.hooksPath names; ignored, so that no check runs for them.
+    fs.appendFileSync(path.join(r.work, ".git", "info", "exclude"), "tools/\n");
+    const hooks = path.join(r.work, "tools", "git-hooks").replace(/\\/g, "/");
+    fs.mkdirSync(hooks, { recursive: true });
+    fs.writeFileSync(path.join(hooks, "pre-push"), "#!/bin/sh\nexit 0\n");
+    fs.writeFileSync(path.join(r.work, "tools", "capped.mjs"), "process.exit(0);\n");
+    const runner = `node ${path.join(r.work, "tools", "capped.mjs").replace(/\\/g, "/")} --mente-only --`;
+    r.git("config", "core.hooksPath", hooks);
+    const kept = r.quick([], "pass", r.work, { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: runner });
+    assert.equal(kept.status, 0, `${kept.stdout}\n${kept.stderr}`);
+    assert.match(kept.stderr, /WARNING: no copy of main's gates is installed/);
+    assert.match(kept.stderr, /\$c = \(git ls-remote https:\/\/\S+ refs\/heads\/main\)/);
+    assert.match(kept.stderr, /runner = \["node", ".*\/mente-gates\/entry\/capped\.mjs", "--mente-only", "--"\]/);
+    assert.match(kept.stderr, /git config core\.hooksPath .*\/mente-gates\/entry\/hooks/);
+    // The gates' entries named before a copy is installed are not today's gates: refused.
+    r.git("config", "core.hooksPath", r.hooks);
+    const early = r.quick([], "pass", r.work, { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: runner });
+    assert.equal(early.status, 2);
+    assert.match(early.stderr, /not the main checkout's hooks/);
   });
 });
 

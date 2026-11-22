@@ -165,9 +165,12 @@ if (process.argv.includes("--list")) {
   reportTree(before, true);
   process.exit(0);
 }
-if (!refreshGates({ cwd: process.cwd() })) process.exit(2);
-if (!requireRunner()) process.exit(2);
-if (!requireHooks({ cwd: process.cwd() })) process.exit(2);
+const gates = refreshGates({ cwd: process.cwd() });
+if (!gates) process.exit(2);
+// FALLBACK: with no copy installed, today's working-tree gates (local-limits.mjs, refreshGates).
+const fallback = gates === "fallback";
+if (!requireRunner({ fallback })) process.exit(2);
+if (!requireHooks({ cwd: process.cwd(), fallback })) process.exit(2);
 const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);
 const results = [];
 for (const check of due) {

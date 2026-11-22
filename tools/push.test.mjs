@@ -17,7 +17,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PASSED, capped } from "./local-limits.mjs";
 import { INTERFACE, blobId, bootstrapLine, filesOf, gateEnv, gitLocations, localMain, manifestText, mismatch, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
-import { ENTRIES, GET_URL_MS, LOCK_FD_VARIABLE, REFRESH_MS, REMOTE_MS, TREE_RUNNER, WAIT_MS, WRITE_MS, lockHolder, refresh, takeLock } from "./gates.mjs";
+import { ENTRIES, GET_URL_MS, LOCK_FD_VARIABLE, NODE_ENGINES, REFRESH_MS, REMOTE_MS, TREE_RUNNER, WAIT_MS, WRITE_MS, lockHolder, nodeMeetsFloor, refresh, takeLock } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
@@ -1323,4 +1323,15 @@ test("the bootstrap line stages exactly main's set from its objects and starts t
     }
     git(work, "status", "--short");
   });
+});
+
+test("the node versions package.json declares are the ones the refresher requires, those with import.meta.main", () => {
+  const declared = JSON.parse(fs.readFileSync(path.join(TREE, "package.json"), "utf8")).engines.node;
+  assert.equal(declared, NODE_ENGINES, "package.json's engines and the refresher's floor differ");
+  const locked = JSON.parse(fs.readFileSync(path.join(TREE, "package-lock.json"), "utf8")).packages[""].engines.node;
+  assert.equal(locked, NODE_ENGINES, "package-lock.json records other engines than package.json's");
+  const cases = { "22.17.1": false, "22.18.0": true, "22.23.2": true, "23.11.0": false, "24.1.0": false, "24.2.0": true, "24.22.1": true, "26.7.0": true, "20.19.0": false };
+  for (const [version, meets] of Object.entries(cases)) assert.equal(nodeMeetsFloor(version), meets, version);
+  assert.ok(nodeMeetsFloor(process.versions.node), `this node, ${process.versions.node}, is outside ${NODE_ENGINES}`);
+  assert.equal(typeof import.meta.main, "boolean", "this node has no import.meta.main");
 });

@@ -49,6 +49,17 @@ export const REFRESH_MS = 2 * (GET_URL_MS + REMOTE_MS) + WAIT_MS + WRITE_MS;
 /// How long an answer that keeps the current copy is remembered for its local commit.
 export const REMEMBER_MS = 10 * 60000;
 
+/// The versions of node this repository declares (package.json, engines) and the refresher
+/// requires: those with import.meta.main, by which it runs its command only as node's entry point,
+/// which came in node 24.2.0 and was carried into 22.18.0, but never into the 23 line.
+export const NODE_ENGINES = "^22.18.0 || >=24.2.0";
+
+/// Whether node `version` (process.versions.node) is one of NODE_ENGINES.
+export function nodeMeetsFloor(version) {
+  const [major, minor] = String(version).split(".").map(Number);
+  return (major === 22 && minor >= 18) || (major === 24 && minor >= 2) || major > 24;
+}
+
 /// The stable entries, written from a copy's tools/gate-entries/ into mente-gates/entry/.
 export const ENTRIES = ["verify.mjs", "refresh.mjs", "capped.mjs", "hook.mjs", "hooks/pre-push"];
 
@@ -719,11 +730,11 @@ export async function refresh(options = {}) {
 }
 
 // The command runs only when this file is node's entry point, never when tools/push.mjs, the
-// tests or the refresh's own worker import it. import.meta.main says so without comparing paths
-// (node 24.2 and later, as CI and the laptop run); an older node, which has no such field, refuses
-// loudly rather than skip the command.
-if (import.meta.main === undefined) {
-  console.error("mente-gates: tools/gates.mjs needs node 24.2 or later, whose import.meta.main says whether it was started as the command");
+// tests or the refresh's own worker import it. import.meta.main says so without comparing paths; a
+// node outside NODE_ENGINES, which may have no such field, refuses loudly rather than skip the
+// command.
+if (!nodeMeetsFloor(process.versions.node)) {
+  console.error(`mente-gates: tools/gates.mjs needs node ${NODE_ENGINES}, whose import.meta.main says whether it was started as the command, not ${process.versions.node}`);
   process.exit(2);
 } else if (import.meta.main) {
   command().then(

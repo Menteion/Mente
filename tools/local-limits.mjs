@@ -67,13 +67,44 @@ function bootstrapWords() {
   }
 }
 
+// Between this round's two pull requests (briefs/gate-tools-from-main.md, "The rollout"): while no
+// copy of main's gates is installed, the tools keep today's working-tree gates, the main checkout's
+// tools/capped.mjs and tools/git-hooks, and say loudly how to install the copy. The second pull
+// request removes this fallback, and everything marked FALLBACK with it.
+
+/// FALLBACK: the main checkout of this repository, whose tools/capped.mjs and tools/git-hooks are
+/// today's working-tree gates: the directory a worktree's .git file points into, or `root` itself.
+export function mainCheckout(root = path.resolve(HERE, "..")) {
+  try {
+    const dotgit = path.join(root, ".git");
+    if (fs.statSync(dotgit).isFile()) {
+      const at = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotgit, "utf8"))?.[1];
+      const main = at ? path.resolve(root, at).replace(/[\\/]\.git[\\/]worktrees[\\/][^\\/]+$/, "") : null;
+      if (main && main !== path.resolve(root, at)) return main;
+    }
+  } catch {
+    // A checkout whose .git cannot be read is taken as the main one.
+  }
+  return root;
+}
+
+/// FALLBACK: the runner line of today's working-tree gates.
+export const workingTreeRunnerLine = (main = mainCheckout()) => `runner = ["node", ${JSON.stringify(path.join(main, "tools", "capped.mjs").replace(/\\/g, "/"))}, "--mente-only", "--"]`;
+
+/// FALLBACK: the hooks of today's working-tree gates for the repository of `cwd`.
+function workingTreeHooks(cwd) {
+  const top = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return path.join(mainCheckout(top), "tools", "git-hooks");
+}
+
 /**
  * Refreshes the gates of the repository of `cwd` (briefs/gate-tools-from-main.md, "Who writes it"):
  * runs the stable refresh entry, by this node and with the gates' environment, which checks the
  * copy in use and runs its refresher, before requireRunner and requireHooks, since the runner line
- * and the hooks name entries a first install writes. With no copy installed, says the bootstrap
- * and Norman's two lines and returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run
- * nothing until then; false too when the entry refuses, having said the one command that clears it.
+ * and the hooks name entries a first install writes. Returns "copy" when a verified copy is in
+ * place, and false when the entry refuses, having said the one command that clears it. With no
+ * copy installed, says the bootstrap and Norman's two lines, loudly, and returns "fallback": the
+ * tools then keep today's working-tree gates (FALLBACK, until the round's second pull request).
  */
 export function refreshGates({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
   let gates;
@@ -85,15 +116,15 @@ export function refreshGates({ cwd = process.cwd(), say = (line) => console.erro
   }
   const entry = path.join(gates, "entry", "refresh.mjs");
   if (!fs.existsSync(entry)) {
-    say(`local-limits: no copy of main's gates is installed in ${gates}, so nothing here runs until Norman, once, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nthen sets cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n\nand git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n`);
-    return false;
+    say(`local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. Norman, once, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nthen sets cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n\nand git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n`);
+    return "fallback";
   }
   const r = spawnSync(process.execPath, [entry], { stdio: "inherit", env: gateEnv(), cwd, windowsHide: true });
   if (r.error) {
     say(`local-limits: the refresh entry did not start: ${r.error.message}`);
     return false;
   }
-  return r.status === 0;
+  return r.status === 0 ? "copy" : false;
 }
 
 /**
@@ -105,10 +136,10 @@ export function refreshGates({ cwd = process.cwd(), say = (line) => console.erro
  * guard refuses a session's write of core.hooksPath (tools/push.mjs), so the command is Norman's to
  * run. cargo.mjs and mn.mjs give their own checkout; quick.mjs, the one it checks.
  */
-export function requireHooks({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
+export function requireHooks({ cwd = process.cwd(), say = (line) => console.error(line), fallback = false } = {}) {
   let want;
   try {
-    want = hooksDir(gatesDir(cwd));
+    want = fallback ? workingTreeHooks(cwd) : hooksDir(gatesDir(cwd));
   } catch (e) {
     say(`local-limits: git could not name the repository of ${cwd}, so whether its pre-push hook runs is unknown, and nothing here runs: ${e.message}`);
     return false;
@@ -121,7 +152,7 @@ export function requireHooks({ cwd = process.cwd(), say = (line) => console.erro
   }
   const fold = (p) => (WINDOWS ? path.resolve(p).toLowerCase() : path.resolve(p));
   if (value === "" || !path.isAbsolute(value) || fold(value) !== fold(want)) {
-    say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, not the gates' stable hook entry, so git's pre-push hook, which refuses a push of a tree the quick checks have not passed, does not run main's gates for every checkout, and nothing here runs until it does. Norman runs, once, in his own terminal:\n\ngit config core.hooksPath ${want.replace(/\\/g, "/")}\n`);
+    say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, not ${fallback ? "the main checkout's hooks" : "the gates' stable hook entry"}, so git's pre-push hook, which refuses a push of a tree the quick checks have not passed, does not run main's gates for every checkout, and nothing here runs until it does. Norman runs, once, in his own terminal:\n\ngit config core.hooksPath ${want.replace(/\\/g, "/")}\n`);
     return false;
   }
   if (!fs.existsSync(path.join(want, "pre-push"))) {
@@ -294,24 +325,27 @@ export function cargoRunner(cwd = process.cwd(), env = process.env) {
 /// tools/capped.mjs, however cargo was started: the tools refuse to run until it does, and say which
 /// lines to add where (the review of round 4: CLAUDE.md claimed a runner nothing set or checked).
 /// Off Windows, where no job object bounds anything, it holds.
-export function requireRunner({ cwd = process.cwd(), env = process.env, say = (line) => console.error(line) } = {}) {
+export function requireRunner({ cwd = process.cwd(), env = process.env, say = (line) => console.error(line), fallback = false } = {}) {
   if (!WINDOWS) return true;
   const words = cargoRunner(cwd, env);
-  const held = Array.isArray(words) && words.length === 4 && /^node(\.exe)?$/i.test(path.basename(words[0])) && /[\\/]mente-gates[\\/]entry[\\/]capped\.mjs$/.test(words[1]) && fs.existsSync(words[1]) && words[2] === "--mente-only" && words[3] === "--";
+  const runner = fallback ? /[\\/]tools[\\/]capped\.mjs$/ : /[\\/]mente-gates[\\/]entry[\\/]capped\.mjs$/;
+  const held = Array.isArray(words) && words.length === 4 && /^node(\.exe)?$/i.test(path.basename(words[0])) && runner.test(words[1]) && fs.existsSync(words[1]) && words[2] === "--mente-only" && words[3] === "--";
   let gates;
   try {
     gates = gatesDir(cwd);
   } catch {
     gates = "<common git directory>/mente-gates";
   }
+  const file = fallback ? path.join(mainCheckout(), "tools", "capped.mjs") : path.join(gates, "entry", "capped.mjs");
+  const line = fallback ? workingTreeRunnerLine() : runnerLine(gates);
   if (held) return true;
   // The variable cargo reads before every file: when it names the runner, it is what to change
   // (the review of PR 195's last round).
   if (env[RUNNER_VARIABLE]) {
-    say(`local-limits: ${RUNNER_VARIABLE} is set to ${JSON.stringify(env[RUNNER_VARIABLE])}, which cargo uses as its runner over every configuration file, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Unset it, or set it to:\n\n${RUNNER_VARIABLE}=node ${path.join(gates, "entry", "capped.mjs").replace(/\\/g, "/")} --mente-only --\n`);
+    say(`local-limits: ${RUNNER_VARIABLE} is set to ${JSON.stringify(env[RUNNER_VARIABLE])}, which cargo uses as its runner over every configuration file, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Unset it, or set it to:\n\n${RUNNER_VARIABLE}=node ${file.replace(/\\/g, "/")} --mente-only --\n`);
     return false;
   }
-  say(`local-limits: cargo's runner on this laptop is ${words ? JSON.stringify(words) : "not set"}, so a test binary cargo starts would run unbounded, and nothing here runs until it is the gates' capped one. Add these two lines to ${cargoConfig(env)}:\n\n[target.${RUNNER_TARGET}]\n${runnerLine(gates)}\n`);
+  say(`local-limits: cargo's runner on this laptop is ${words ? JSON.stringify(words) : "not set"}, so a test binary cargo starts would run unbounded, and nothing here runs until it is the ${fallback ? "capped one" : "gates' capped one"}. Add these two lines to ${cargoConfig(env)}:\n\n[target.${RUNNER_TARGET}]\n${line}\n`);
   return false;
 }
 

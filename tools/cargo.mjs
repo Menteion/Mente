@@ -20,9 +20,12 @@ if (args.length === 0) {
   console.error("usage: node tools/cargo.mjs [--minutes N] <cargo arguments>");
   process.exit(2);
 }
-if (!refreshGates({ cwd: ROOT })) process.exit(2);
-if (!requireRunner()) process.exit(2);
-if (!requireHooks({ cwd: ROOT })) process.exit(2);
+const gates = refreshGates({ cwd: ROOT });
+if (!gates) process.exit(2);
+// FALLBACK: with no copy installed, today's working-tree gates (local-limits.mjs, refreshGates).
+const fallback = gates === "fallback";
+if (!requireRunner({ fallback })) process.exit(2);
+if (!requireHooks({ cwd: ROOT, fallback })) process.exit(2);
 const slot = acquireSlot(`cargo ${args.join(" ")}`);
 const status = runCapped(["cargo", ...args], limits);
 slot.release();

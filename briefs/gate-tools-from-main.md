@@ -2,7 +2,7 @@
 id: gate-tools-from-main
 status: active
 type: chore
-affectedFiles: [tools/gates.mjs, tools/gate-set.json, tools/gate-entries/**, tools/local-limits.mjs, tools/capped.mjs, tools/cargo.mjs, tools/mn.mjs, tools/quick.mjs, tools/push.mjs, tools/git-hooks/**, tools/quick.test.mjs, tools/push.test.mjs, tools/local-limits.test.mjs, tools/quick-checks.json, .github/scripts/policy/local-tools.test.mjs, .github/scripts/policy/pins.mjs, .github/CODEOWNERS, CLAUDE.md, briefs/gate-tools-from-main.md, briefs/archive/gate-tools-from-main.md]
+affectedFiles: [tools/gates.mjs, tools/gate-set.json, tools/gate-entries/**, tools/local-limits.mjs, tools/capped.mjs, tools/cargo.mjs, tools/mn.mjs, tools/quick.mjs, tools/push.mjs, tools/git-hooks/**, tools/quick.test.mjs, tools/push.test.mjs, tools/local-limits.test.mjs, tools/quick-checks.json, package.json, package-lock.json, .github/scripts/policy/local-tools.test.mjs, .github/scripts/policy/pins.mjs, .github/CODEOWNERS, CLAUDE.md, briefs/gate-tools-from-main.md, briefs/archive/gate-tools-from-main.md]
 protectedFiles: [spec/**, compiler/**, .github/workflows/**, .claude/settings.json]
 ---
 
@@ -130,6 +130,11 @@ The command admits only https however it is started, and a test holds that no ar
 - The command is written in CLAUDE.md's Verification section, Norman's file, with the URL in it literally. The tools print the same line. A test holds the printed line equal to CLAUDE.md's, and its URL equal to the URL in `gate-set.json`.
 - The command runs only `git ls-remote` at that URL. It writes the set of the commit the remote names, read from that commit's objects with `--no-replace-objects`, into a staging directory, and starts the staged refresher with no argument.
 - That refresher takes the lock and confirms the commit itself, at the URL its own `gate-set.json` declares, which must be https and which the test on main holds equal to CLAUDE.md's. It then installs as above, moving a bad `<commit>/` aside.
+
+**The rollout.** This round lands in two pull requests, so that a bootstrap that fails after the merge locks no session out.
+- The first lands everything but CLAUDE.md's change. While no copy is installed, and only then, quick, cargo and mn print the bootstrap line and Norman's two lines as a loud warning and keep today's working-tree gates, which is exactly what main does before this round.
+- Norman then runs the bootstrap and writes his two lines, and a session builds, tests and pushes through the copy.
+- The second pull request, triggered by that, removes the fallback, so that no copy means refuse, and lands CLAUDE.md's change, so that CLAUDE.md never describes a state that is not live. The invariants below hold from it on.
 
 **How it is replaced.**
 - **The lock.** It is an open handle that the operating system releases when its holder ends, however it ends, so a kill, Ctrl-C or a reset leaves it free.

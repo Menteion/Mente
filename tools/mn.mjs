@@ -15,9 +15,12 @@ import { BUILD, PROBE, acquireSlot, minutesFrom, refreshGates, requireHooks, req
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { args, limits } = minutesFrom(process.argv.slice(2), PROBE);
-if (!refreshGates({ cwd: ROOT })) process.exit(2);
-if (!requireRunner()) process.exit(2);
-if (!requireHooks({ cwd: ROOT })) process.exit(2);
+const gates = refreshGates({ cwd: ROOT });
+if (!gates) process.exit(2);
+// FALLBACK: with no copy installed, today's working-tree gates (local-limits.mjs, refreshGates).
+const fallback = gates === "fallback";
+if (!requireRunner({ fallback })) process.exit(2);
+if (!requireHooks({ cwd: ROOT, fallback })) process.exit(2);
 const slot = acquireSlot(`mn ${args.join(" ")} (tools/mn.mjs)`);
 let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });
 if (status === 0) {
