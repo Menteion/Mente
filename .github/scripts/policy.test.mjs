@@ -1283,7 +1283,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
   [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
   [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
-  [".github/scripts/fuzz-summary.mjs", "e3265e708b8b8d29918fcf4badd5a37d8c7c921dd55e6e5865849e472f268a92"],
+  [".github/scripts/fuzz-summary.mjs", "5f434a6b1c82003c27e5b531609d2877e0e8c61628bd49261f0f045df4616fea"],
   [".github/scripts/nightly-alarm.mjs", "4d6a389e64a183ea0935fee1060d02a02a68e3dd40f2b7b6bd5c0daa47e1da59"],
   [".github/scripts/lib/nightly-alarm.mjs", "6ec77c6bcf004da4da9896d70839f1b843e7c0ba44f324c18231dc697741a5df"],
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
@@ -1299,7 +1299,7 @@ const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "4a063502dbf7ecc735f0f95252093bde207ec5f3f43e6131708e127c7013eb9a"],
+  [".github/scripts/policy-run.test.mjs", "957afa3d0ef5f14ee4880e38589a46acf8e694b1b943e05c07f83b8a3e4bd1e8"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
