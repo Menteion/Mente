@@ -60,7 +60,7 @@ export const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "8594d53e73f3b014fff01ee9cc1014fa5575a9b3ee9b102fae33c03754b0f6af"],
-  [".github/scripts/policy-run.test.mjs", "843fc63a7c46ccd88e35be257623276b630af64d1ef22b1f5e4e80e6b4318e79"],
+  [".github/scripts/policy-run.test.mjs", "c86e485a5efc9933012f768e0737fea66b772d032b11a2304766760497920348"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -71,8 +71,8 @@ export const PINNED_FILES = new Map([
   // workflow with.
   [".github/scripts/build-time-code.mjs", "874280f8818d786a0c6f0bca3a60ced4ae397c0f13169a1244303d4a436487ec"],
   [".github/scripts/lib/build-time-code.mjs", "99b866cb2014b1a97c770819e4707fa06ef203da6bb7e2efc7c6cc3b65517b6a"],
-  [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "24e6f79d3aabe211f69dc0e1cf5022360189b26ebe2f91aac68c5129f304dd53"],
+  [".github/scripts/mutants-floor.mjs", "4f1dfe8d84f6356750a2dbeb1af44b99a892f31a837be031f1df70a7783e01f7"],
+  [".github/scripts/lib/mutants-floor.mjs", "a72471818940af8684ce20935ebf5b8bae4c59e4c324e602ce93cfd7e6b42628"],
   [".github/scripts/watch.mjs", "55168acde1c9d16a823db62389483640e24e745dfd39ad6e984cf88c3200a7d3"],
   [".github/scripts/lib/watch.mjs", "895bedf2e57eb8dd3fc327a33d34e2adedf2770df18de599fae304a6819fe502"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -112,8 +112,8 @@ export const PINNED_FILES = new Map([
 export const PINNED_JOBS = new Map([
   ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
   ["mutants.yml#plan", "14fabd6f9c7a34039d9141bae099e8e77f9d67b7df429a15deb4876e30f26b77"],
-  ["mutants.yml#shard", "a10174bc0a000672924a2ff4e155565fbc113cfb91a6473da3c0d699afcb719c"],
-  ["mutants.yml#aggregate", "9784e480c705dbdbf7f3d68f3c9d055e7150af94b8ca2630444fbe87cb09f77f"],
+  ["mutants.yml#shard", "164e7b293cd8e63e7f111c3ab3198af5e6d2a0d6be1f8050383d1efb1804245d"],
+  ["mutants.yml#aggregate", "d28c3025bb530193ffe0e7ec7daacc339fada4a698992db040f5f61b5a881e6b"],
   ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],

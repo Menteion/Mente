@@ -228,17 +228,22 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
         # cargo-mutants lists, by the exact regex of each name the plan dealt this shard, the
-        # mutants the run below will test: they must be the names dealt, each as often.
+        # mutants the run below will test: they must be the names dealt, each as often. The floor
+        # prints one line a difference, and a line feed alone when there is none: the lines are
+        # counted, as every count the floor reads, never the file's size.
         run: |
-          case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard is not a number: '$SHARD'"; exit 1 ;; esac
+          count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
+          case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard the matrix gave is no number"; exit 1 ;; esac
           shard=()
           while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "mutants-plan/plan/shard-$SHARD.re"
           if [ "${#shard[@]}" -eq 0 ]; then echo "::error::the plan dealt shard $SHARD no mutant"; exit 1; fi
           cargo mutants "${shard[@]}" --list --json > shard-mutants.json
           node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
-          if [ -s unlisted.txt ]; then
+          unlisted=$(grep -c . unlisted.txt || true)
+          count "$unlisted" "the mutants listed otherwise than the plan dealt them"
+          if [ "$unlisted" -gt 0 ]; then
             { echo "## Mutants listed otherwise than the plan dealt them"; echo '```text'; cat unlisted.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::cargo-mutants lists this shard's mutants otherwise than the plan dealt them"
+            echo "::error::cargo-mutants lists $unlisted of this shard's mutants otherwise than the plan dealt them"
             exit 1
           fi
           /usr/bin/bash .github/scripts/tools.sh verify
@@ -262,7 +267,7 @@ jobs:
           . .github/scripts/limits.sh
           # Every count the floor reads must be a number: an empty one fails, never compares.
           count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
-          case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard is not a number: '$SHARD'"; exit 1 ;; esac
+          case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard the matrix gave is no number"; exit 1 ;; esac
           shard=()
           while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "mutants-plan/plan/shard-$SHARD.re"
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
@@ -372,7 +377,7 @@ jobs:
               if [ "$COUNT" != 0 ] || [ "$SHARDS" != skipped ]; then fail "the plan found nothing to mutate, and counts $COUNT shards, whose result is $SHARDS"; fi
               pass "nothing to mutate: the diff changes no line where a mutant lies" ;;
             too-large)
-              fail "the diff's mutants need $NEEDED shards at the plan's time for each, more than a run takes (.github/scripts/lib/mutants-floor.mjs): split the pull request" ;;
+              fail "the diff's mutants need $NEEDED shards at the plan's time for each, which a run cannot give (the plan's summary says why; .github/scripts/lib/mutants-floor.mjs): split the pull request" ;;
             *)
               fail "the plan gave no reason the aggregate knows" ;;
           esac

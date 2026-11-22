@@ -249,8 +249,9 @@ export function nameProblems(assigned, ran) {
 /// mutant, built beforehand, with BUILD_SECONDS for its build, stands for each mutant: the time of
 /// one that no test catches, which runs every test, as the baseline did, and fails the run; one a
 /// test catches stops at that test, and an unviable one at its build. The run takes as many shards
-/// as that estimate needs at SHARD_MINUTES each, and none above MAX_SHARDS: the plan then refuses
-/// it. The mutants are dealt round-robin in the list's order, all
+/// as that estimate needs at SHARD_MINUTES each, and none above MAX_SHARDS, nor more than it has
+/// names: the plan then refuses it, since one name's mutants alone would outlast a shard's time
+/// and a shard would stand empty (the review of 560ccd9). The mutants are dealt round-robin in the list's order, all
 /// of one name to one shard, since a shard runs its share by an exact regex of each name: a slice
 /// of a list ordered by file put the slowest files in one shard (PR 158's run 43865236938: 226
 /// minutes against 40; PR 191's run 44959802577: 353 against 162).
@@ -261,6 +262,7 @@ export function planShards(mutants, seconds) {
   if (needed > MAX_SHARDS) return { reason: "too-large", needed, shards: [] };
   const byName = new Map();
   for (const m of mutants) byName.set(m.name, [...(byName.get(m.name) ?? []), m]);
+  if (needed > byName.size) return { reason: "too-large", needed, shards: [] };
   const shards = Array.from({ length: needed }, () => []);
   [...byName.values()].forEach((group, k) => shards[k % needed].push(...group));
   // Every mutant of the run lies in exactly one shard.
@@ -518,11 +520,28 @@ export function main(args) {
       fs.writeFileSync(`${dir}/shard-${k}.json`, `${JSON.stringify(names)}\n`);
       fs.writeFileSync(`${dir}/shard-${k}.re`, `${[...new Set(names)].map(exactRegex).join("\n")}\n`);
     }
+    // The partition as the shards will read it: the directory holds the shards' files and nothing
+    // else, which a shard could read as its own; each shard's names, read once more, hold every
+    // mutant of the run in exactly one; and each shard's regexes are those of its names.
+    const onDisk = fs.readdirSync(dir).sort();
+    const want = plan.shards.flatMap((_, k) => [`shard-${k}.json`, `shard-${k}.re`]).sort();
+    if (onDisk.join("\n") !== want.join("\n")) throw new Error(`${dir} holds ${onDisk.join(", ")}, not the files of ${plan.shards.length} shards`);
+    const dealt = plan.shards.map((_, k) => dealtNames(read(`${dir}/shard-${k}.json`)));
+    const written = nameProblems(
+      plan.reason === "sharded" ? run.map((m) => m.name) : [],
+      dealt.flat(),
+    );
+    if (written.length > 0) throw new Error(`the shards written do not hold the run's mutants, each once: ${written.join("; ")}`);
+    for (const [k, names] of dealt.entries()) {
+      if (names.length === 0) throw new Error(`shard ${k} was dealt no mutant`);
+      const regexes = read(`${dir}/shard-${k}.re`).split("\n").filter((l) => l !== "");
+      if (regexes.join("\n") !== [...new Set(names)].map(exactRegex).join("\n")) throw new Error(`shard ${k}'s regexes are not those of its names`);
+    }
     const count = plan.reason === "sharded" ? plan.needed : 0;
     const said = {
       sharded: `${run.length} mutants at ${seconds} s of tests and ${BUILD_SECONDS} s of build each need ${count} shard(s) of ${SHARD_MINUTES} minutes at most`,
       "no-mutants": "the diff changes no line where a mutant lies",
-      "too-large": `${run.length} mutants at ${seconds} s of tests and ${BUILD_SECONDS} s of build each need ${plan.needed} shards of ${SHARD_MINUTES} minutes, more than the ${MAX_SHARDS} a run takes: split the pull request`,
+      "too-large": `${run.length} mutants at ${seconds} s of tests and ${BUILD_SECONDS} s of build each need ${plan.needed} shards of ${SHARD_MINUTES} minutes, ${plan.needed > MAX_SHARDS ? `more than the ${MAX_SHARDS} a run takes` : "more than the run has names, so one name's mutants alone outlast a shard's time"}: split the pull request`,
     }[plan.reason];
     fs.writeFileSync(`${dir}/summary.md`, `Mutants plan: ${said}.\n`);
     return [`reason=${plan.reason}`, `count=${count}`, `shards=${JSON.stringify(plan.shards.map((_, k) => k))}`, `needed=${plan.needed}`].join("\n");

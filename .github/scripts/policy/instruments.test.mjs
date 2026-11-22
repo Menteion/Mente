@@ -39,7 +39,9 @@ export function watchProblems(file, doc, id, job, names, sections, required) {
   const all = steps(job);
   const where = `${file}, job ${id}`;
   if (!hasWatch(job)) {
-    const planned = needsOf(job).some((need) => hasWatch(doc.jobs?.[need] ?? {}));
+    // It reads the plan's decision, which the plan gives as its watch step's own output.
+    const reads = new Set(steps(job).flatMap((s) => Object.values(s.env ?? {}).map(String)));
+    const planned = needsOf(job).some((need) => hasWatch(doc.jobs?.[need] ?? {}) && doc.jobs[need].outputs?.run === "${{ steps.watch.outputs.run }}" && reads.has(`\${{ needs.${need}.outputs.run }}`));
     if (sections.has(file) && names.some((n) => required.has(n)) && !planned) found.push(`${where}: a required job of an instrument workflow with no watch step, and no job it needs holds one`);
     return found;
   }
@@ -79,6 +81,10 @@ check("every instrument workflow decides at its first step, and every later step
     ["no needs", doc, Object.fromEntries(Object.entries(aggregate.job).filter(([k]) => k !== "needs"))],
     ["needs that name only the shards", doc, { ...aggregate.job, needs: ["shard"] }],
     ["a need that is no job", doc, { ...aggregate.job, needs: ["gone"] }],
+    // The review of 560ccd9: the plan's decision read through an output bound elsewhere, or not
+    // read at all.
+    ["a plan whose run output is no watch's", { ...doc, jobs: { ...doc.jobs, plan: { ...doc.jobs.plan, outputs: { ...doc.jobs.plan.outputs, run: "true" } } } }, aggregate.job],
+    ["the plan's decision unread", doc, { ...aggregate.job, steps: steps(aggregate.job).map((s) => ({ ...s, env: Object.fromEntries(Object.entries(s.env ?? {}).filter(([k]) => k !== "RUN")) })) }],
   ]) {
     assert.ok(verdict(d, "aggregate", j, aggregate.names).length > 0, `a required job with ${what} passes without a watch`);
   }

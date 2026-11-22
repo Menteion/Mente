@@ -358,6 +358,33 @@ const AGGREGATE_IF = "always()";
 /// needs, each an expression of its own.
 const AGGREGATE_ENV = /^\$\{\{ (github\.event_name|needs\.([\w-]+)\.(result|outputs\.[\w-]+)) \}\}$/;
 
+/// The one job-level condition each job an aggregate needs may carry, by workflow and job: a job
+/// with none runs whenever the aggregate's workflow does (the review of 560ccd9: the shards'
+/// condition was held by the pin alone).
+const PART_JOB_IF = new Map([["mutants.yml#shard", "needs.plan.outputs.run == 'true' && needs.plan.outputs.count != '0'"]]);
+
+/// Why a job an aggregate needs could let the aggregate pass with less checked: it may continue on
+/// error, which reports success for a failed job, or it runs under a condition other than its
+/// PART_JOB_IF entry, or under one where it has none.
+export function partProblems(key, job) {
+  const found = [];
+  if ("continue-on-error" in job) found.push(`${key}: a job a required aggregate needs may continue on error, and so report success when it failed`);
+  const held = PART_JOB_IF.get(key);
+  if ("if" in job ? normalize(job.if) !== held : held !== undefined) found.push(`${key} runs if: ${job.if ?? "(none)"}, where the policy holds ${held ?? "no condition"} (PART_JOB_IF)`);
+  return found;
+}
+
+/// Why an output a job gives could say other than a step of it found: each output an aggregate
+/// reads is exactly `${{ steps.<id>.outputs.<the same key> }}` of a step of that job, never a value
+/// written into the workflow (the review of 560ccd9: `reason: no-mutants` and `count: "0"` written
+/// so passed every check but the pin).
+export function outputProblems(key, need, outputKey) {
+  const value = need?.outputs?.[outputKey];
+  const m = /^\$\{\{ steps\.([\w-]+)\.outputs\.([\w-]+) \}\}$/.exec(String(value ?? ""));
+  if (!m || m[2] !== outputKey || !steps(need ?? {}).some((s) => s.id === m[1])) return [`${key} gives outputs.${outputKey} as ${JSON.stringify(value ?? null)}, not \${{ steps.<id>.outputs.${outputKey} }} of a step of its own`];
+  return [];
+}
+
 /// Why a required job that needs others is no aggregate of its workflow, which passes only when
 /// they do: it runs if: always(); it needs every other job of its workflow; it is a name, a runner,
 /// a time limit and one step, with no matrix, container, services or defaults; and that step is a
@@ -384,6 +411,7 @@ export function aggregateProblems(key, doc, job) {
       const m = AGGREGATE_ENV.exec(String(value));
       if (!m || (m[2] !== undefined && !needs.includes(m[2]))) found.push(`${key} reads ${name}: ${value}, neither the event nor the result or an output of a job it needs`);
       else if (m[3] === "result") read.add(m[2]);
+      else if (m[3]?.startsWith("outputs.")) found.push(...outputProblems(`${file}#${m[2]}`, doc.jobs?.[m[2]], m[3].slice("outputs.".length)));
     }
     for (const need of needs) if (!read.has(need)) found.push(`${key} does not read the result of ${need}, which it needs`);
   }
@@ -419,6 +447,9 @@ check("every required check is one job that runs on every pull request and in th
     } else if ("if" in job) assert.equal(normalize(job.if), REQUIRED_JOB_IF, `${where}: a job-level if: could skip it`);
   }
   assert.ok(aggregates > 0, "the policy reads no aggregate, though Mutants in the diff is one");
+  // Every job an aggregate needs: no continue-on-error, and its condition the one the policy holds.
+  const named = new Set(jobs.filter((j) => j.names.some((n) => requiredChecks().includes(n))).map((j) => `${j.file}#${j.id}`));
+  for (const { file, id, job } of requiredJobs().filter((j) => !named.has(`${j.file}#${j.id}`))) assert.deepEqual(partProblems(`${file}#${id}`, job), []);
   // Planted, against the class "a required check that can pass unseen": the aggregate of Mutants
   // with !cancelled(), with no condition, missing a need, with a checkout, as an action, with a
   // matrix, reading a value from elsewhere, and leaving a need's result unread.
@@ -437,6 +468,31 @@ check("every required check is one job that runs on every pull request and in th
     ["a need's result unread", { ...aggregate, steps: [{ ...step, env: Object.fromEntries(Object.entries(step.env).filter(([, v]) => v !== "${{ needs.shard.result }}")) }] }],
   ]) {
     assert.ok(aggregateProblems("mutants.yml#aggregate", mutants, job).length > 0, `an aggregate with ${what} passes`);
+  }
+  // The review of 560ccd9's plants: the plan's outputs written into the workflow, or bound to a
+  // step it does not hold or to another key; the shards continuing on error, or under another
+  // condition or none.
+  const plan = mutants.jobs.plan;
+  for (const [what, outputs] of [
+    ["its reason and count written in", { ...plan.outputs, reason: "no-mutants", count: "0" }],
+    ["its watch's decision written in", { ...plan.outputs, run: "false" }],
+    ["an output of a step it does not hold", { ...plan.outputs, count: "${{ steps.gone.outputs.count }}" }],
+    ["an output of another key", { ...plan.outputs, count: "${{ steps.plan.outputs.needed }}" }],
+  ]) {
+    const planted = { ...mutants, jobs: { ...mutants.jobs, plan: { ...plan, outputs } } };
+    assert.ok(aggregateProblems("mutants.yml#aggregate", planted, aggregate).length > 0, `a plan with ${what} passes`);
+  }
+  const shard = mutants.jobs.shard;
+  assert.deepEqual(partProblems("mutants.yml#shard", shard), []);
+  assert.deepEqual(partProblems("mutants.yml#plan", plan), []);
+  for (const [what, key, job] of [
+    ["continue-on-error", "mutants.yml#shard", { ...shard, "continue-on-error": true }],
+    ["continue-on-error on the plan", "mutants.yml#plan", { ...plan, "continue-on-error": true }],
+    ["another condition", "mutants.yml#shard", { ...shard, if: "needs.plan.outputs.run == 'true'" }],
+    ["no condition", "mutants.yml#shard", Object.fromEntries(Object.entries(shard).filter(([k]) => k !== "if"))],
+    ["a condition where none is held", "mutants.yml#plan", { ...plan, if: "false" }],
+  ]) {
+    assert.ok(partProblems(key, job).length > 0, `a job an aggregate needs with ${what} passes`);
   }
 });
 

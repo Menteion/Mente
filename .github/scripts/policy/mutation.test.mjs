@@ -618,6 +618,10 @@ check("the plan deals every mutant of the run to one shard, as many shards as th
   assert.deepEqual(dealt.shards.map((s) => s.map((x) => x.name)), [["m0", "m3", "m6", "m9"], ["m1", "m4", "m7"], ["m2", "m5", "m8"]]);
   const twins = planShards([m("x"), m("y"), m("x"), m("z")], Math.ceil((SHARD_MINUTES * 60 * 2) / 4) - BUILD_SECONDS);
   assert.deepEqual(twins.shards.map((s) => s.map((x) => x.name)), [["x", "x", "z"], ["y"]], "two mutants of one name in two shards, each listing both by its regex");
+  // More shards than names would leave one empty, since one name's mutants alone outlast a
+  // shard's time: refused (the review of 560ccd9).
+  assert.deepEqual(planShards([m("x"), m("x"), m("x")], 4000), { reason: "too-large", needed: 2, shards: [] }, "three mutants of one name over two shards");
+  assert.deepEqual(planShards([m("a")], SHARD_MINUTES * 60), { reason: "too-large", needed: 2, shards: [] }, "one mutant longer than a shard's time");
   // More than MAX_SHARDS refuse the run, with the shards it would need; at MAX_SHARDS it runs.
   const most = Math.floor((MAX_SHARDS * SHARD_MINUTES * 60) / (100 + BUILD_SECONDS));
   assert.equal(planShards(names(most), 100).needed, MAX_SHARDS);

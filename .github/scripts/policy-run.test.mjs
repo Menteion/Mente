@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 18;
+const FLOOR = 19;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1089,6 +1089,13 @@ check("mutants-floor.mjs plan writes each shard's names and exact regexes and th
     assert.deepEqual(JSON.parse(shard(4, "json")), ["a.rs:9:1: replace j (x|y) with ()"]);
     assert.equal(shard(4, "re"), "^a\\.rs:9:1: replace j \\(x\\|y\\) with \\(\\)$\n", "the regex matches the one name exactly");
     assert.match(fs.readFileSync(path.join(dir, "plan", "summary.md"), "utf8"), /5 mutants at 10770 s of tests and 30 s of build each need 5 shard\(s\)/);
+    // A plan into a directory that already holds files, which a shard could read as its own, fails
+    // when it reads its shards back; so does one where a mutant alone outlasts a shard's time,
+    // leaving a shard empty.
+    assert.equal(floor("plan", "diff.json", "deleted.json", "10770", "plan").status, 1, "a plan into a directory of files passes");
+    const long = floor("plan", "diff.json", "deleted.json", "11000", "long");
+    assert.equal(long.stdout, "reason=too-large\ncount=0\nshards=[]\nneeded=6\n");
+    assert.match(fs.readFileSync(path.join(dir, "long", "summary.md"), "utf8"), /more than the run has names/);
     // Nothing to mutate, a run past sixteen shards, and a time that is no count.
     write("none.json", "");
     assert.equal(floor("plan", "none.json", "none.json", "100", "empty").stdout, "reason=no-mutants\ncount=0\nshards=[]\nneeded=0\n");
@@ -1099,7 +1106,9 @@ check("mutants-floor.mjs plan writes each shard's names and exact regexes and th
     // assigned: against cargo-mutants' list for the shard, and against its run's outcomes.
     write("dealt.json", ["x", "y", "y"]);
     write("listed.json", [m("y"), m("x"), m("y")]);
-    assert.equal(floor("assigned", "dealt.json", "listed.json").stdout, "\n");
+    // Nothing at all when the names agree, not a line feed alone: a file of the output holds a
+    // line only for a finding (the review of 560ccd9).
+    assert.equal(floor("assigned", "dealt.json", "listed.json").stdout, "");
     write("short.json", [m("x"), m("y")]);
     assert.equal(floor("assigned", "dealt.json", "short.json").stdout, "y: dealt 1 more time(s) than it ran\n");
     fs.mkdirSync(path.join(dir, "out"));
@@ -1179,6 +1188,109 @@ check("Mutants in the diff passes only when the plan succeeded and every shard i
       assert.equal(r.status, 1);
       assert.doesNotMatch(r.out, /^::warning::/m, `${JSON.stringify(values)} reaches the log as a command`);
     }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("a shard's listing and its run hold it to the names the plan dealt, as mutants.yml runs them", () => {
+  // The two steps of a shard that read the plan, under bash, as the workflow runs them, in a tree
+  // of the floor's own scripts, with stand-ins for cargo, the sandbox's script and the tools'
+  // check. The review of 560ccd9 found every shard failing on a listing that matched, since a line
+  // feed alone counted as a difference; no test ran these steps, and the pull request's own run
+  // dealt no mutant.
+  const job = parseYaml(read(`${WORKFLOWS}/mutants.yml`)).jobs.shard;
+  const listing = job.steps.find((s) => s.name === "This shard's mutants, as the plan dealt them, before any code of the change runs");
+  const mutate = job.steps.find((s) => s.name === "Mutate this shard's mutants");
+  assert.ok(listing && mutate, "mutants.yml's shard has no listing step or no step that mutates, by those names");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mutants-shard-"));
+  try {
+    const put = (file, text) => {
+      fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+      fs.writeFileSync(path.join(dir, file), text);
+    };
+    for (const f of [".github/scripts/mutants-floor.mjs", ".github/scripts/lib/mutants-floor.mjs"]) put(f, read(f));
+    put(".github/scripts/tools.sh", "exit 0\n");
+    put(".github/scripts/test-sandbox.sh", 'echo "test-sandbox.sh $*" >> "$RUNNER_TEMP/sandbox.log"\n');
+    put(".github/scripts/limits.sh", ": limits\n");
+    // cargo lists what STUB_LIST holds, and a run of mutants writes STUB_RUN's outcomes into its
+    // --output directory, each caught, with a log as nextest leaves it.
+    put(
+      "bin/cargo",
+      [
+        "#!/usr/bin/env bash",
+        'case " $* " in',
+        '  *" --list "*) cat "$STUB_LIST" ;;',
+        '  *) out=; while [ "$#" -gt 0 ]; do if [ "$1" = --output ]; then out=$2; fi; shift; done',
+        '     mkdir -p "$out/mutants.out/log"; node "$STUB_RUN" "$out/mutants.out" ;;',
+        "esac",
+        "",
+      ].join("\n"),
+    );
+    fs.chmodSync(path.join(dir, "bin", "cargo"), 0o755);
+    put(
+      "stub-run.mjs",
+      [
+        'import fs from "node:fs";',
+        "const out = process.argv[2];",
+        'const names = JSON.parse(fs.readFileSync(process.env.STUB_TESTED, "utf8"));',
+        "const log = \"info: using target runner `/opt/mente-test-sandbox/test-sandbox run` defined by environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`\\n        FAIL [   0.004s] mente-syntax tests::x\\n\";",
+        "const outcomes = names.map((name, k) => {",
+        "  fs.writeFileSync(`${out}/log/m${k}.log`, log);",
+        '  return { scenario: { Mutant: { name, file: "compiler/a/src/lib.rs" } }, summary: "CaughtMutant", log_path: `log/m${k}.log`, phase_results: [{ phase: "Build", process_status: "Success" }, { phase: "Test", process_status: { Failure: 100 } }] };',
+        "});",
+        'fs.writeFileSync(`${out}/outcomes.json`, JSON.stringify({ outcomes: [{ scenario: "Baseline", summary: "Success" }, ...outcomes] }));',
+        'fs.writeFileSync(`${out}/caught.txt`, names.map((n) => `${n}\\n`).join(""));',
+        'for (const f of ["missed.txt", "timeout.txt", "unviable.txt"]) fs.writeFileSync(`${out}/${f}`, "");',
+        "",
+      ].join("\n"),
+    );
+    // The plan, by the real command: two mutants at a baseline that gives them one shard.
+    const m = (name) => ({ name, file: "compiler/a/src/lib.rs", function: null, span: { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } } });
+    const both = [m("a.rs:1:1: replace f -> bool with true"), m("a.rs:2:1: replace g (x|y) with ()")];
+    put("diff.json", JSON.stringify(both));
+    put("none.json", "");
+    const planned = spawnSync(process.execPath, [".github/scripts/mutants-floor.mjs", "plan", "diff.json", "none.json", "100", "mutants-plan/plan"], { cwd: dir, encoding: "utf8", timeout: 30000 });
+    assert.equal(planned.status, 0, planned.stderr);
+    assert.match(planned.stdout, /^count=1$/m);
+    const posix = (p) => p.replace(/\\/g, "/");
+    const run = (script, lists) => {
+      put("list.json", JSON.stringify(lists.listed ?? both));
+      put("tested.json", JSON.stringify((lists.tested ?? both).map((x) => x.name)));
+      fs.rmSync(path.join(dir, "runner"), { recursive: true, force: true });
+      fs.mkdirSync(path.join(dir, "runner"));
+      const env = {
+        ...process.env,
+        PATH: `${path.join(dir, "bin")}${path.delimiter}${process.env.PATH}`,
+        SHARD: lists.shard ?? "0",
+        RUNNER_TEMP: posix(path.join(dir, "runner")),
+        GITHUB_STEP_SUMMARY: posix(path.join(dir, "summary.md")),
+        STUB_LIST: posix(path.join(dir, "list.json")),
+        STUB_RUN: posix(path.join(dir, "stub-run.mjs")),
+        STUB_TESTED: posix(path.join(dir, "tested.json")),
+      };
+      const r = spawnSync(bashPath(), ["-e", "-c", script], { cwd: dir, encoding: "utf8", env, timeout: 60000 });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    // The listing: the names dealt, each once, pass; one left out, or one beside them, fails.
+    const ok = run(listing.run, {});
+    assert.equal(ok.status, 0, `a listing of exactly the names dealt fails: ${ok.out}`);
+    const short = run(listing.run, { listed: both.slice(0, 1) });
+    assert.equal(short.status, 1, `a listing short of a name passes: ${short.out}`);
+    assert.match(short.out, /::error::cargo-mutants lists 1 of this shard's mutants otherwise than the plan dealt them/);
+    const extra = run(listing.run, { listed: [...both, m("a.rs:3:1: delete ! in h")] });
+    assert.equal(extra.status, 1, "a listing with a name beside those dealt passes");
+    const bad = run(listing.run, { shard: "0\n::warning::planted" });
+    assert.equal(bad.status, 1);
+    assert.doesNotMatch(bad.out, /^::warning::/m, "the matrix's value reaches the log as a command");
+    // The run: every name dealt tested passes, with the sandbox's count of the mutants caught;
+    // one left untested fails.
+    const tested = run(mutate.run, {});
+    assert.equal(tested.status, 0, `a run that tested exactly the names dealt fails: ${tested.out}`);
+    assert.match(fs.readFileSync(path.join(dir, "runner", "sandbox.log"), "utf8"), /^test-sandbox\.sh ran 2$/m);
+    const untested = run(mutate.run, { tested: both.slice(1) });
+    assert.equal(untested.status, 1, `a run that left a dealt name untested passes: ${untested.out}`);
+    assert.match(untested.out, /::error::1 of this shard's mutants were tested otherwise than the plan dealt them/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
