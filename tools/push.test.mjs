@@ -9,14 +9,14 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PASSED } from "./local-limits.mjs";
-import { QUICK, TREE_RUNNER, prePush } from "./push.mjs";
+import { LOCK_FD_VARIABLE, PASSED, TREE_RUNNER, blobId, gateEnv, gitLocations, systemGit, takeLock } from "./local-limits.mjs";
+import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
 const GUARD = fileURLToPath(new URL("./push-guard.mjs", import.meta.url));
@@ -434,5 +434,157 @@ test("the settings refuse the ways around the hook, and only those", () => {
     const r = spawnSync(process.execPath, [GUARD], { input, encoding: "utf8" });
     assert.equal(r.status, 2, input);
     assert.match(r.stderr, /the push guard (could not read|found no command)/);
+  }
+});
+
+
+// The gates' processes (briefs/gate-tools-from-main.md, "How the refresher's processes are run").
+
+const LIMITS = new URL("./local-limits.mjs", import.meta.url).href;
+
+test("the gates' environment drops git's, node's and the certificate variables, and closes the system and user configuration", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-env-"));
+  try {
+    const rewrite = '[url "https://elsewhere.invalid/"]\n\tinsteadOf = https://example.invalid/\n';
+    fs.writeFileSync(path.join(dir, "global"), rewrite);
+    fs.mkdirSync(path.join(dir, "home"));
+    fs.writeFileSync(path.join(dir, "home", ".gitconfig"), rewrite);
+    const empty = path.join(dir, "empty");
+    fs.mkdirSync(empty);
+    const home = path.join(dir, "home");
+    const given = { ...process.env, GIT_CONFIG_GLOBAL: path.join(dir, "global"), git_dir: "x", NODE_OPTIONS: "--require=x", node_path: "x", SSL_CERT_FILE: "x", ssl_cert_dir: "x", CURL_CA_BUNDLE: "x", HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: home, KEPT: "1" };
+    const env = gateEnv(given);
+    for (const key of Object.keys(env)) assert.doesNotMatch(key, /^(NODE_|SSL_CERT_FILE$|SSL_CERT_DIR$|CURL_CA_BUNDLE$|GIT_(?!CONFIG_NOSYSTEM$|CONFIG_GLOBAL$|TERMINAL_PROMPT$))/i, key);
+    assert.equal(env.KEPT, "1");
+    assert.deepEqual([env.GIT_CONFIG_NOSYSTEM, env.GIT_CONFIG_GLOBAL, env.GIT_TERMINAL_PROMPT], ["1", "/dev/null", "0"]);
+    const git = systemGit();
+    assert.ok(git && path.isAbsolute(git), "no git of the list is found on this machine");
+    const url = "https://example.invalid/a.git";
+    const ask = (e) => spawnSync(git, ["ls-remote", "--get-url", "--", url], { cwd: empty, env: { ...e, GIT_CEILING_DIRECTORIES: dir }, encoding: "utf8" });
+    // A positive control: the same configuration, open, rewrites the URL.
+    assert.equal(ask(given).stdout.trim(), "https://elsewhere.invalid/a.git", "the control did not rewrite, so this case proves nothing");
+    const closed = ask(env);
+    assert.equal(closed.status, 0, closed.stderr);
+    assert.equal(closed.stdout.trim(), url);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("git is looked for by absolute path in a fixed list, never on PATH", () => {
+  const local = "C:/Users/someone/AppData/Local";
+  const list = gitLocations({ PATH: "/nowhere", LOCALAPPDATA: local });
+  assert.ok(list.length > 0 && list.every((at) => path.isAbsolute(at)));
+  assert.deepEqual(gitLocations({ PATH: "/elsewhere", LOCALAPPDATA: local }), list, "the list depends on PATH");
+  if (process.platform === "win32") assert.deepEqual(list, ["C:/Program Files/Git/cmd/git.exe", `${local}/Programs/Git/cmd/git.exe`]);
+  else assert.deepEqual(list, ["/usr/bin/git"]);
+});
+
+test("a blob's id is git's, for any bytes, line ends kept as they are", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "blob-"));
+  try {
+    for (const bytes of [Buffer.from(""), Buffer.from("a\r\nb\r\n"), Buffer.from([0, 255, 13, 10, 13])]) {
+      const file = path.join(dir, "f");
+      fs.writeFileSync(file, bytes);
+      assert.equal(blobId(bytes), execFileSync(systemGit(), ["hash-object", "--no-filters", file], { env: gateEnv(), encoding: "utf8" }).trim());
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** The source of a node program that imports local-limits.mjs as `L`, then runs `code`. */
+const source = (code) => `import * as L from ${JSON.stringify(LIMITS)};\n${code}`;
+
+/** A node program of `code` (source), started with `options`. */
+const program = (code, options = {}) => spawn(process.execPath, ["--input-type=module", "-e", source(code)], { stdio: ["ignore", "pipe", "pipe"], ...options });
+
+/** The first line `child` writes, or a rejection with what it said before it ended. */
+const firstLine = (child) =>
+  new Promise((resolve, reject) => {
+    let out = "";
+    let err = "";
+    child.stdout.setEncoding("utf8").on("data", (d) => {
+      out += d;
+      if (out.includes("\n")) resolve(out.split("\n")[0]);
+    });
+    child.stderr.setEncoding("utf8").on("data", (d) => (err += d));
+    child.on("exit", (code) => reject(new Error(`ended with ${code} before a line: ${out}${err}`)));
+  });
+
+/** Resolves once `child` has ended. */
+const ended = (child) => new Promise((resolve) => (child.exitCode !== null || child.signalCode !== null ? resolve() : child.on("exit", resolve)));
+
+test("the lock is released when its holder is killed, and waits only its bound while held", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lock-"));
+  const file = path.join(dir, "lock");
+  const holder = program(`await L.takeLock(${JSON.stringify(file)}, { waitMs: 5000, label: "holder" }); console.log("held"); setInterval(() => {}, 1000);`);
+  try {
+    assert.equal(await firstLine(holder), "held");
+    const started = Date.now();
+    assert.equal(await takeLock(file, { waitMs: 400, label: "second" }), null, "a second holder took a held lock");
+    const waited = Date.now() - started;
+    assert.ok(waited >= 400 && waited < 3000, `the wait, ${waited} ms, was not held to its bound`);
+    holder.kill("SIGKILL");
+    await ended(holder);
+    const lock = await takeLock(file, { waitMs: 3000, label: "after" });
+    assert.ok(lock, "a killed holder left the lock taken");
+    lock.release();
+  } finally {
+    holder.kill("SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a lock handed down stays held after the hander ends, and a claim without it is not the lock", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lock-"));
+  const file = path.join(dir, "lock");
+  const other = path.join(dir, "other");
+  fs.writeFileSync(other, "");
+  // Each child says whether it holds the lock, and its pid, and stays.
+  const child = source(`process.stdout.write(String(L.inheritedLock(${JSON.stringify(file)})) + " " + process.pid + "\\n"); setInterval(() => {}, 1000);`);
+  // The hander takes the lock, starts one child with it handed down and another with only the
+  // variable and another file on the descriptor, says both answers, and ends. The children are
+  // detached, so that they outlive it: on Windows, libuv ends a child that is not when its parent
+  // ends, as an old refresher and the new one it starts end together.
+  const hander = program(`
+    const { spawn } = await import("node:child_process");
+    const fs = await import("node:fs");
+    const lock = await L.takeLock(${JSON.stringify(file)}, { waitMs: 5000, label: "hander" });
+    const start = (options) => new Promise((resolve) => {
+      const c = spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(child)}], options);
+      c.stdout.setEncoding("utf8").on("data", (d) => resolve(d.trim()));
+      c.unref();
+    });
+    const real = await start({ ...L.handDown(lock, ["ignore", "pipe", "ignore"], process.env), detached: true });
+    const fd = fs.openSync(${JSON.stringify(other)}, "r");
+    const claim = await start({ stdio: ["ignore", "pipe", "ignore", fd], env: { ...process.env, ${LOCK_FD_VARIABLE}: "3" }, detached: true });
+    console.log(real + " " + claim);
+    process.exit(0);
+  `);
+  let pids = [];
+  try {
+    const [realHeld, realPid, claimHeld, claimPid] = (await firstLine(hander)).split(" ");
+    pids = [Number(realPid), Number(claimPid)];
+    await ended(hander);
+    assert.equal(realHeld, "true", "the child the lock was handed to does not see it as held");
+    assert.equal(claimHeld, "false", "a claim with another file on the descriptor passed as the lock");
+    assert.equal(await takeLock(file, { waitMs: 400, label: "third" }), null, "the lock was free once its hander ended, though handed down");
+    process.kill(pids[0], "SIGKILL");
+    let lock = null;
+    for (let i = 0; i < 20 && !lock; i++) lock = await takeLock(file, { waitMs: 250, label: "after" });
+    assert.ok(lock, "the lock stayed taken after the child it was handed to was killed");
+    lock.release();
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Gone already.
+      }
+    }
+    hander.kill("SIGKILL");
+    // Windows frees a killed process's files a moment after it ends.
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
