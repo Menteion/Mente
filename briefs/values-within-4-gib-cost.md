@@ -1,7 +1,7 @@
 ---
 id: values-within-4-gib-cost
 status: deferred
-trigger: when stack-budget's fix of Tier 1's nested loops merges
+trigger: when pull request 215 merges
 type: chore
 affectedFiles: [compiler/mente-codegen/src/**, compiler/mente-mir/src/**, compiler/mente-cli/src/mir_run.rs, compiler/mente-cli/src/mir_run/differential.rs, briefs/values-within-4-gib-cost.md, briefs/archive/values-within-4-gib-cost.md]
 protectedFiles: [.github/**, CLAUDE.md, spec/**, compiler/mente-sema/**, compiler/mente-interp/**]
@@ -11,7 +11,7 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**, compiler/mente-sema/**, compile
 
 ## Intent
 
-`array_within_4_gib.mn`, `struct_within_4_gib.mn` and `enum_within_4_gib.mn` of the conformance suite each take as long on MIR and native code as many other programs together: about 45 s in the unit tests' build on a laptop, and about 100 s on the AArch64 runner, 55% of the stop the longer tests get (`.config/nextest.toml`). They were the critical path of the conformance suite's single test, at 63% of its stop on AArch64 on 2026-11-22, and are why its parts give them one of their own, the first group of `HEAVY` in `compiler/mente-cli/src/mir_run/differential.rs`. Each call passes a 64 KiB argument, `[65536]u8` or a struct or variant of that size, and MIR and native code copy it whole, as values are, through every step of the call: building the argument, the call itself, and native code's process per call. When this round is done, that cost is found at its root and removed there: by measuring where the time goes (MIR's interpreter, the lowering, Cranelift, or the native program's setup) and changing the path that spends it, never by fewer calls or a smaller argument in the programs. The programs then leave `HEAVY`, and their part holds its share of the rest. The likely owner is stack-budget, after its fix of Tier 1's nested loops.
+`array_within_4_gib.mn`, `struct_within_4_gib.mn` and `enum_within_4_gib.mn` of the conformance suite each take as long on MIR and native code as many other programs together: about 45 s in the unit tests' build on a laptop, and about 100 s on the AArch64 runner, 55% of the stop the longer tests get (`.config/nextest.toml`). They were the critical path of the conformance suite's single test, at 63% of its stop on AArch64 on 2026-11-22, and are why its parts give them one of their own, the first group of `HEAVY` in `compiler/mente-cli/src/mir_run/differential.rs`. Each call passes a 64 KiB argument, `[65536]u8` or a struct or variant of that size, and MIR and native code copy it whole, as values are, through every step of the call: building the argument, the call itself, and native code's process per call. When this round is done, that cost is found at its root and removed there: by measuring where the time goes (MIR's interpreter, the lowering, Cranelift, or the native program's setup) and changing the path that spends it, never by fewer calls or a smaller argument in the programs. The programs then leave `HEAVY`, and their part holds its share of the rest. Its owner is stack-budget, once its fix of Tier 1's nested loops has merged.
 
 ## Negative Scope
 
