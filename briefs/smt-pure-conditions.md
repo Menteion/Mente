@@ -40,5 +40,5 @@ When this round is done:
 
 - [x] The rule that refuses an impure condition, scrutinee, clause or operand is on main (pull request 196, E0236).
 - [ ] Each place the encoding evaluated such an expression with effects is listed in the pull request, with the code removed or turned into the assertion.
-- [ ] A test hands the encoding a condition that writes a binding: a tree the checker would refuse, built for the test, the way `test_a_check_that_loses_its_site_is_verified_less_not_moved` builds an encoder that loses sites. The export reports it as a defect and exits 1. The test fails with the assertion planted away.
+- [x] A test hands the encoding a condition that writes a binding: a tree the checker would refuse, built for the test, the way `test_a_check_that_loses_its_site_is_verified_less_not_moved` builds an encoder that loses sites. The export reports it as a defect and exits 1. The test fails with the assertion planted away.
 - [ ] The agreement tests find no disagreement, and the export's keys on the job's corpus, built on CI, match the base's. The comparison with the base shows no check verified less.

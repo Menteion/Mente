@@ -330,6 +330,9 @@ pub struct Encoding {
     pub cut_past_bound: bool,
     /// Some path is cut off at a construct the encoding lacks, anywhere in the function.
     pub cut_at_lacked: bool,
+    /// Each place where an expression the language requires pure changed a binding: a defect,
+    /// of the encoding or of the checker's rule (E0236), which the export fails on.
+    pub impure: Vec<Span>,
     /// The run of the inputs returns, on a path the encoding follows, without a trap.
     pub returns: T,
     /// The value it returns, where the function has one.
