@@ -97,13 +97,16 @@ const NEAR_LABEL = [
   new RegExp(`^[ \\t>#*_+-]*(?:\\*\\*|__)?[ \\t]*${NEAR_WORDS}[ \\t]*(?:\\*\\*|__)?[ \\t]*:`, "i"),
   new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]+|[-*+][ \\t]+|>[ \\t]*|\\*\\*|__)[ \\t>#*_+-]*${NEAR_WORDS}[ \\t]*(?:\\*\\*|__|#+)?[ \\t]*$`, "i"),
 ];
-/// The HTML blocks whose lines GitHub does not show as prose, started and ended as CommonMark starts
-/// and ends them: a comment, which it does not show, and the raw text of `<pre>`, `<script>`,
-/// `<style>` and `<textarea>`. Each starts at the start of a line, after at most three spaces, and
-/// runs to the line that holds its end, that line included.
+/// The HTML blocks whose lines GitHub does not show as prose: a comment, which it does not show, and
+/// the raw text of `<pre>`, `<script>`, `<style>` and `<textarea>`. Each starts, as CommonMark starts
+/// one, at the start of a line after at most three spaces, and runs to the line that holds its end,
+/// that line included. The end is the browser's, which ends the block where it shows text again: a
+/// comment at `-->` or `--!>`, and an element at its end tag closed in any form, `</pre>`, `</pre >`
+/// or `</PRE x>`; an end tag left open holds the lines after it (the CodeQL alert of d783a0e, bad
+/// HTML filtering: `--!>` read as no end).
 const HTML_BLOCKS = [
-  { start: /^ {0,3}<!--/, end: /-->/ },
-  { start: /^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i, end: /<\/(?:pre|script|style|textarea)>/i },
+  { start: /^ {0,3}<!--/, end: /--!?>/ },
+  { start: /^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i, end: /<\/(?:pre|script|style|textarea)(?:[\s/][^>]*)?>/i },
 ];
 
 /// The columns of `line`'s leading white space: a tab moves to the next multiple of four.

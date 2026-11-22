@@ -107,6 +107,12 @@ check("every pull request declares the root cause of what it fixes and whether t
   refused("```\n        ```\nRoot cause: quoted\n```", /declares neither/, "a closing fence more than three columns in, which closes nothing");
   ok("<pre>\nRoot cause: quoted\nNot a fix: quoted\n</pre>\nNot a fix: z", "the forms quoted in <pre>");
   ok("<PRE class=\"x\">Root cause: quoted</pre>\nNot a fix: z", "a <pre> closed on its own line");
+  // The block ends where the browser shows text again (the CodeQL alert of d783a0e).
+  ok("<!--\nRoot cause: quoted\n--!>\nNot a fix: z", "a comment ended by --!>");
+  ok("<pre>\nRoot cause: quoted\n</pre >\nNot a fix: z", "a <pre> ended by an end tag with a space in it");
+  ok("<pre>\nRoot cause: quoted\n</PRE x>\nNot a fix: z", "a <pre> ended by an end tag with more in it");
+  refused("<pre>\nquoted\n</pre\nNot a fix: held in the open end tag\n>", /declares neither/, "an end tag left open, whose next lines it holds");
+  refused("<pre>\nRoot cause: quoted\n</pres>\nNot a fix: z", /declares neither/, "an end tag of another element, which ends no <pre>");
   ok("> <!--\n> a quoted comment\nRoot cause: x\nRemoved at the root: y\n-->", "a comment in a block quote, which ends with the quote");
   ok("Not a fix: a change whose\nroot cause\nlies elsewhere, held by a\nguard\nof its own.", "a hard-wrapped line that is the words alone");
   // Planted, each refused with its own message (the Manager, 2026-11-22).

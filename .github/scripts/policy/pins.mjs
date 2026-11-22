@@ -81,7 +81,7 @@ export const PINNED_FILES = new Map([
   [".github/scripts/lib/action-pins.mjs", "f08a9cec14bea0adb5a077a2dc33a52b668868bcd6cc15de2691c57ad8e837dc"],
   [".github/scripts/yaml.test.mjs", "4dc4626a1c6ecb74f5c82f82d3994e6d477d30a7ac63b5e25b2b702665f9eab3"],
   [".github/scripts/lib/yaml.mjs", "4c06080bc480b996513b6410b0290e1bc74c569a5a898968af3e8b27cbd88e30"],
-  [".github/scripts/lib/commits.mjs", "4e367ec3f789b5aba74180a301fb171831193c5d66f16c5c10114dcdf4ddfe25"],
+  [".github/scripts/lib/commits.mjs", "0ac75bf9db3625fae54ddcb75fc1e31b68fb61389bd7747b56d637a9edb276a3"],
   [".github/scripts/commits.mjs", "33c4156781145f9c0a0e127fb99c304a85e1ed508e1321c4e56a3992ce6d4322"],
   // The body CLI, which the run tests spawn (the review of 5264a01).
   [".github/scripts/commits-body.mjs", "14b23c30b836a333ccc2664fbb4f7ac8063496722ff3f97b3f26f00f3c8bf497"],
