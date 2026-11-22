@@ -62,6 +62,12 @@ function withRemote(body) {
     git(work, "remote", "add", "origin", remote);
     git(work, "push", "-q", "origin", "main");
     git(work, "config", "core.hooksPath", HOOKS);
+    // The branch holds the hook from here on, as a branch with main merged in does; origin/main,
+    // one commit back, is from before it.
+    fs.mkdirSync(path.join(work, "tools", "git-hooks"), { recursive: true });
+    fs.writeFileSync(path.join(work, "tools", "git-hooks", "pre-push"), "#!/bin/sh\n");
+    git(work, "add", ".");
+    git(work, "commit", "-q", "-m", "the hook");
     const tree = (at, ref = "HEAD") => git(at, "rev-parse", `${ref}^{tree}`);
     /** Writes the record of a pass of `id` in the checkout `at`, as tools/quick.mjs does. */
     const pass = (at, id) => fs.writeFileSync(path.resolve(at, git(at, "rev-parse", "--git-path", PASSED)), `${id}\n`);
@@ -91,6 +97,12 @@ const sent = (r) => assert.equal(r.status, 0, r.words);
 
 test("a push sends only commits whose tree quick last passed in the checkout", () => {
   withRemote(({ work, run, git, tree, pass, push, commit, remoteHas }) => {
+    // A commit already on main passed the merge queue: a tag of it, or a branch at it, needs no
+    // record of its own.
+    git(work, "tag", "v1", "origin/main");
+    sent(push(work, "origin", "v1"));
+    git(work, "branch", "at-main", "origin/main");
+    sent(push(work, "origin", "at-main"));
     commit(work, "b.md", "b\n");
     refused(push(work, "origin", "main"), new RegExp(`no tree has passed the quick checks.*run ${QUICK}`));
     assert.notEqual(remoteHas("main"), git(work, "rev-parse", "HEAD"), "nothing reached the remote");
@@ -179,6 +191,11 @@ test("a merge in progress refuses, and each worktree is held to its own record",
     sent(push(other, "origin", "two"));
     commit(work, "m.md", "m\n");
     refused(push(work, "origin", "main"), /not the tree the quick checks last passed/);
+    // A branch from before the hook is told to merge main, not to run a quick that cannot help.
+    git(work, "checkout", "-q", "-b", "old", git(work, "rev-list", "--max-parents=0", "HEAD"));
+    commit(work, "old.md", "old\n");
+    pass(work, tree(work));
+    refused(push(work, "origin", "old"), /from before the pre-push hook.*merge main into this branch first/);
   });
 });
 
@@ -225,7 +242,7 @@ test("the settings refuse the ways around the hook, and only those", () => {
       assert.match(r.words, /^the push guard refused it: /);
     }
   }
-  for (const command of ["git push", "git push -u origin main", "git push -n origin main", "git status", "echo push", "git -c user.name=x push", "git config --get core.hooksPath", "git config get core.hooksPath", "git config user.name x", "git -c alias.st=status st", "git --git-dir .git status"]) {
+  for (const command of ["git push", "git push -u origin main", "git push -n origin main", "git status", "echo push", "git -c user.name=x push", "git config --get core.hooksPath", "git config get core.hooksPath", "git config core.hooksPath", "git config --file .git/config core.hooksPath", "git config --show-origin core.hooksPath", "git config user.name x", "git -c alias.st=status st", "git --git-dir .git status"]) {
     assert.deepEqual(guard(command), { status: 0, words: "" }, command);
   }
   const ws = spawnSync(process.execPath, [GUARD], { input: JSON.stringify({ tool_name: "Monitor", tool_input: { ws: { url: "wss://example.invalid" } } }), encoding: "utf8" });

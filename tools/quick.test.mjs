@@ -266,9 +266,47 @@ test("a file git does not compare is held to the tree whatever its name, one bey
     const listing = r.quick(["--list"]);
     assert.equal(listing.status, 0, listing.stderr);
     const lines = report(listing.stdout);
-    assert.match(lines[0], /^quick: the working tree differs from HEAD, in 0 entries/);
+    assert.match(lines[0], /^quick: the working tree differs from HEAD only in files git does not compare/);
     assert.ok(lines.includes("  h caf\u00e9.md"), lines.join("\n"));
   });
+});
+
+test("a run on a commit of main with nothing changed checks nothing and records HEAD's tree; a listing records none", () => {
+  withRepository((r) => {
+    r.git("update-ref", "refs/remotes/origin/main", "HEAD");
+    const listing = r.quick(["--list"]);
+    assert.equal(listing.status, 0, listing.stderr);
+    assert.match(listing.stdout, /nothing changed against origin\/main/);
+    assert.equal(r.passed(), null, "a listing records no tree");
+    const run = r.quick();
+    assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+    assert.match(run.stdout, /nothing changed against origin\/main/);
+    assert.equal(r.passed(), r.git("rev-parse", "HEAD^{tree}"));
+  });
+});
+
+test("the tools read the hooks of their own checkout, wherever they are run from", () => {
+  const ROOT = path.resolve(path.dirname(QUICK), "..");
+  const limits = new URL("./local-limits.mjs", import.meta.url).href;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "elsewhere-"));
+  try {
+    const other = path.join(dir, "other");
+    fs.mkdirSync(other);
+    execFileSync("git", ["init", "-q", other]);
+    const own = execFileSync(process.execPath, ["-e", `import(${JSON.stringify(limits)}).then((m) => console.log(m.hooksDir()))`], { cwd: ROOT, encoding: "utf8" }).trim();
+    for (const cwd of [dir, other]) {
+      const there = execFileSync(process.execPath, ["-e", `import(${JSON.stringify(limits)}).then((m) => console.log(m.hooksDir()))`], { cwd, encoding: "utf8" }).trim();
+      assert.equal(there, own, `hooksDir from ${cwd}`);
+      const cargo = spawnSync(process.execPath, [path.join(ROOT, "tools", "cargo.mjs"), "--version"], { cwd, encoding: "utf8" });
+      assert.doesNotMatch(cargo.stderr, /could not name the repository/, cwd);
+      assert.ok(!cargo.stderr.includes(other.replace(/\\/g, "/")) && !cargo.stderr.includes(other), `cargo.mjs from ${cwd} named that repository: ${cargo.stderr}`);
+    }
+    for (const tool of ["cargo.mjs", "mn.mjs"]) {
+      assert.match(fs.readFileSync(path.join(ROOT, "tools", tool), "utf8"), /requireHooks\(\)/, `${tool} asks for its own checkout's hooks`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a run from a subdirectory runs its checks from the repository's root", (t) => {

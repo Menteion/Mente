@@ -43,7 +43,7 @@ export const PASSED = "quick-passed";
  * review of #203); every checkout runs the main checkout's hook, whatever branch it holds, as
  * cargo's runner is the main checkout's tools/capped.mjs (runnerLine).
  */
-export function hooksDir(cwd = process.cwd()) {
+export function hooksDir(cwd = path.resolve(HERE, "..")) {
   const top = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
   return path.join(mainCheckout(top), "tools", "git-hooks");
 }
@@ -54,9 +54,10 @@ export function hooksDir(cwd = process.cwd()) {
  * have not passed. If not, says what to do, as requireRunner does for cargo's runner (Norman,
  * 2026-11-22), and returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run nothing until it
  * does. The settings' guard refuses a session's write of core.hooksPath (tools/push.mjs), so the
- * command is Norman's to run.
+ * command is Norman's to run. The repository is the tools' own checkout, wherever they are run
+ * from (cargo.mjs and mn.mjs); quick.mjs names the one it checks.
  */
-export function requireHooks({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
+export function requireHooks({ cwd = path.resolve(HERE, ".."), say = (line) => console.error(line) } = {}) {
   let want;
   try {
     want = hooksDir(cwd);

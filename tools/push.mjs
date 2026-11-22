@@ -32,6 +32,21 @@ function git(dir, ...args) {
   return execFileSync("git", ["-C", dir, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
+/**
+ * Whether `sha` is an ancestor of `ref`, or `ref` itself, in the repository of `dir`: false
+ * when it is not, or `ref` names nothing; and throws where git fails otherwise.
+ */
+function ancestor(dir, sha, ref) {
+  if (!exists(dir, ref)) return false;
+  try {
+    execFileSync("git", ["-C", dir, "merge-base", "--is-ancestor", sha, ref], { stdio: ["ignore", "pipe", "pipe"] });
+    return true;
+  } catch (e) {
+    if (e.status === 1) return false;
+    throw e;
+  }
+}
+
 /** Whether `ref` names an object in the repository of `dir`. */
 function exists(dir, ref) {
   try {
@@ -54,13 +69,19 @@ export function prePush(text, dir) {
     if (parts.length !== 4 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(parts[1])) return { status: 1, words: `the pre-push hook cannot read the line git gave it: ${line}` };
     if (!/^0+$/.test(parts[1])) sends.push({ ref: parts[0], sha: parts[1] });
   }
-  if (sends.length === 0) return { status: 0, words: "" };
+  // A commit already on main passed the merge queue's checks: a tag of it, or a branch at it, needs
+  // no pass of its own (the fourth review of #203).
+  const fresh = sends.filter(({ sha }) => !ancestor(dir, sha, "refs/remotes/origin/main"));
+  if (fresh.length === 0) return { status: 0, words: "" };
   for (const [state, what] of [["MERGE_HEAD", "merge"], ["CHERRY_PICK_HEAD", "cherry-pick"], ["REVERT_HEAD", "revert"]]) {
     if (exists(dir, state)) return { status: 1, words: `the pre-push hook refused: a ${what} is in progress; finish it and commit, then run ${QUICK}` };
   }
   for (const state of ["rebase-merge", "rebase-apply"]) {
     if (fs.existsSync(git(dir, "rev-parse", "--path-format=absolute", "--git-path", state))) return { status: 1, words: `the pre-push hook refused: a rebase is in progress; finish it, then run ${QUICK}` };
   }
+  // A branch from before the hook has a tools/quick.mjs that writes no record: running it cannot
+  // help, so the hook says what can.
+  if (!exists(dir, "HEAD:tools/git-hooks/pre-push")) return { status: 1, words: `the pre-push hook refused: this branch is from before the pre-push hook (#203), and its tools/quick.mjs writes no record of what it passed; merge main into this branch first, then run ${QUICK}, commit everything it read, and push again` };
   const record = git(dir, "rev-parse", "--path-format=absolute", "--git-path", PASSED);
   let passed;
   try {
@@ -70,7 +91,7 @@ export function prePush(text, dir) {
     throw e;
   }
   if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(passed)) return { status: 1, words: `the pre-push hook refused: ${record} holds no tree id; run ${QUICK} again` };
-  for (const { ref, sha } of sends) {
+  for (const { ref, sha } of fresh) {
     const tree = git(dir, "rev-parse", "--verify", "--quiet", `${sha}^{tree}`);
     if (tree !== passed) return { status: 1, words: `the pre-push hook refused: ${ref} (${sha.slice(0, 12)}) has the tree ${tree.slice(0, 12)}, not the tree the quick checks last passed in this checkout (${passed.slice(0, 12)}); run ${QUICK} on what you push, commit everything it read, and push again` };
   }
@@ -92,6 +113,25 @@ const ALIAS_KEY = /^alias\./i;
 const GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source", "--list-cmds", "--exec-path"]);
 /** `git config`'s words that only read. */
 const CONFIG_READS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list"]);
+/** `git config`'s words that write. */
+const CONFIG_WRITES = new Set(["--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section", "--edit", "-e", "set", "unset", "rename-section", "remove-section", "edit"]);
+/** `git config`'s options that take the next word as their value. */
+const CONFIG_VALUED = new Set(["-f", "--file", "--blob", "--type", "--default", "--comment", "--value"]);
+
+/**
+ * Whether `args`, the words after `git config`, write: a word that writes, or a key with a value.
+ * A key alone, as `git config core.hooksPath`, or a word that only reads, reads.
+ */
+function configWrites(args) {
+  if (args.some((w) => CONFIG_WRITES.has(w))) return true;
+  if (args.some((w) => CONFIG_READS.has(w))) return false;
+  const plain = [];
+  for (let k = 0; k < args.length; k++) {
+    if (CONFIG_VALUED.has(args[k])) k++;
+    else if (!args[k].startsWith("-")) plain.push(args[k]);
+  }
+  return plain.length !== 1;
+}
 
 /** Each git command of `text`: its words from the program on, recursing into shells it starts. */
 function gitCommands(text, depth = 0) {
@@ -141,7 +181,8 @@ function gitCommands(text, depth = 0) {
  * words as the shell would (raw-build.mjs, simpleCommands), and is a deterrent, not the guard: the
  * hook, at the main checkout's absolute path, guards the slip, and CI gates whatever is pushed. Its
  * known limits: git's plumbing but send-pack, a libgit2 client, the GitHub API, a script or alias
- * defined elsewhere, and a GIT_ variable set by an earlier command of the session's shell.
+ * defined elsewhere, a lasting `git config` write of include.path, includeIf or alias.*, which it
+ * lets through, and a GIT_ variable set by an earlier command of the session's shell.
  */
 export function bypass(command) {
   const hook = "git's pre-push hook (tools/git-hooks/pre-push)";
@@ -161,7 +202,7 @@ export function bypass(command) {
     }
     const sub = words[j];
     if (sub === "send-pack") return `"${found}" pushes through git's plumbing, which runs no pre-push hook`;
-    if (sub === "config" && words.slice(j + 1).some((w) => HOOKS_KEY.test(w)) && !words.slice(j + 1).some((w) => CONFIG_READS.has(w))) {
+    if (sub === "config" && words.slice(j + 1).some((w) => HOOKS_KEY.test(w)) && configWrites(words.slice(j + 1))) {
       return `"${found}" writes core.hooksPath, which names ${hook}; that is Norman's to set, in his own terminal (tools/local-limits.mjs, requireHooks)`;
     }
     if (sub !== "push") continue;

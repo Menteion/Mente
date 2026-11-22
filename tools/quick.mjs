@@ -100,6 +100,8 @@ function reportTree(before, listing = false) {
   const hidden = marked();
   if (!still) {
     console.log("\nquick: the working tree changed while the checks ran, or HEAD moved, so this run passed no one tree; run it again on the tree to push. What differs from HEAD now, as git's short status writes it:");
+  } else if (status.length === 0) {
+    console.log("\nquick: the working tree differs from HEAD only in files git does not compare, which these checks read and a push does not send; this is no pass of HEAD until they are committed:");
   } else {
     console.log(`\nquick: the working tree differs from HEAD, in ${status.length} entr${status.length === 1 ? "y" : "ies"} of git's short status, which these checks read and a push does not send; this is no pass of HEAD until they are committed:`);
   }
@@ -143,7 +145,16 @@ const changed = changedFiles();
 const due = CHECKS.filter((c) => [...changed].some((f) => c.when.test(f)));
 if (ownTests.length) due.push({ name: `the change's own tests (cargo test ${ownTests.join(" ")})`, run: ["cargo", "test", ...ownTests] });
 if (due.length === 0) {
+  // HEAD is a commit of main and nothing differs from it, so there is nothing to check; the record
+  // is HEAD's tree, which the merge queue tested, so that a push of it is not sent back here (the
+  // fourth review of #203).
   console.log("quick: nothing changed against origin/main, so nothing to check");
+  if (!process.argv.includes("--list")) {
+    const tree = workingTree();
+    const passed = git(["rev-parse", "--git-path", PASSED])[0];
+    if (tree === git(["rev-parse", "HEAD^{tree}"])[0]) writeFileSync(passed, `${tree}\n`);
+    else rmSync(passed, { force: true });
+  }
   process.exit(0);
 }
 
@@ -155,7 +166,7 @@ if (process.argv.includes("--list")) {
   process.exit(0);
 }
 if (!requireRunner()) process.exit(2);
-if (!requireHooks()) process.exit(2);
+if (!requireHooks({ cwd: process.cwd() })) process.exit(2);
 const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);
 const results = [];
 for (const check of due) {
