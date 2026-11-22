@@ -1,6 +1,7 @@
 ---
 id: cargo-mutants-release
 status: deferred
+trigger: when a release of cargo-mutants lists "Apply `--re` and `--exclude-re` name filters to struct-field deletion mutants" outside "Unreleased" in its notes
 type: chore
 affectedFiles: [.github/workflows/mutants.yml, .github/workflows/mutants-full.yml, .github/scripts/policy/build-and-toolchain.test.mjs, .github/scripts/policy/mutation.test.mjs, .github/scripts/policy/sandbox.test.mjs, .github/scripts/policy/pins.mjs, briefs/cargo-mutants-release.md, briefs/archive/cargo-mutants-release.md]
 protectedFiles: [CLAUDE.md, spec/**, .cargo/mutants.toml]
