@@ -229,11 +229,15 @@ function verdict({ text, words }, depth) {
   }
   if (i >= words.length) return null;
   const program = programOf(v(i));
-  // A capped tool asked to run the Store's pwsh, which would take every process it starts out of
-  // the job: the same command with Windows PowerShell in its place (Norman, 2026-11-22).
-  if (program === "node" && /(^|[\/])tools[\/](capped|cargo|mn).mjs$/i.test(v(i + 1))) {
-    const at = words.findIndex((w, k) => k > i + 1 && storePowerShell(w.value));
-    if (at < 0) return null;
+  // tools/capped.mjs asked to run the Store's pwsh, which would take every process it starts out of
+  // the job: the same command with Windows PowerShell in its place (Norman, 2026-11-22). Its command
+  // is the word after its first `--`, by either separator of a path; tools/cargo.mjs and mn.mjs run
+  // cargo and mn, whatever their arguments name, so a test filter `--skip pwsh` is no program (the
+  // review of 55c40e7).
+  if (program === "node" && /(^|[\\/])tools[\\/]capped\.mjs$/i.test(v(i + 1))) {
+    const dash = words.findIndex((w, k) => k > i + 1 && w.value === "--");
+    const at = dash < 0 ? -1 : dash + 1;
+    if (at < 0 || at >= words.length || !storePowerShell(v(at))) return null;
     const end = words[words.length - 1].end;
     return { found: slice(i), instead: `${text.slice(words[i].start, words[at].start)}${SYSTEM_POWERSHELL}${text.slice(words[at].end, end)}`, reason: "would start the Store's pwsh inside the job, which takes every process it starts out of it" };
   }

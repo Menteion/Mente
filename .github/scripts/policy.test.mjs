@@ -4035,10 +4035,16 @@ check("the raw-build guard refuses a build outside the local limits and names th
     ["$m = @'\ncargo test\n'@\ngit commit -m $m", null],
     ["cargo --version", null],
     ["cargo", null],
-    // A capped tool asked to run the Store's pwsh, by name or by path, gets Windows PowerShell in its place.
+    // tools/capped.mjs asked to run the Store's pwsh, by name or by path, through either separator,
+    // gets Windows PowerShell in its place; its command is the word after its first `--`, and
+    // cargo.mjs and mn.mjs run cargo and mn whatever their arguments name (the review of 55c40e7).
     ["node tools/capped.mjs -- pwsh -NoProfile -c x", `node tools/capped.mjs -- ${SYSTEM_POWERSHELL} -NoProfile -c x`],
-    ["node tools/cargo.mjs run --bin probe -- pwsh", `node tools/cargo.mjs run --bin probe -- ${SYSTEM_POWERSHELL}`],
+    ["node tools\\capped.mjs -- pwsh -c x", `node tools\\capped.mjs -- ${SYSTEM_POWERSHELL} -c x`],
+    ["node tools/capped.mjs --mente-only -- pwsh.exe", `node tools/capped.mjs --mente-only -- ${SYSTEM_POWERSHELL}`],
     ["node tools/capped.mjs -- C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe -c 1", `node tools/capped.mjs -- ${SYSTEM_POWERSHELL} -c 1`],
+    ["node tools/capped.mjs -- node probe.js pwsh", null],
+    ["node tools/cargo.mjs test -- --skip pwsh", null],
+    ["node tools/cargo.mjs run --bin probe -- pwsh", null],
     ["node tools/capped.mjs -- powershell.exe -c x", null],
     ["node tools/mn.mjs check a.mn", null],
     ["pwsh -c 1", null],
