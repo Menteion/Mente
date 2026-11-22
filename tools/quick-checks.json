@@ -11,7 +11,8 @@
     "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/",
     "local limits": "^tools/(local-limits(\\.test)?\\.mjs|capped\\.(ps1|mjs)|cargo\\.mjs|mn\\.mjs|raw-build(-guard)?\\.mjs|store-apps\\.mjs)$|^\\.github/scripts/(job-limits\\.ps1|lib/job-object\\.cs)$",
     "generator": "^compiler/mente-cli/src/mir_run/",
-    "quick": "^tools/quick(\\.test)?\\.mjs$|^tools/quick-checks\\.json$"
+    "quick": "^tools/(quick(\\.test)?\\.mjs|quick-checks\\.json|local-limits\\.mjs|store-apps\\.mjs)$",
+    "push": "^tools/(push(-guard)?(\\.test)?\\.mjs|raw-build\\.mjs|local-limits\\.mjs)$|^\\.claude/settings\\.json$"
   },
   "checks": [
     { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
@@ -63,7 +64,13 @@
       "name": "quick's own report",
       "when": "quick",
       "run": ["node", "--test", "tools/quick.test.mjs"],
-      "why": "tools/quick.mjs says, at the end of a listing and of a run, whether its checks read HEAD or a working tree that differs from it, and each file that differs (#174's merge c94b58e left two resolved files unstaged, and these checks passed on the working tree). Its test runs the real script in a repository it makes; CI does not run this local tool's test."
+      "why": "tools/quick.mjs says, at the end of a listing and of a run, whether its checks read HEAD's tree, before them and after, or a tree that differs from it or changed while they ran, and writes the tree a passing run read (#174's merge c94b58e left two resolved files unstaged, and these checks passed on the working tree). Its test runs the real script in a repository it makes, with shims for the checks' commands, so it depends on local-limits.mjs and store-apps.mjs too. CI runs it in the Documentation job."
+    },
+    {
+      "name": "the push guard",
+      "when": "push",
+      "run": ["node", "--test", "tools/push.test.mjs"],
+      "why": "The hook of .claude/settings.json that refuses a push of a commit whose tree tools/quick.mjs has not passed (tools/push.mjs): which commands it reads as a push, and its answer for each state of a checkout, run against repositories its test makes. It reads commands with raw-build.mjs and the record's name from local-limits.mjs. CI runs it in the Documentation job."
     }
   ]
 }

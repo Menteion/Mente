@@ -20,38 +20,72 @@
 // Which files call for which checks is written once, in tools/quick-checks.json.
 //
 // The checks read the working tree, and a push sends HEAD, so a run ends by saying which of the two
-// it read: every file that differs from HEAD, staged or not, and every new one. On 2026-11-22 a
-// merge of the evidence stack (#174, c94b58e) left two resolved files unstaged; these checks passed
-// on the working tree, and CI then ran HEAD without them.
+// it read. On 2026-11-22 a merge of the evidence stack (#174, c94b58e) left two resolved files
+// unstaged; these checks passed on the working tree, and CI then ran HEAD without them. The run
+// takes the working tree's tree, every tracked and unignored file as it stands, before its checks
+// and after them, and says the checks read HEAD only when both are HEAD's tree and HEAD did not
+// move. A run that passes on a tree that stood still writes that tree's id into the git directory
+// (local-limits.mjs, PASSED), and any other run takes it away: the push guard (tools/push.mjs)
+// refuses a push of a commit whose tree is not that one.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";
+import { PASSED } from "./local-limits.mjs";
 
-const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).split(/\r?\n/).filter(Boolean);
-
-/** Every file the branch changes against origin/main, committed or not, and every new file. */
-function changedFiles() {
-  const base = git("merge-base", "origin/main", "HEAD")[0];
-  return new Set([
-    ...git("diff", "--name-only", `${base}...HEAD`),
-    ...git("diff", "--name-only", "HEAD"),
-    ...git("ls-files", "--others", "--exclude-standard"),
-  ]);
+/** git's output, line by line, with `env` added to its environment. */
+function git(args, env = {}) {
+  return execFileSync("git", args, { encoding: "utf8", env: { ...process.env, ...env } }).split(/\r?\n/).filter(Boolean);
 }
 
 /**
- * Says whether the checks read what a push sends: HEAD, or a working tree that differs from it, and
- * then each file that differs, as git's short status writes it.
+ * The id of the tree the working tree would commit: every tracked and unignored file as it stands,
+ * however the repository's index marks it, through an index of its own, which leaves the
+ * repository's index as it was.
  */
-function reportUncommitted() {
-  const pending = git("status", "--porcelain", "--untracked-files=all");
-  if (pending.length === 0) {
-    console.log("\nquick: the working tree is HEAD, so these checks read what a push sends.");
-    return;
+function workingTree() {
+  const index = git(["rev-parse", "--git-path", "quick-index"])[0];
+  try {
+    git(["read-tree", "HEAD"], { GIT_INDEX_FILE: index });
+    git(["add", "--all"], { GIT_INDEX_FILE: index });
+    return git(["write-tree"], { GIT_INDEX_FILE: index })[0];
+  } finally {
+    rmSync(index, { force: true });
   }
-  console.log(`\nquick: the working tree differs from HEAD in ${pending.length} file(s), which these checks read and a push does not send; this is no pass of HEAD until they are committed:`);
-  for (const line of pending) console.log(`  ${line}`);
+}
+
+/** HEAD's commit and the working tree's tree, as they stand now. */
+function snapshot() {
+  return { head: git(["rev-parse", "HEAD"])[0], tree: workingTree() };
+}
+
+/**
+ * Says whether the checks read what a push sends: HEAD's tree, before the checks and after them, or
+ * a tree that differs from it, or one that changed while they ran; and then git's short status of
+ * what differs, with the files git does not compare, marked assume-unchanged or skip-worktree.
+ * Returns whether the tree stood still.
+ */
+function reportTree(before) {
+  const after = snapshot();
+  const headTree = git(["rev-parse", "HEAD^{tree}"])[0];
+  const still = before.head === after.head && before.tree === after.tree;
+  if (still && after.tree === headTree) {
+    console.log("\nquick: the working tree is HEAD's tree, before the checks and after them: no tracked or unignored file differs from HEAD, so these checks read what a push sends.");
+    return true;
+  }
+  const status = git(["status", "--porcelain", "--untracked-files=all"]);
+  const hidden = git(["ls-files", "-v"]).filter((line) => /^([a-z]|S) /.test(line));
+  if (!still) {
+    console.log("\nquick: the working tree changed while the checks ran, or HEAD moved, so this run passed no one tree; run it again on the tree to push. What differs from HEAD now, as git's short status writes it:");
+  } else {
+    console.log(`\nquick: the working tree differs from HEAD, in ${status.length} entr${status.length === 1 ? "y" : "ies"} of git's short status, which these checks read and a push does not send; this is no pass of HEAD until they are committed:`);
+  }
+  for (const line of status) console.log(`  ${line}`);
+  if (hidden.length) {
+    console.log("and these files, which git does not compare, marked assume-unchanged (a small letter) or skip-worktree (S):");
+    for (const line of hidden) console.log(`  ${line}`);
+  }
+  return still;
 }
 
 /**
@@ -66,6 +100,20 @@ const CHECKS = MAP.checks.map((c) => {
   return { name: c.name, when: new RegExp(pattern), run: c.run };
 });
 
+// From the repository's root, whatever directory it is run from: the map's paths, the checks'
+// commands and git's list of new files are the root's.
+process.chdir(git(["rev-parse", "--show-toplevel"])[0]);
+
+/** Every file the branch changes against origin/main, committed or not, and every new file. */
+function changedFiles() {
+  const base = git(["merge-base", "origin/main", "HEAD"])[0];
+  return new Set([
+    ...git(["diff", "--name-only", `${base}...HEAD`]),
+    ...git(["diff", "--name-only", "HEAD"]),
+    ...git(["ls-files", "--others", "--exclude-standard"]),
+  ]);
+}
+
 const dash = process.argv.indexOf("--");
 const ownTests = dash >= 0 ? process.argv.slice(dash + 1) : [];
 const changed = changedFiles();
@@ -77,9 +125,10 @@ if (due.length === 0) {
 }
 
 console.log(`quick: ${changed.size} changed file(s); ${due.length} check(s)\n`);
+const before = snapshot();
 if (process.argv.includes("--list")) {
   for (const check of due) console.log(`  ${check.name}: ${check.run.join(" ")}`);
-  reportUncommitted();
+  reportTree(before);
   process.exit(0);
 }
 if (!requireRunner()) process.exit(2);
@@ -94,5 +143,13 @@ console.log("\nquick:");
 for (const [name, ok] of results) console.log(`  ${ok ? "pass" : "FAIL"}  ${name}`);
 const failed = results.filter(([, ok]) => !ok).length;
 if (!ownTests.length) console.log("\nAlso run the tests the change adds or changes: node tools/quick.mjs -- -p <crate> <filter>");
-reportUncommitted();
+let still = false;
+try {
+  still = reportTree(before);
+} catch (e) {
+  console.log(`\nquick: could not tell whether the checks read HEAD's tree: ${e.message.split(/\r?\n/)[0]}`);
+}
+const passed = git(["rev-parse", "--git-path", PASSED])[0];
+if (!failed && still) writeFileSync(passed, `${before.tree}\n`);
+else rmSync(passed, { force: true });
 process.exit(failed ? 1 : 0);

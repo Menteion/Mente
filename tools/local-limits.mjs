@@ -32,6 +32,10 @@ export const SLOTS = 2;
 export const JOBS = String(Math.max(1, Math.floor(os.availableParallelism() / 2)));
 /// The limits of a build or a test run, and of an ad-hoc run of mn.
 export const BUILD = Object.freeze({ processGB: 8, jobGB: 16, minutes: 30 });
+/// The file of a checkout's git directory (`git rev-parse --git-path`) that holds the id of the tree
+/// the last passing run of tools/quick.mjs read, which the push guard (tools/push.mjs) compares
+/// with the tree of each commit a push would send.
+export const PASSED = "quick-passed";
 export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });
 /// libuv's UV_FS_O_EXLOCK: Windows opens the file sharing it with no other handle.
 const EXCLUSIVE = 0x10000000;
