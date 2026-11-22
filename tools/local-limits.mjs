@@ -16,7 +16,7 @@
 // Off Windows the commands run unbounded and take no slot, and each says so: the laptop is the
 // machine this guards.
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +32,56 @@ export const SLOTS = 2;
 export const JOBS = String(Math.max(1, Math.floor(os.availableParallelism() / 2)));
 /// The limits of a build or a test run, and of an ad-hoc run of mn.
 export const BUILD = Object.freeze({ processGB: 8, jobGB: 16, minutes: 30 });
+/// The file of a checkout's git directory (`git rev-parse --git-path`) that holds the id of the tree
+/// the last passing run of tools/quick.mjs read, which the push guard (tools/push.mjs) compares
+/// with the tree of each commit a push would send.
+export const PASSED = "quick-passed";
+/**
+ * The directory core.hooksPath is to name for the repository of `cwd`: the main checkout's
+ * tools/git-hooks, as an absolute path. A relative one is read against the work tree a push runs
+ * in, so a worktree of a branch from before the hook, or a push by --git-dir, ran none (the third
+ * review of #203); every checkout runs the main checkout's hook, whatever branch it holds, as
+ * cargo's runner is the main checkout's tools/capped.mjs (runnerLine).
+ */
+export function hooksDir(cwd = path.resolve(HERE, "..")) {
+  const top = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return path.join(mainCheckout(top), "tools", "git-hooks");
+}
+
+/**
+ * Whether the repository of `cwd` runs its own git hooks: core.hooksPath names hooksDir, which
+ * holds the pre-push hook (tools/git-hooks/pre-push), refusing a push of a tree the quick checks
+ * have not passed. If not, says what to do, as requireRunner does for cargo's runner (Norman,
+ * 2026-11-22), and returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run nothing until it
+ * does. The settings' guard refuses a session's write of core.hooksPath (tools/push.mjs), so the
+ * command is Norman's to run. The repository is the tools' own checkout, wherever they are run
+ * from (cargo.mjs and mn.mjs); quick.mjs names the one it checks.
+ */
+export function requireHooks({ cwd = path.resolve(HERE, ".."), say = (line) => console.error(line) } = {}) {
+  let want;
+  try {
+    want = hooksDir(cwd);
+  } catch (e) {
+    say(`local-limits: git could not name the repository of ${cwd}, so whether its pre-push hook runs is unknown, and nothing here runs: ${String(e.stderr || e.message).trim()}`);
+    return false;
+  }
+  let value = "";
+  try {
+    value = execFileSync("git", ["config", "--get", "core.hooksPath"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    value = "";
+  }
+  const fold = (p) => (WINDOWS ? path.resolve(p).toLowerCase() : path.resolve(p));
+  if (value === "" || !path.isAbsolute(value) || fold(value) !== fold(want)) {
+    say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, not the main checkout's hooks, so git's pre-push hook, which refuses a push of a tree the quick checks have not passed, does not run for every checkout, and nothing here runs until it does. Norman runs, once, in his own terminal:\n\ngit config core.hooksPath ${want.replace(/\\/g, "/")}\n`);
+    return false;
+  }
+  if (!fs.existsSync(path.join(want, "pre-push"))) {
+    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook: the main checkout is on a commit from before the hook (#203). Bring it up to main; nothing here runs until then.`);
+    return false;
+  }
+  return true;
+}
 export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });
 /// libuv's UV_FS_O_EXLOCK: Windows opens the file sharing it with no other handle.
 const EXCLUSIVE = 0x10000000;

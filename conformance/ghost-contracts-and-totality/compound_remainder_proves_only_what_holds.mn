@@ -1,0 +1,11 @@
+// expect: E0502
+module conformance
+// A compound remainder by a site value proves only what holds (spec item 2). From pull request
+// 43 it gave its value the right side's site variable and related the remainder to its divisor,
+// the same variable, which emptied the state: Tier 1 proved `y` within `u8[0..5]`, though
+// `f(8, [9, 9])` returns 8, and every obligation after the statement. Now `y` lies in 0 to 8.
+pub fn f(x: u8, a: [2]u8[1..=9]) -> u8[0..5] {
+  var y = x
+  y %= a[1]
+  y
+}

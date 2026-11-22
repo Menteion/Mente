@@ -1101,9 +1101,9 @@ impl Phases {
             run.phase("blueprint", || mente_ast::project_spec_blueprint(module));
         }
         run.stable("dump-tree", || mente_syntax::dump_tree(src));
-        let diagnostics = run.stable("check", || diagnostics_of(src));
-        if let Some(diagnostics) = &diagnostics {
-            run.phase("render", || render(src, diagnostics));
+        let checked = run.stable("check", || checked_of(src));
+        if let Some((diagnostics, listings)) = &checked {
+            run.phase("render", || render(src, diagnostics, listings));
             let disagreement = run
                 .phase(EDITED_PHASE, || incremental(src, edit, diagnostics))
                 .flatten();
@@ -1215,18 +1215,21 @@ impl Phases {
     }
 }
 
-/// What `check_source` reports, nothing for a module that checks.
-fn diagnostics_of(src: &str) -> Vec<Diagnostic> {
-    mente_sema::check_source(src).err().unwrap_or_default()
+/// What `mn check` reports of a module and lists for it, from one run of the checker: its
+/// diagnostics, none for a module that checks, and its `todo`s and trusted clauses. Asking for the
+/// listings apart ran Tier 1 again in the render phase, a third time under `--thorough`, and a
+/// slow proof there showed as a render that hung (the review of pull request 207).
+fn checked_of(src: &str) -> (Vec<Diagnostic>, mente_sema::Listings) {
+    let checked = mente_sema::check_source_listed(src);
+    (checked.verdict.err().unwrap_or_default(), checked.listings)
 }
 
-/// Renders each diagnostic in the text form and all of them in the JSON form, as `mn check`
-/// prints them.
-fn render(src: &str, diagnostics: &[Diagnostic]) {
+/// Renders each diagnostic in the text form and all of them in the JSON form, with the module's
+/// listings, as `mn check` prints them.
+fn render(src: &str, diagnostics: &[Diagnostic], listings: &mente_sema::Listings) {
     for d in diagnostics {
         std::hint::black_box(render_text(d, "fuzz.mn", src));
     }
-    let listings = mente_sema::listings(src);
     std::hint::black_box(render_json(&[FileDiagnostics {
         file: "fuzz.mn",
         src,
@@ -1245,7 +1248,7 @@ fn incremental(src: &str, edit: u64, whole: &[Diagnostic]) -> Option<String> {
     }
     let edited = edit_text(src, edit);
     session.update(&edited);
-    let fresh = diagnostics_of(&edited);
+    let fresh = mente_sema::check_source(&edited).err().unwrap_or_default();
     (session.diagnostics() != fresh.as_slice())
         .then(|| difference(RE_CHECK, session.diagnostics(), &fresh))
 }
