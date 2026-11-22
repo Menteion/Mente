@@ -41,9 +41,11 @@ const PULLS = /^\/(?:repos\/menteion\/mente|repositories\/\d+)\/pulls(\/\d+)?\/?
 /// The path of GitHub's GraphQL API.
 const GRAPHQL = /^\/graphql\/?$/;
 /// A word the shell or PowerShell may change before the client reads it: a variable or `"$@"`, a
-/// command's output, PowerShell's splatting (`@a`), its escape (a backtick) or its stop-parsing token
-/// (`--%`), and cmd's `%VAR%`.
-const INDIRECT = /[$`@%]/;
+/// command's output, PowerShell's splatting (`@a`), its escape (a backtick), its stop-parsing token
+/// (`--%`) or its subexpression (`(Get-Content x)`), bash's brace expansion (`{pulls,x}`), and cmd's
+/// `%VAR%`. Spellings beyond these are the rule's known limits: it is a deterrent, and the Commits
+/// check on GitHub is the wall.
+const INDIRECT = /[$`@%{}()]/;
 /// How deep the rule reads a command line given to another shell.
 const DEPTH = 4;
 const programOf = (value) => path.win32.basename(value).toLowerCase().replace(/\.exe$/, "");
@@ -70,14 +72,23 @@ function programAt(v) {
 
 /// Each call of the App's client in `text`: a simple command whose program is `node` and one of whose
 /// words is `gh-app.mjs`, as its script or as the value of an option that loads it (`--import`, `-r`),
-/// with the words after that word and the command as written, recursing into the shells it starts.
+/// with the words after that word and the command as written; whether xargs runs it, which gives it
+/// words from elsewhere; and whether its last word runs on into a subexpression or a block, `(` or
+/// `{`, which the reading splits off as a command of its own. It recurses into the shells it starts.
 function clientCalls(text, depth = 0) {
   const found = [];
   for (const { text: line, words } of simpleCommands(String(text))) {
     const v = words.map((w) => w.value);
     const p = programAt(v);
     const at = v.findIndex((w, k) => k > p && programOf(w) === "gh-app.mjs");
-    if (programOf(v[p] ?? "") === "node" && at > p) found.push({ found: line.slice(words[0].start, words[words.length - 1].end), rest: v.slice(at + 1) });
+    // xargs before node, whatever options it takes (`-a args.txt`), runs the client too.
+    const client = v.findIndex((w) => programOf(w) === "gh-app.mjs");
+    const before = v.slice(0, Math.max(client, 0));
+    const xargs = client > 0 && before.some((w) => programOf(w) === "xargs") && before.some((w) => programOf(w) === "node");
+    if ((programOf(v[p] ?? "") === "node" && at > p) || xargs) {
+      const end = words[words.length - 1].end;
+      found.push({ found: line.slice(words[0].start, end), rest: v.slice((xargs ? client : at) + 1), xargs, runsOn: /^[ \t]*[({]/.test(line.slice(end)) });
+    }
     if (depth >= DEPTH) continue;
     // A shell given a command line: bash's `-c` takes one word, PowerShell's `-Command` and cmd's
     // `/c` the rest of the line, as push.mjs reads them for git.
@@ -123,6 +134,20 @@ export function requestPath(target) {
   return at.replace(/\/+/g, "/").toLowerCase();
 }
 
+/// The value of a GraphQL block string whose raw text between its `"""` is `raw`, as the GraphQL
+/// specification gives it (BlockStringValue): `\"""` unescaped, the indentation common to its lines
+/// after the first that hold more than white space removed from each of them, and its leading and
+/// trailing blank lines dropped.
+export function blockString(raw) {
+  const lines = raw.replace(/\\"""/g, '"""').split(/\r\n|\n|\r/);
+  const indents = lines.slice(1).filter((l) => /[^ \t]/.test(l)).map((l) => /^[ \t]*/.exec(l)[0].length);
+  const common = indents.length > 0 ? Math.min(...indents) : 0;
+  const out = lines.map((l, k) => (k === 0 ? l : l.slice(common)));
+  while (out.length > 0 && !/[^ \t]/.test(out[0])) out.shift();
+  while (out.length > 0 && !/[^ \t]/.test(out[out.length - 1])) out.pop();
+  return out.join("\n");
+}
+
 /// The texts of pull requests a GraphQL request sends: none unless its query names
 /// `createPullRequest` or `updatePullRequest`; otherwise whether it creates one, and every `title`
 /// and `body` it sends, as an argument written inline (a string, a block string, null or a
@@ -132,7 +157,10 @@ export function graphqlTexts(request) {
   if (request === null || typeof request !== "object" || typeof request.query !== "string") return { found: [] };
   const named = [...request.query.matchAll(/\b(create|update)PullRequest\b/gi)];
   if (named.length === 0) return { found: [] };
-  const variables = request.variables !== null && typeof request.variables === "object" ? request.variables : {};
+  // Variables sent as anything but an object or null, a JSON-encoded string among them, hide what a
+  // `$name` stands for.
+  if (request.variables !== undefined && request.variables !== null && (typeof request.variables !== "object" || Array.isArray(request.variables))) return { why: "sends its variables as no JSON object, which this rule cannot read: send them as an object" };
+  const variables = request.variables ?? {};
   const found = [];
   const walk = (value) => {
     if (Array.isArray(value)) value.forEach(walk);
@@ -150,7 +178,7 @@ export function graphqlTexts(request) {
     if (after.startsWith('"""')) {
       const end = after.indexOf('"""', 3);
       if (end < 0) return unread;
-      found.push([m[1], after.slice(3, end).replace(/\\"""/g, '"""')]);
+      found.push([m[1], blockString(after.slice(3, end))]);
     } else if (after.startsWith('"')) {
       const s = /^"((?:[^"\\\n]|\\.)*)"/.exec(after);
       if (!s) return unread;
@@ -190,7 +218,9 @@ function requestFile(name, platform) {
 /// Commits check's rules, or one whose text it cannot read; or null. `readFile` reads a request file
 /// as text.
 export function bodyRefusal(command, { readFile = (f) => fs.readFileSync(f, "utf8"), platform = process.platform } = {}) {
-  for (const { found, rest } of clientCalls(command)) {
+  for (const { found, rest, xargs, runsOn } of clientCalls(command)) {
+    // xargs gives the client words this rule never sees, whatever its method.
+    if (xargs) return `"${found}" runs the client through xargs, which gives it words this rule cannot read: run it with its words written out`;
     // A method written as one that sends no text of a pull request (GET, PUT, DELETE) is no concern.
     const api = rest.indexOf("api");
     const verb = api >= 0 ? String(rest[api + 1] ?? "") : "";
@@ -200,7 +230,7 @@ export function bodyRefusal(command, { readFile = (f) => fs.readFileSync(f, "utf
     // `--data-file` itself.
     const out = rest.indexOf("--out");
     const named = rest.indexOf("--data-file");
-    if (rest.some((w, k) => !(out >= 0 && k === out + 1) && !(named >= 0 && k === named + 1) && INDIRECT.test(w))) return `"${found}" names a word of its call through the shell, which this rule cannot read: write the method, the route and --data-file as they are`;
+    if (runsOn || rest.some((w, k) => !(out >= 0 && k === out + 1) && !(named >= 0 && k === named + 1) && INDIRECT.test(w))) return `"${found}" names a word of its call through the shell, which this rule cannot read: write the method, the route and --data-file as they are`;
     // The client sends a file only with `--data-file`; a call that sends none sends no text.
     if (api < 0 || named < 0) continue;
     // The client's own reading: its method, upper-cased, its route, and the word after the first

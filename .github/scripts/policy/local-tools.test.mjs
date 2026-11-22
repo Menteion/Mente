@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "../lib/commits.mjs";
 import { CARGO_HARMLESS, decide as rawBuildDecide, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../../tools/raw-build.mjs";
-import { bodyRefusal, decide as bodyDecide, graphqlTexts, requestPath } from "../../../tools/pr-body-guard.mjs";
+import { blockString, bodyRefusal, decide as bodyDecide, graphqlTexts, requestPath } from "../../../tools/pr-body-guard.mjs";
 import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "../../../tools/store-apps.mjs";
 import { holds, jsImports, jsTokens } from "./js.mjs";
 import { GATE_FILES, QUICK_MAP, owns } from "./pins.mjs";
@@ -458,6 +458,10 @@ check("the session's hook refuses to send a pull request's text that fails the C
     ["C:/s/gql-good.json", JSON.stringify({ query: 'mutation($body: String!) { updatePullRequest(input: {pullRequestId: "PR_1", body: $body}) { pullRequest { body title } } }', variables: { body: "Not a fix: a brief." } })],
     ["C:/s/gql-title.json", JSON.stringify({ query: 'mutation { updatePullRequest(input: {pullRequestId: "PR_1", title: "Retitled"}) { clientMutationId } }' })],
     ["C:/s/gql-query.json", JSON.stringify({ query: "query { viewer { login } }", variables: { body: "No declaration." } })],
+    // The review of e95f0ad: variables sent as a JSON-encoded string, and an indented block string.
+    ["C:/s/gql-strvars.json", JSON.stringify({ query: 'mutation($b: String!) { updatePullRequest(input: {pullRequestId: "PR_1", body: $b}) { clientMutationId } }', variables: JSON.stringify({ b: "No declaration." }) })],
+    ["C:/s/gql-indented.json", JSON.stringify({ query: 'mutation {\n  updatePullRequest(input: {pullRequestId: "PR_1", body: """\n      Not a fix: a brief.\n\n      More of it.\n    """}) { clientMutationId }\n}' })],
+    ["C:/s/gql-indented-bare.json", JSON.stringify({ query: 'mutation {\n  updatePullRequest(input: {pullRequestId: "PR_1", body: """\n      No declaration.\n    """}) { clientMutationId }\n}' })],
   ]);
   const readFile = (f) => {
     if (!files.has(f)) throw Object.assign(new Error("no such file"), { code: "ENOENT" });
@@ -525,6 +529,22 @@ check("the session's hook refuses to send a pull request's text that fails the C
     [`${client} POST graphql --data-file C:/s/gql-good.json`, null],
     [`${client} POST graphql --data-file C:/s/gql-title.json`, null],
     [`${client} POST graphql --data-file C:/s/gql-query.json`, null],
+    [`${client} POST graphql --data-file C:/s/gql-strvars.json`, /sends its variables as no JSON object/],
+    [`${client} POST graphql --data-file C:/s/gql-indented.json`, null],
+    [`${client} POST graphql --data-file C:/s/gql-indented-bare.json`, /body: it declares neither/],
+    // xargs, a PowerShell subexpression and bash's brace expansion give the client words from
+    // elsewhere (the review of e95f0ad).
+    [`xargs node gh-app.mjs < C:/s/args.txt`, /through xargs/],
+    [`xargs -a C:/s/args.txt node C:/Users/x/tools/github-app/gh-app.mjs`, /through xargs/],
+    [`cat C:/s/args.txt | xargs -n 9 node gh-app.mjs api GET repos/Menteion/Mente/pulls/1`, /through xargs/],
+    [`git ls-files | xargs grep -l gh-app`, null],
+    [`ls | xargs -a C:/s/args.txt node other.mjs`, null],
+    [`node gh-app.mjs api PATCH (Get-Content C:/s/route.txt) --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs (Get-Content C:/s/args.txt)`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api PATCH repos/Menteion/Mente/{pulls,x}/1 --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api PATCH "repos/Menteion/Mente/pulls/(1)" --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/good.json && (echo sent)`, null],
+    [`${client} GET repos/Menteion/Mente/pulls/214 --out C:/s/out.json; { echo read; }`, null],
     // What sends no text of a pull request of this repository passes.
     [`${client} GET repos/Menteion/Mente/pulls/214 --out C:/s/bare.json`, null],
     [`${client} PATCH repos/Menteion/Mente/pulls/214`, null],
@@ -560,6 +580,14 @@ check("the session's hook refuses to send a pull request's text that fails the C
   assert.match(graphqlTexts({ query: "mutation($b: X) { updatePullRequest(input: {body: $b}) { id } }", variables: { b: { nested: "x" } } }).why ?? "", /cannot read/);
   assert.match(graphqlTexts({ query: 'mutation { updatePullRequest(input: {body: """unclosed}) { id } }' }).why ?? "", /cannot read/);
   assert.match(graphqlTexts({ query: 'mutation { updatePullRequest(input: {body: "unclosed}) { id } }' }).why ?? "", /cannot read/);
+  for (const variables of ["{}", [], 7, true]) assert.match(graphqlTexts({ query: "mutation { updatePullRequest(input: {}) { id } }", variables }).why ?? "", /variables as no JSON object/, JSON.stringify(variables));
+  assert.deepEqual(graphqlTexts({ query: "mutation { updatePullRequest(input: {}) { id } }", variables: null }), { creates: false, found: [] });
+  // A block string's value, as GraphQL gives it: the common indent of its lines after the first
+  // removed, its leading and trailing blank lines dropped, `\"""` unescaped.
+  assert.equal(blockString("\n    Not a fix: a brief.\n\n      Indented more.\n    "), "Not a fix: a brief.\n\n  Indented more.");
+  assert.equal(blockString("First line\n    second\n  third"), "First line\n  second\nthird");
+  assert.equal(blockString('  \r\n\tA \\""" quote.\r\n\t'), 'A """ quote.');
+  assert.equal(blockString("   "), "");
   // On Linux, an absolute path is read as written, and a relative one refuses.
   assert.match(on("linux")(`${client} PATCH repos/Menteion/Mente/pulls/1 --data-file /tmp/s/bare.json`) ?? "", /declares neither/);
   assert.match(on("linux")(`${client} PATCH repos/Menteion/Mente/pulls/1 --data-file s/bare.json`) ?? "", /relative path/);
