@@ -69,8 +69,9 @@ export function prePush(text, dir) {
     if (parts.length !== 4 || !/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(parts[1])) return { status: 1, words: `the pre-push hook cannot read the line git gave it: ${line}` };
     if (!/^0+$/.test(parts[1])) sends.push({ ref: parts[0], sha: parts[1] });
   }
-  // A commit already on main passed the merge queue's checks: a tag of it, or a branch at it, needs
-  // no pass of its own (the fourth review of #203).
+  // A commit reachable from main is already on main, which main's own CI and merge queue hold: a
+  // tag of it, or a branch at it, needs no pass of its own (the fourth review of #203). The rule of
+  // the settings refuses moving refs/remotes/origin/* by hand.
   const fresh = sends.filter(({ sha }) => !ancestor(dir, sha, "refs/remotes/origin/main"));
   if (fresh.length === 0) return { status: 0, words: "" };
   for (const [state, what] of [["MERGE_HEAD", "merge"], ["CHERRY_PICK_HEAD", "cherry-pick"], ["REVERT_HEAD", "revert"]]) {
@@ -79,18 +80,21 @@ export function prePush(text, dir) {
   for (const state of ["rebase-merge", "rebase-apply"]) {
     if (fs.existsSync(git(dir, "rev-parse", "--path-format=absolute", "--git-path", state))) return { status: 1, words: `the pre-push hook refused: a rebase is in progress; finish it, then run ${QUICK}` };
   }
-  // A branch from before the hook has a tools/quick.mjs that writes no record: running it cannot
-  // help, so the hook says what can.
-  if (!exists(dir, "HEAD:tools/git-hooks/pre-push")) return { status: 1, words: `the pre-push hook refused: this branch is from before the pre-push hook (#203), and its tools/quick.mjs writes no record of what it passed; merge main into this branch first, then run ${QUICK}, commit everything it read, and push again` };
   const record = git(dir, "rev-parse", "--path-format=absolute", "--git-path", PASSED);
-  let passed;
+  let passed = null;
   try {
     passed = fs.readFileSync(record, "utf8").trim();
   } catch (e) {
-    if (e.code === "ENOENT") return { status: 1, words: `the pre-push hook refused: no tree has passed the quick checks in this checkout since its last change; run ${QUICK}, commit everything it read, and push again` };
-    throw e;
+    if (e.code !== "ENOENT") throw e;
   }
-  if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(passed)) return { status: 1, words: `the pre-push hook refused: ${record} holds no tree id; run ${QUICK} again` };
+  const valid = passed !== null && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(passed);
+  if (!valid) {
+    // A branch from before the hook has a tools/quick.mjs that writes no record: running it cannot
+    // help, so with no record the hook says what can. A record a later quick wrote still holds.
+    if (!exists(dir, "HEAD:tools/git-hooks/pre-push")) return { status: 1, words: `the pre-push hook refused: this branch is from before the pre-push hook (#203), and its tools/quick.mjs writes no record of what it passed; merge main into this branch first, then run ${QUICK}, commit everything it read, and push again` };
+    if (passed === null) return { status: 1, words: `the pre-push hook refused: no tree has passed the quick checks in this checkout since its last change; run ${QUICK}, commit everything it read, and push again` };
+    return { status: 1, words: `the pre-push hook refused: ${record} holds no tree id; run ${QUICK} again` };
+  }
   for (const { ref, sha } of fresh) {
     const tree = git(dir, "rev-parse", "--verify", "--quiet", `${sha}^{tree}`);
     if (tree !== passed) return { status: 1, words: `the pre-push hook refused: ${ref} (${sha.slice(0, 12)}) has the tree ${tree.slice(0, 12)}, not the tree the quick checks last passed in this checkout (${passed.slice(0, 12)}); run ${QUICK} on what you push, commit everything it read, and push again` };
@@ -182,7 +186,9 @@ function gitCommands(text, depth = 0) {
  * hook, at the main checkout's absolute path, guards the slip, and CI gates whatever is pushed. Its
  * known limits: git's plumbing but send-pack, a libgit2 client, the GitHub API, a script or alias
  * defined elsewhere, a lasting `git config` write of include.path, includeIf or alias.*, which it
- * lets through, and a GIT_ variable set by an earlier command of the session's shell.
+ * lets through, a GIT_ variable set by an earlier command of the session's shell, and the ways
+ * refs/remotes/origin/main can move but update-ref and a fetch refspec into it: a changed URL or
+ * fetch refspec of origin, a ref file written directly, packed refs.
  */
 export function bypass(command) {
   const hook = "git's pre-push hook (tools/git-hooks/pre-push)";
@@ -201,6 +207,11 @@ export function bypass(command) {
       j += GIT_VALUED.has(a) ? 2 : 1;
     }
     const sub = words[j];
+    const args = words.slice(j + 1);
+    // refs/remotes/origin/main decides which commits are already on main for the hook; moving it by
+    // hand would let a commit through unpassed (the fifth review of #203).
+    if (sub === "update-ref" && args.some((w) => /^refs\/remotes\/origin\//.test(w))) return `"${found}" moves a ref of refs/remotes/origin/ by hand, which the pre-push hook reads as what main holds`;
+    if (sub === "fetch" && args.some((w) => /:(refs\/)?remotes\/origin\//.test(w.replace(/^\+/, "")))) return `"${found}" fetches into refs/remotes/origin/ by a refspec of its own, which the pre-push hook reads as what main holds`;
     if (sub === "send-pack") return `"${found}" pushes through git's plumbing, which runs no pre-push hook`;
     if (sub === "config" && words.slice(j + 1).some((w) => HOOKS_KEY.test(w)) && configWrites(words.slice(j + 1))) {
       return `"${found}" writes core.hooksPath, which names ${hook}; that is Norman's to set, in his own terminal (tools/local-limits.mjs, requireHooks)`;

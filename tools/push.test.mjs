@@ -194,8 +194,11 @@ test("a merge in progress refuses, and each worktree is held to its own record",
     // A branch from before the hook is told to merge main, not to run a quick that cannot help.
     git(work, "checkout", "-q", "-b", "old", git(work, "rev-list", "--max-parents=0", "HEAD"));
     commit(work, "old.md", "old\n");
-    pass(work, tree(work));
+    fs.rmSync(path.resolve(work, git(work, "rev-parse", "--git-path", PASSED)), { force: true });
     refused(push(work, "origin", "old"), /from before the pre-push hook.*merge main into this branch first/);
+    // With a record of its tree, which a later quick wrote, the old branch's push holds.
+    pass(work, tree(work));
+    sent(push(work, "origin", "old"));
   });
 });
 
@@ -235,6 +238,11 @@ test("the settings refuse the ways around the hook, and only those", () => {
     "git send-pack origin",
     "g''it push --no-verify",
     "git commit --no-verify -m x",
+    // The fifth review's: refs/remotes/origin/main decides what main holds for the hook.
+    "git update-ref refs/remotes/origin/main HEAD",
+    "git update-ref -d refs/remotes/origin/main",
+    "git fetch . +HEAD:refs/remotes/origin/main",
+    "git fetch elsewhere main:remotes/origin/main",
   ]) {
     for (const tool of ["Bash", "PowerShell", "Monitor", "mcp__terminal__run_in_terminal"]) {
       const r = guard(command, tool);
@@ -242,7 +250,7 @@ test("the settings refuse the ways around the hook, and only those", () => {
       assert.match(r.words, /^the push guard refused it: /);
     }
   }
-  for (const command of ["git push", "git push -u origin main", "git push -n origin main", "git status", "echo push", "git -c user.name=x push", "git config --get core.hooksPath", "git config get core.hooksPath", "git config core.hooksPath", "git config --file .git/config core.hooksPath", "git config --show-origin core.hooksPath", "git config user.name x", "git -c alias.st=status st", "git --git-dir .git status"]) {
+  for (const command of ["git push", "git push -u origin main", "git push -n origin main", "git status", "echo push", "git -c user.name=x push", "git config --get core.hooksPath", "git config get core.hooksPath", "git config core.hooksPath", "git config --file .git/config core.hooksPath", "git config --show-origin core.hooksPath", "git config user.name x", "git -c alias.st=status st", "git --git-dir .git status", "git fetch origin", "git fetch origin main", "git update-ref refs/heads/x HEAD"]) {
     assert.deepEqual(guard(command), { status: 0, words: "" }, command);
   }
   const ws = spawnSync(process.execPath, [GUARD], { input: JSON.stringify({ tool_name: "Monitor", tool_input: { ws: { url: "wss://example.invalid" } } }), encoding: "utf8" });
