@@ -1207,7 +1207,9 @@ mod tests {
     /// `MENTE_GEN_PROGRAMS` (300) later, each public function called `MENTE_GEN_CALLS` (12)
     /// times, or exhaustively where at most `MENTE_GEN_EXHAUSTIVE` (256) calls cover it; native
     /// code unless `MENTE_GEN_NATIVE` is 0. Then the `MENTE_GEN_CHECKED` seeds after them, ten
-    /// times as many and at most 4000 unless it says otherwise, generated and checked but not run.
+    /// times as many and at most 4000 unless it says otherwise, generated and checked but not run;
+    /// 0 checks none, as a replay of one seed wants. A nightly run, whose ranges follow each other,
+    /// so checks seeds the next night's run runs again.
     #[test]
     #[ignore = "generates and runs many programs; CI runs it in release (generated.yml)"]
     fn generated_programs_run_alike_on_the_three_paths() {
@@ -1248,15 +1250,17 @@ mod tests {
             (format!("{}\nin {:.1?}", line, start.elapsed()), wrong)
         };
         println!("{}", checked);
+        // Each part is shown whichever fails: a run that differs and a program that does not
+        // check are each one's own finding.
         assert!(
-            report.failures.is_empty(),
-            "replay one with MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1\n{}",
-            report.failures()
-        );
-        assert!(
-            wrong.is_empty(),
-            "a generated program does not check:\n{}",
-            wrong.join("\n")
+            report.failures.is_empty() && wrong.is_empty(),
+            "replay one with MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1 MENTE_GEN_CHECKED=0\n{}{}",
+            report.failures(),
+            if wrong.is_empty() {
+                String::new()
+            } else {
+                format!("\na generated program does not check:\n{}", wrong.join("\n"))
+            }
         );
         // No program is left out: each passes every check, a function Tier 1 refused for a
         // narrowing that always traps having been generated again, and nothing else refuses

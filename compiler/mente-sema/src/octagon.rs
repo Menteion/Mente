@@ -707,6 +707,20 @@ impl Octagon {
             .get_or_insert_with(|| vec![0; n].into_boxed_slice())[var] = at;
     }
 
+    /// Refuses one value that combines two evaluations of a variable, `a` and `b` terms of it in
+    /// one sum: `x - x` cancels to a constant, which holds only of one value, and a compound
+    /// remainder once related a remainder to its divisor through one variable so, `v <= v - 1`,
+    /// which emptied the state with neither term read. It stops the compile, in every build,
+    /// naming the variable, where the two name different evaluations.
+    pub fn one_evaluation(&self, a: Term, b: Term) {
+        if a.var == b.var && a.at != b.at {
+            panic!(
+                "internal error: {} is combined in one value from two evaluations (ghost-contracts-and-totality.md, item 2, no-site-value-from-another-evaluation)",
+                self.name_of(a.var)
+            );
+        }
+    }
+
     /// What `var` is, as the internal errors of the stamps name it.
     fn name_of(&self, var: usize) -> String {
         self.names
