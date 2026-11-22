@@ -111,10 +111,10 @@ export const PINNED_FILES = new Map([
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 export const PINNED_JOBS = new Map([
   ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
-  ["mutants.yml#plan", "14fabd6f9c7a34039d9141bae099e8e77f9d67b7df429a15deb4876e30f26b77"],
-  ["mutants.yml#shard", "164e7b293cd8e63e7f111c3ab3198af5e6d2a0d6be1f8050383d1efb1804245d"],
-  ["mutants.yml#aggregate", "d28c3025bb530193ffe0e7ec7daacc339fada4a698992db040f5f61b5a881e6b"],
-  ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
+  ["mutants.yml#plan", "b507c640bfc6cdd89c682aac76c9799f646578ad3fbb23581d0b57d8943a1056"],
+  ["mutants.yml#shard", "0df83c0734f764d8c3a13b10e7eb81467725364d88561dfe58b02ff485308d36"],
+  ["mutants.yml#aggregate", "579f212be0eb40ba5b554285629ca1d61b5cc8f78d8e5aa56db6f8e26fa73ac4"],
+  ["mutants-full.yml#full", "31cd41c53714095da362d53b6b06e9ecfc9c247f8fd5a809fd3fbad2595de095"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "62af70c69ee897c012199ec4699de6b1035cabe358f855b7c4e3f31c7f119d75"],
@@ -129,7 +129,7 @@ export const PINNED_JOBS = new Map([
   // The nightly alarms, each with its workflow's triggers (Norman, 2026-11-21).
   ["fuzz-nightly.yml#alarm", "3873cebb627ff350058b72ed6a16297ebd92eff8155306ccc271157ce359d652"],
   ["generated-nightly.yml#alarm", "362bd08920cd3c3830502a91997feda6e45cb81604fcdf9bbe596e16e8ceb946"],
-  ["mutants-full.yml#alarm", "8a51983d7460cf13ca3777d62b7b3237ec381a8b8d1d8b83bcb91373bd166052"],
+  ["mutants-full.yml#alarm", "640ea7be48a9d5582adf62724215b1ef52bbf977605f504d6ea905900235db05"],
 ]);
 export const GATE_FILES = [
   "/.github/",

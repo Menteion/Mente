@@ -158,7 +158,9 @@ const TOOL_ENV_ALLOWED = new Map([
   ["CARGO_TERM_COLOR", { value: "always", jobs: null }],
   // The full run's alarm, and a pull request's aggregate, inherit their workflow's two, and run no
   // cargo and no nextest.
-  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
+  // cargo-mutants' commit, the one value it may take: another build of the tool is a change to the
+  // policy too.
+  ["CARGO_MUTANTS_REV", { value: "b00aff0c6ca0670bccdf4eb2ece9e15c4c35c8b9", jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // The fuzzer's release build also asserts what a debug build asserts.
   ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", { value: "true", jobs: ["fuzz.yml#fuzz"] }],
   // The base branch's build beside this change's.

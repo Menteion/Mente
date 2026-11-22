@@ -28,7 +28,12 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_MUTANTS_VERSION: "27.1.0"
+  # cargo-mutants, built from upstream's commit that applies --re and --exclude-re, and
+  # .cargo/mutants.toml's exclude_re, to its struct-field mutants: 27.1.0, its latest release,
+  # applies none of them, and a shard listed every such mutant of the tree beside its share (PR 202's
+  # probe, run 45006783404). The commit is 27.1.0 with 25 more, none of which changes the outcomes,
+  # lists or logs the floor reads. Back to a release once one carries the fix (Norman, 2026-11-22).
+  CARGO_MUTANTS_REV: "b00aff0c6ca0670bccdf4eb2ece9e15c4c35c8b9"
   # The nextest profile that stops a test running too long (.config/nextest.toml).
   NEXTEST_PROFILE: mutants
 
@@ -57,9 +62,9 @@ jobs:
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
       - name: Install cargo-mutants
-        # Built from its crate, which cargo checks, never restored from a cache that another run
-        # on the same branch could have written.
-        run: cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
+        # Built from the commit CARGO_MUTANTS_REV names, with its lock, never restored from a cache
+        # that another run on the same branch could have written.
+        run: cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"
       - name: Install cargo-nextest
         run: bash .github/scripts/install-nextest.sh
       - name: Record the tools, before any code of the change runs

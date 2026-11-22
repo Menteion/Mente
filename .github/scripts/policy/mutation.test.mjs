@@ -276,12 +276,14 @@ export function rustTokensText(text) {
 /// each for a space between tokens; JavaScript's \s knows only the last two. None may stand in a
 /// Rust source or in a file under compiler/ or spikes/.
 const RUST_SPACE_BEYOND_ASCII = new RegExp(`[${String.fromCharCode(0x85, 0x200e, 0x200f, 0x2028, 0x2029)}]`);
-/// `mutants::skip` as cargo-mutants 27.1.0 reads it, in its tokens: path segments `mutants` and
-/// `skip`, a leading `::` or not, alone or under a cfg_attr, with any space, line or comment
-/// between them, and raw identifiers. cargo-mutants has no option that disregards it, so the rule
-/// is here. It takes a function out of every mutation run, the floor included.
+/// cargo-mutants' attributes as the pinned build reads them (CARGO_MUTANTS_REV), in its tokens:
+/// path segments `mutants` and `skip` or `exclude_re`, a leading `::` or not, alone or under a
+/// cfg_attr, with any space, line or comment between them, and raw identifiers. `skip` takes an
+/// item out of every mutation run, and `exclude_re` the mutants its pattern names, the floor's
+/// included; cargo-mutants has no option that disregards either, so the rule is here. The build
+/// after 27.1.0 reads `exclude_re`, and `skip` on constants and statics too.
 const RUST_SPACE = `\\s${String.fromCharCode(0x85, 0x200e, 0x200f)}`;
-const MUTANTS_SKIP = new RegExp(`\\b(?:r#)?mutants[${RUST_SPACE}]*::[${RUST_SPACE}]*(?:r#)?skip\\b`);
+const MUTANTS_SKIP = new RegExp(`\\b(?:r#)?mutants[${RUST_SPACE}]*::[${RUST_SPACE}]*(?:r#)?(?:skip|exclude_re)\\b`);
 const namesMutantsSkip = (text) => MUTANTS_SKIP.test(rustTokensText(text));
 /// The attributes of a Rust source, each the text between `#[` or `#![` and its closing bracket, in
 /// the source's tokens (so no bracket in a string or a comment counts), in one pass.
@@ -303,12 +305,12 @@ export function rustAttributes(text) {
   return found;
 }
 /// A `path = ...` in an attribute, alone or under a cfg_attr: the module it names is read from a
-/// file of any name, wherever it lies (cargo-mutants 27.1.0 refuses only a leading `/`), so a
+/// file of any name, wherever it lies (cargo-mutants refuses only a leading `/`), so a
 /// function put there escapes every rule that reads the sources by their names.
 const PATH_ATTRIBUTE = /(?<![\w#])(?:r#)?path\s*=/;
 const readsModuleFromPath = (text) => rustAttributes(text).some((a) => PATH_ATTRIBUTE.test(a));
 /// An attribute whose path ends in `test` with segments before it (`rust_analyzer::test`,
-/// `miri::test`, `::test`): cargo-mutants 27.1.0 skips any item whose attribute path ends in `test`
+/// `miri::test`, `::test`): cargo-mutants skips any item whose attribute path ends in `test`
 /// (`attr_is_test`), as it skips `mutants::skip`, and clippy and rustfmt let some of them through (the
 /// fourth review of PR 137: `#[rust_analyzer::test]` took 13 listed mutants to 0). The bare `#[test]`
 /// marks a test, which no non-test code can call.
@@ -326,7 +328,7 @@ check("git reads every change as text, and no source names mutants::skip, an att
   for (const f of [...tracked()].filter((x) => x.endsWith(".rs") || x.startsWith("compiler/") || x.startsWith("spikes/"))) {
     const text = read(f);
     if (RUST_SPACE_BEYOND_ASCII.test(text)) problems.push(`${f}: a space of Rust's beyond ASCII (U+0085, U+200E, U+200F, U+2028 or U+2029)`);
-    if (f.endsWith(".rs") ? namesMutantsSkip(text) : MUTANTS_SKIP.test(text)) problems.push(`${f}: mutants::skip, which takes a function out of every mutation run, the Mutants floor's included`);
+    if (f.endsWith(".rs") ? namesMutantsSkip(text) : MUTANTS_SKIP.test(text)) problems.push(`${f}: mutants::skip or mutants::exclude_re, which takes mutants out of every mutation run, the Mutants floor's included`);
     if (f.endsWith(".rs") && readsModuleFromPath(text)) problems.push(`${f}: a #[path] attribute, whose module could be a file of any name the rules here do not read`);
     if (f.endsWith(".rs") && skipsAsTest(text)) problems.push(`${f}: an attribute whose path ends in ::test, which cargo-mutants reads as a test and skips`);
   }
@@ -416,10 +418,15 @@ check("git reads every change as text, and no source names mutants::skip, an att
     "const A: char = '\"';\n#[mutants::skip]\nconst B: &str = \"\";",
     'const A: &str = r#"/*"#;\n#[mutants::skip]',
     "fn f<'a>(x: &'a str) {}\n#[mutants::skip]",
+    // The attribute the pinned build reads beside skip, which excludes the mutants its pattern names.
+    '#[mutants::exclude_re("replace .* with true")]',
+    '#[cfg_attr(test, mutants::exclude_re("delete !"))]',
+    '#[mutants :: /* c */ exclude_re("x")]',
+    '#[::mutants::r#exclude_re("x")]',
   ]) {
     assert.ok(namesMutantsSkip(`fn f() {}\n${plant}\nfn g() {}\n`), `the mutants::skip rule lets through: ${plant}`);
   }
-  for (const fine of ["mir_mutants::command(&root)", "mutants_skip", "mutants::skipped_count", "// #[mutants::skip]", "/* #[mutants::skip] */", 'const S: &str = "#[mutants::skip]";', 'const S: &str = r##"#[mutants::skip]"##;']) {
+  for (const fine of ["mir_mutants::command(&root)", "mutants_skip", "mutants::skipped_count", "mutants::exclude_regexes()", "// #[mutants::skip]", "/* #[mutants::skip] */", 'const S: &str = "#[mutants::skip]";', 'const S: &str = r##"#[mutants::skip]"##;', '// #[mutants::exclude_re("x")]']) {
     assert.ok(!namesMutantsSkip(fine), `the mutants::skip rule refuses: ${fine}`);
   }
   // In time linear in the text, whatever it holds (CodeQL found the first pattern backtracking on
@@ -646,6 +653,11 @@ check("the plan deals every mutant of the run to one shard, as many shards as th
   const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@"));
   assert.equal(upload?.with?.name, download?.with?.name, "the shards download another artifact than the plan keeps");
   assert.ok(String(upload.with.path).split("\n").includes("plan") && download.with.path === "mutants-plan", "the shards read the plan's files elsewhere than it keeps them");
+  // Every run of cargo-mutants, the full run's too, is the build of the one commit the policy holds
+  // (CARGO_MUTANTS_REV in build-and-toolchain.test.mjs), with its own lock.
+  const installs = workflows().flatMap(({ file, doc: d }) => Object.values(d.jobs ?? {}).flatMap((j) => steps(j)).flatMap((s) => String(s.run ?? "").split("\n").filter((l) => /\bcargo\s+install\b[^\n]*\bmutants\b/.test(l)).map((l) => [file, l.trim()])));
+  assert.ok(installs.length >= 3, "the policy reads the installs of cargo-mutants");
+  for (const [file, line] of installs) assert.equal(line, 'cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"', `${file} installs cargo-mutants otherwise than from the commit the policy holds`);
   const shardScripts = steps(doc.jobs.shard).map((s) => String(s.run ?? "")).join("\n");
   assert.equal(shardScripts.split('< "mutants-plan/plan/shard-$SHARD.re"').length, 3, "the shard's list and its run do not both read its regexes");
 });
