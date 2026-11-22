@@ -17,7 +17,8 @@ let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
-  const { status, words } = prePush(input, process.cwd());
+  // git gives the hook the remote's name and the URL it pushes to.
+  const { status, words } = prePush(input, process.cwd(), process.argv[3]);
   if (status !== 0) refuse(words);
   process.exit(0);
 });

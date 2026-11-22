@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PASSED } from "./local-limits.mjs";
-import { QUICK } from "./push.mjs";
+import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
 const GUARD = fileURLToPath(new URL("./push-guard.mjs", import.meta.url));
@@ -47,7 +47,7 @@ function withRemote(body) {
     });
     const remote = path.join(dir, "remote.git");
     const work = path.join(dir, "work");
-    const run = (cwd, args, file = "git") => spawnSync(file, args, { cwd, env, encoding: "utf8" });
+    const run = (cwd, args, file = "git", input) => spawnSync(file, args, { cwd, env, encoding: "utf8", input });
     const git = (cwd, ...args) => {
       const r = run(cwd, args);
       if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
@@ -82,7 +82,7 @@ function withRemote(body) {
       git(at, "commit", "-q", "-m", file);
     };
     const remoteHas = (ref) => run(remote, ["rev-parse", "--verify", "--quiet", ref]).stdout.trim();
-    body({ dir, work, remote, run, git, tree, pass, push, commit, remoteHas });
+    body({ dir, work, remote, env, run, git, tree, pass, push, commit, remoteHas });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -169,6 +169,44 @@ test("every push git makes is held, however its refs are named: configuration, -
   });
 });
 
+test("which commits main holds, the remote says: a locally moved origin/main lets nothing through, and a remote not asked refuses", () => {
+  withRemote(({ dir, work, remote, env, run, git, tree, pass, push, commit }) => {
+    // An unpassed commit on a branch, and origin/main moved onto it by hand, by update-ref and by
+    // its --stdin: the remote's main does not hold it.
+    git(work, "checkout", "-q", "-b", "side");
+    commit(work, "s.md", "s\n");
+    const unpassed = git(work, "rev-parse", "HEAD");
+    git(work, "update-ref", "refs/remotes/origin/main", unpassed);
+    refused(push(work, "origin", "side"), /no tree has passed the quick checks/);
+    git(work, "update-ref", "refs/remotes/origin/main", git(work, "rev-parse", "main~1"));
+    const stdin = run(work, ["update-ref", "--stdin"], "git", `update refs/remotes/origin/main ${unpassed}\n`);
+    assert.equal(stdin.status, 0, stdin.stderr);
+    assert.equal(git(work, "rev-parse", "refs/remotes/origin/main"), unpassed);
+    refused(push(work, "origin", "side"), /no tree has passed the quick checks/);
+    // A tag of the remote's real main passes with no record of its own.
+    const real = git(work, "ls-remote", "origin", "refs/heads/main").split("\t")[0];
+    git(work, "tag", "real-main", real);
+    sent(push(work, "origin", "real-main"));
+    // The remote's main moves on from another clone: until it is fetched, a branch at the old main
+    // cannot be told on main, and the hook says to fetch.
+    const second = path.join(dir, "second");
+    git(dir, "clone", "-q", "-b", "main", remote, second);
+    commit(second, "z.md", "z\n");
+    git(second, "push", "-q", "origin", "main");
+    git(work, "branch", "at-old-main", real);
+    refused(push(work, "origin", "at-old-main"), /fetch first/);
+    git(work, "fetch", "-q", "origin");
+    sent(push(work, "origin", "at-old-main"));
+    // A remote the hook cannot ask refuses, whatever the record.
+    pass(work, tree(work, "main"));
+    const line = `refs/heads/side ${unpassed} refs/heads/side ${"0".repeat(40)}\n`;
+    const answer = prePush(line, work, path.join(dir, "no-such-remote.git"));
+    assert.equal(answer.status, 1);
+    assert.match(answer.words, /could not ask .* for its main/);
+    assert.match(prePush(line, work, "").words, /no remote's URL/);
+  });
+});
+
 test("a merge in progress refuses, and each worktree is held to its own record", () => {
   withRemote(({ dir, work, git, tree, pass, push, commit }) => {
     git(work, "checkout", "-q", "-b", "side");
@@ -238,11 +276,6 @@ test("the settings refuse the ways around the hook, and only those", () => {
     "git send-pack origin",
     "g''it push --no-verify",
     "git commit --no-verify -m x",
-    // The fifth review's: refs/remotes/origin/main decides what main holds for the hook.
-    "git update-ref refs/remotes/origin/main HEAD",
-    "git update-ref -d refs/remotes/origin/main",
-    "git fetch . +HEAD:refs/remotes/origin/main",
-    "git fetch elsewhere main:remotes/origin/main",
   ]) {
     for (const tool of ["Bash", "PowerShell", "Monitor", "mcp__terminal__run_in_terminal"]) {
       const r = guard(command, tool);
@@ -250,7 +283,7 @@ test("the settings refuse the ways around the hook, and only those", () => {
       assert.match(r.words, /^the push guard refused it: /);
     }
   }
-  for (const command of ["git push", "git push -u origin main", "git push -n origin main", "git status", "echo push", "git -c user.name=x push", "git config --get core.hooksPath", "git config get core.hooksPath", "git config core.hooksPath", "git config --file .git/config core.hooksPath", "git config --show-origin core.hooksPath", "git config user.name x", "git -c alias.st=status st", "git --git-dir .git status", "git fetch origin", "git fetch origin main", "git update-ref refs/heads/x HEAD"]) {
+  for (const command of ["git push", "git push -u origin main", "git push -n origin main", "git status", "echo push", "git -c user.name=x push", "git config --get core.hooksPath", "git config get core.hooksPath", "git config core.hooksPath", "git config --file .git/config core.hooksPath", "git config --show-origin core.hooksPath", "git config user.name x", "git -c alias.st=status st", "git --git-dir .git status", "git fetch origin", "git fetch origin main", "git update-ref refs/heads/x HEAD", "git update-ref refs/remotes/origin/main HEAD", "git fetch . +HEAD:refs/remotes/origin/main"]) {
     assert.deepEqual(guard(command), { status: 0, words: "" }, command);
   }
   const ws = spawnSync(process.execPath, [GUARD], { input: JSON.stringify({ tool_name: "Monitor", tool_input: { ws: { url: "wss://example.invalid" } } }), encoding: "utf8" });
