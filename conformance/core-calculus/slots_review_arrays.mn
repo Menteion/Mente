@@ -1,0 +1,64 @@
+// expect: pass
+module conformance
+// Arrays of a KiB through values kept, narrowed, nested, in structs, passed and returned, and in a
+// loop with a measure (the review of pull request 183, 2026-11-22).
+
+pub struct S {
+  a: [1024]u8
+  b: [1024]u8
+}
+
+fn bump(mut xs: [1024]u8) -> u8 {
+  xs[0] = 7
+  1
+}
+
+fn first(xs: [1024]u8, k: u8) -> u8 = xs[0] ^ k
+
+fn h(x: u8) -> [1024]u8 = [x; 1024]
+
+fn g(xs: [1024]u8, ys: [1024]u8) -> u8 = xs[1] ^ ys[2]
+
+fn wide(xs: [1024]u16) -> u16 = xs[3]
+
+pub fn kept(c: bool, x: u8) -> u8 {
+  var xs: [1024]u8 = [x; 1024]
+  val ys: [1024]u8 = [x ^ 1; 1024]
+  first(if c { xs } else { ys }, bump(mut xs))
+}
+
+pub fn narrowed(x: u8) -> u16 {
+  val a: [1024]u8 = [x; 1024]
+  wide(a)
+}
+
+pub fn nested(x: u8) -> u8 {
+  val n: [4][1024]u8 = [[x; 1024]; 4]
+  n[3][5]
+}
+
+pub fn structs(x: u8) -> u8 {
+  val s = S(a: h(x), b: h(x ^ 3))
+  val t = S(a: s.b, b: [x; 1024])
+  s.a[0] ^ t.b[9]
+}
+
+pub fn sret_args(x: u8) -> u8 = g(h(x), h(x ^ 9))
+
+pub fn repeat_struct(x: u8) -> u8 {
+  val r: [2]S = [S(a: h(x), b: h(x)); 2]
+  r[1].b[3]
+}
+
+pub fn loop_dec(n: u8) -> u8 {
+  var acc: [1024]u8 = [0; 1024]
+  var i: u8 = 0
+  while i < n
+    decreases n - i
+  {
+    val t: [1024]u8 = [acc[0] ^ i; 1024]
+    acc[i] = t[i]
+    i = i + 1
+  }
+  acc[3]
+}
