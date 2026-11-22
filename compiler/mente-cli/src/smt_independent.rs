@@ -1281,6 +1281,13 @@ pub fn beyond(file: &str, src: &str) -> Vec<Bug> {
     named(file, src, "// smt beyond the bound: ")
 }
 
+/// The checks a file names as closed soundness bugs, which Tier 1 once erased and must keep:
+/// each line `// smt closed: <function> <obligation>`, which a test holds.
+#[cfg(test)]
+pub fn closed(file: &str, src: &str) -> Vec<Bug> {
+    named(file, src, "// smt closed: ")
+}
+
 /// What `mn smt --confirm` found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Confirmed {
@@ -1457,8 +1464,9 @@ pub fn cmd_independent(args: &[String]) {
 /// `mn smt --confirm <answers> [--queries <list>] [--expect <file.mn | dir>]...`:
 /// confirms each `sat` answer on the reference interpreter and prints what it finds, and how many
 /// queries of each fragment were answered and undecided; exits 1 when a bug no `--expect` file,
-/// or file of an `--expect` directory, names is confirmed, when a model is not confirmed, when an expected bug is not, when an
-/// answer is an error or a query of the list has none, and 2 when a file cannot be read.
+/// or file of an `--expect` directory, names is confirmed, when a model is not confirmed, when
+/// an expected bug is not, when an answer is an error or a query of the list has none, and 2
+/// when a file cannot be read.
 pub fn cmd_confirm(args: &[String]) {
     let mut answers = None;
     let mut gate = Gate::default();
@@ -2114,8 +2122,10 @@ mod tests {
     /// known, each is a soundness bug that fails the job, and so is one known by another
     /// obligation or in another file, which is then missing too. A model that does not satisfy
     /// its query is a defect, and so is a solver's error, an answer missing or given twice. Tier
-    /// 1 has no known soundness bug since pull request 182 fixed root cause 1, so the bugs here
-    /// are queries written by hand for checks it keeps, beside the export's own.
+    /// 1 has no known soundness bug: the checks root cause 1 erased are closed bugs of
+    /// `tests/smt-known/loop-candidate-facts.mn`, which
+    /// `test_each_closed_bug_names_a_check_tier1_keeps` holds kept. So the bugs here are queries
+    /// written by hand for checks Tier 1 keeps, beside the export's own.
     #[test]
     fn test_a_bug_named_as_known_is_confirmed_and_reported_by_its_obligation() {
         let dir = scratch("known");
@@ -2964,6 +2974,36 @@ mod tests {
             .position(|s| s.kind == Kind::Divisor)
             .unwrap();
         assert_eq!(unqueried(&enc, &[divisor]), Unqueried::Unreachable);
+    }
+
+    /// Each check `tests/smt-known` names as a closed soundness bug is in its program, and Tier
+    /// 1 keeps it: a regression of root cause 1 of the nightly triage, which erased these checks
+    /// on facts read at a loop's head, fails here, whatever else the export's corpus holds.
+    #[test]
+    fn test_each_closed_bug_names_a_check_tier1_keeps() {
+        let file =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/smt-known/loop-candidate-facts.mn");
+        let src = fs::read_to_string(&file).unwrap();
+        let bugs = closed(&file.display().to_string(), &src);
+        assert_eq!(bugs.len(), 3);
+        let checked = mente_sema::check_program(&src).unwrap();
+        let module = module_of(&checked);
+        for (_, function, obligation) in &bugs {
+            let index = checked.index(function).unwrap();
+            let cf = checked.functions[index].as_ref().unwrap();
+            let enc = mente_smt::encode(&module, index);
+            let keys = erased(&cf.obligations);
+            let group = groups(&enc, |_| true)
+                .into_iter()
+                .find(|g| enc.sites[g[0]].obligation() == *obligation)
+                .unwrap_or_else(|| panic!("{} holds no check `{}`", function, obligation));
+            assert!(
+                !keys.contains(&enc.sites[group[0]].key()),
+                "Tier 1 erases {}'s `{}` again: root cause 1 of the nightly triage",
+                function,
+                obligation
+            );
+        }
     }
 
     /// A check none of whose sites fails is unreachable only where no path of its function is

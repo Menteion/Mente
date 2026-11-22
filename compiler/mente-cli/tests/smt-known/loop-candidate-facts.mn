@@ -1,0 +1,46 @@
+// Closed soundness bugs of Tier 1 (docs/design-review.md, smt-independent-encoding). Tier 1 once
+// assumed at a loop's head the candidate facts it reads from the loop's own condition and from
+// the `guard`s of its body, evaluated where a `%` by `d` or a narrowing in them is taken not to
+// trap, and so "proved" and erased the check that it does not trap (root cause 1 of the nightly
+// triage of 2026-11-21). Tier 1 now keeps each such check.
+//
+// Each `smt closed:` line names a check Tier 1 must keep, as a query names it. A test of
+// src/smt_independent.rs (test_each_closed_bug_names_a_check_tier1_keeps) holds that the check
+// is in the program and that Tier 1 does not erase it, so a regression of root cause 1 fails it,
+// whatever else the export's corpus holds. The SMT job exports this file with the rest of the
+// directory; its `--expect` reads `smt:` lines alone, of which this file has none.
+//
+// smt closed: rem divisor at 23:23
+// smt closed: guarded divisor at 32:15
+// smt closed: narrow range at 42:24 into `u8`
+module closed
+
+fn take(x: u8) -> u8 = x
+
+pub fn rem(d: u8) -> u8 {
+  var i: u8 = 0
+  // Its condition reads `7 % d` at the loop's head; d = 0 traps there.
+  while i < 1 and 7 % d < 9 {
+    i += 1
+  }
+  i
+}
+
+pub fn guarded(d: u8) -> u8 {
+  var i: u8 = 0
+  while i < 1 {
+    guard 7 % d >= 0 else {
+      return 9
+    }
+    i += 1
+  }
+  i
+}
+
+pub fn narrow(d: u8) -> u8 {
+  var i: u8 = 0
+  while i < 1 and take(d + 250) < 255 {
+    i += 1
+  }
+  i
+}

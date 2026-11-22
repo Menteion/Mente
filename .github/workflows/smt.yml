@@ -170,9 +170,10 @@ jobs:
         # compiler/mente-smt encodes each check from the syntax tree and the checker's types alone,
         # never from Tier 1's facts, unrolling each loop and each recursion up to 3 times
         # (docs/design-review.md, smt-independent-encoding). The files of
-        # compiler/mente-cli/tests/smt-known are exported with the rest: a known limit, and any
-        # known soundness bug, a `// smt:` line there, which must be confirmed. The export fails on an obligation of Tier 1 with no site, and writes what it made of each
-        # check Tier 1 erased, for the comparison with the base.
+        # compiler/mente-cli/tests/smt-known are exported with the rest: a known limit, the closed
+        # bugs a test holds kept, and any known soundness bug, a `// smt:` line there, which must
+        # be confirmed. The export fails on an obligation of Tier 1 with no site, and writes what it
+        # made of each check Tier 1 erased, for the comparison with the base.
         run: |
           set -euo pipefail
           mapfile -t pass < <(for f in conformance/*/*.mn; do
