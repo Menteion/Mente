@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { doctestProblems, problems as testListProblems, overrideTests } from "../lib/test-list.mjs";
 import { PINNED_JOBS } from "./pins.mjs";
 import { filesUnder, read, tomlSubset, workspace } from "./repo.mjs";
-import { TESTING_JOBS } from "./sandbox.mjs";
+import { MUTATION_JOBS, TESTING_JOBS } from "./sandbox.mjs";
 import { logicalLines, stepKey, steps, workflows } from "./workflows.mjs";
 
 /// Every check of this module counts itself when it runs, and the module fails when fewer ran than
@@ -42,6 +42,8 @@ const NEXTEST_TABLES = new Map([
   ],
   ["profile.ci", { array: false, keys: ["fail-fast"] }],
   ["profile.mutants", { array: false, keys: ["fail-fast"] }],
+  // The mutation runs' order: the tests that use every core after the others.
+  ["profile.mutants.overrides", { array: true, kinds: new Map([["last", ["filter", "priority"]]]) }],
   ["test-groups", { array: false, keys: ["all-cores"] }],
 ]);
 /// The limits, as .config/nextest.toml must state them, spaces aside: nextest reads them there, and
@@ -53,6 +55,7 @@ const NEXTEST_VALUES = new Map([
   ["profile.default.overrides/slow-timeout", '{ period = "60s", terminate-after = 3 }'],
   ["profile.ci/fail-fast", "false"],
   ["profile.mutants/fail-fast", "true"],
+  ["profile.mutants.overrides/priority", "-100"],
   ["profile.default.overrides/test-group", '"all-cores"'],
   ["profile.default.overrides/threads-required", '"num-test-threads"'],
   ["test-groups/all-cores", "{ max-threads = 1 }"],
@@ -174,6 +177,9 @@ check("the tests run under the limits the policy holds, and every test given mor
   const shown = (list) => list.map(([p, t]) => `${p} ${t}`).sort();
   assert.deepEqual(shown(namedBy("slow")), shown(SLOW_TESTS), "the overrides give their longer limit to other tests than SLOW_TESTS, or one twice: more time for a test is a change to the policy too");
   assert.deepEqual(shown(namedBy("all-cores")), shown(ALL_CORES_TESTS), "the overrides run alone other tests than ALL_CORES_TESTS, or one twice: a test that uses every core is a change to the policy too");
+  // The mutation runs take exactly those tests last: a caught mutant stops at its first failing
+  // test, and these hold the whole machine (the measure of PR 191's run 44959802577).
+  assert.deepEqual(shown(namedBy("last")), shown(ALL_CORES_TESTS), "the mutation runs take other tests last than ALL_CORES_TESTS, or one twice");
   const named = [...namedBy("slow"), ...namedBy("all-cores")];
   const [coresFile, groupLine] = CORES_GROUP;
   const groupName = /"([^"]*)"/.exec(NEXTEST_VALUES.get("profile.default.overrides/test-group"))[1];
@@ -279,11 +285,15 @@ check("the tests run through the pinned nextest under the shared limits, which n
   assert.equal(tests.length, 1, "the Rust jobs do not run the tests through nextest in one step");
   assert.equal(tests[0].run, NEXTEST_STEP, "the Rust jobs' tests do not run as NEXTEST_STEP in .github/scripts/policy/test-runs.test.mjs reads them: the limits, then nextest under the ci profile; a change to the step changes NEXTEST_STEP too");
   assert.deepEqual(Object.keys(tests[0]).sort(), ["name", "run"], "the Rust jobs' step of the tests carries more than its name and script");
-  // The mutation runs: their tests under the mutants profile, inside the same limits.
+  // The mutation runs and their plan: their tests under the mutants profile, inside the same
+  // limits.
   for (const key of TESTING_JOBS.filter((k) => !k.startsWith("ci.yml#"))) {
+    const w = workflows().find((x) => x.file === key.split("#")[0]);
+    assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${key} runs its tests under another profile`);
+  }
+  for (const key of MUTATION_JOBS) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
-    assert.equal(w.doc.env?.NEXTEST_PROFILE, "mutants", `${file} runs its tests under another profile`);
     const mutate = steps(w.doc.jobs[id]).filter((s) => /^cargo mutants (?!.*--list)/m.test(String(s.run ?? "")));
     assert.ok(mutate.length > 0, `${file}: no step runs cargo mutants`);
     for (const s of mutate) {
@@ -305,7 +315,8 @@ check("the list of tests is read as nextest writes it", () => {
   assert.equal(testListProblems(list([["a", "a", [["m::slow", true], ["m::later", true]]], ["b", "b::it", [["slow", false]]]]), "a m::later\na m::slow\n", toml).length, 1, "a slow test that is ignored");
   assert.equal(testListProblems(list([["a", "a", [["m::later", true]]], ["b", "b::it", [["slow", false]]]]), "a m::later\n", toml).length, 1, "a slow test compiled out");
   assert.equal(testListProblems(list([]), "", "").length, 1, "an empty list");
-  assert.deepEqual(overrideTests(read(".config/nextest.toml")).sort(), [...SLOW_TESTS, ...ALL_CORES_TESTS].map(([p, t]) => `${p} ${t}`).sort(), "lib/test-list.mjs reads the overrides' tests as the policy does");
+  // Every override's tests, the mutation runs' order naming the all-cores group's again.
+  assert.deepEqual(overrideTests(read(".config/nextest.toml")).sort(), [...SLOW_TESTS, ...ALL_CORES_TESTS, ...ALL_CORES_TESTS].map(([p, t]) => `${p} ${t}`).sort(), "lib/test-list.mjs reads the overrides' tests as the policy does");
   // The doctests' list, as `cargo test --doc -- --list` prints it.
   const none = "   Doc-tests mente_ast\n0 tests, 0 benchmarks\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n";
   assert.deepEqual(doctestProblems(none), []);

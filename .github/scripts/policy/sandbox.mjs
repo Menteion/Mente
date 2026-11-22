@@ -2,9 +2,13 @@
 // testing jobs, the jobs left outside it with their reasons, and the runners a job may name.
 
 import { NIGHTLY_ALARM_JOBS, PAGES_DEPLOY_JOB, isPlain } from "./workflows.mjs";
+/// The mutation runs: the jobs that run cargo-mutants over the change's mutants, a pull request's
+/// shards and the full run's.
+export const MUTATION_JOBS = ["mutants.yml#shard", "mutants-full.yml#full"];
 /// The pinned jobs that run the workspace's tests through nextest, under the shared limits, and
-/// record their tools: the required Rust jobs and the mutation runs.
-export const TESTING_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#full"];
+/// record their tools: the required Rust jobs, the plan of a pull request's mutation run, which
+/// times its tests, and the mutation runs.
+export const TESTING_JOBS = ["ci.yml#rust", "mutants.yml#plan", ...MUTATION_JOBS];
 /// What names the sandbox as cargo's runner in a step, and starts the count of what ran in it: the
 /// testing jobs' limits, which source the second, or the second alone.
 export const SANDBOX_SOURCES = [". .github/scripts/limits.sh", ". .github/scripts/test-sandbox-env.sh"];
@@ -38,6 +42,7 @@ export const GATE_ONLY = new Map([
   ["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"],
   [PAGES_DEPLOY_JOB, "it deploys the site its build job made from a tag the build proved in main's history, and runs nothing else"],
   ...NIGHTLY_ALARM_JOBS.map((key) => [key, "it runs .github/scripts/nightly-alarm.mjs alone, with the results of the jobs it needs"]),
+  ["mutants.yml#aggregate", "it checks out nothing: one step reads the plan's outputs and the shards' result"],
 ]);
 /// The labels a job may run on: each a literal, or a matrix value that is one.
 export const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);

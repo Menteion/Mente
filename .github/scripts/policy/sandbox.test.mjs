@@ -29,7 +29,18 @@ after(() => {
 /// jobs, and the jobs that run the release tests through cargo alone. A rule that read their
 /// steps line by line and no further let through a runner unset after its source, a check inside
 /// `if false`, and cargo's shorter spellings (`cargo t`).
-const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#in-diff", "mutants-full.yml#full", "ci.yml#execution-paths", "generated.yml#paths"];
+const SANDBOXED_JOBS = ["ci.yml#rust", "mutants.yml#plan", "mutants.yml#shard", "mutants-full.yml#full", "ci.yml#execution-paths", "generated.yml#paths"];
+/// The steps of each sandboxed job that run code of the change, at the least, as the policy reads
+/// them: fewer means the reading lost one. The plan of a pull request's mutation run has one, its
+/// baseline, where each other job had two at the least.
+const CODE_STEPS = new Map([
+  ["ci.yml#rust", 6],
+  ["mutants.yml#plan", 1],
+  ["mutants.yml#shard", 2],
+  ["mutants-full.yml#full", 2],
+  ["ci.yml#execution-paths", 2],
+  ["generated.yml#paths", 3],
+]);
 
 /// The step that sets up the sandbox the code of a change runs in on Linux, and proves it on that
 /// runner with the canary: exactly these two commands, and, in a testing job, which records its
@@ -97,6 +108,7 @@ const runsCodeUnread = (line) => {
 };
 
 check("on Linux the testing jobs prove the tests' sandbox first, and every step that runs code of the change ran it there", () => {
+  assert.deepEqual([...CODE_STEPS.keys()], SANDBOXED_JOBS, "CODE_STEPS holds other jobs than SANDBOXED_JOBS");
   for (const key of SANDBOXED_JOBS) {
     const [file, id] = key.split("#");
     const w = workflows().find((x) => x.file === file);
@@ -153,7 +165,7 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
       assert.ok(ran.length === 1 && ran[0] > runs.at(-1), `${step} runs code of the change and does not check, once and after it, that it ran in the sandbox`);
       assert.equal(lines[ran[0]], mutants ? `${RAN} "$caught"` : RAN, `${step} checks other than that ${mutants ? "each mutant caught" : "a command"} ran in the sandbox`);
     }
-    assert.ok(running >= 2, `${key}: the policy reads the steps that run code of the change`);
+    assert.ok(running >= CODE_STEPS.get(key), `${key}: the policy reads ${running} steps that run code of the change, fewer than CODE_STEPS holds`);
     assert.deepEqual(boundPlacementProblems(key, all), []);
   }
   // The planted cases: the bound missing, twice, spelled otherwise, before the `ran`, after the
@@ -181,7 +193,7 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
     ["cargo test --locked -p mente-cli --test gates", true],
     ["timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter", true],
     ["cargo run --locked --bin mn -- spec", true],
-    ['cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place || status=$?', true],
+    ['cargo mutants "${shard[@]}" --in-place || status=$?', true],
     ["bash .github/scripts/overflow-proof.sh", true],
     ["cargo test --locked --workspace --no-run", false],
     ["cargo test --locked --workspace --doc -- --list > x 2>&1", false],

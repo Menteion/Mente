@@ -7,7 +7,10 @@
 # own in an instrument job, and that may not fail quietly: deleting the step, skipping it, changing
 # the line or letting it continue on error fails the policy. Every job that builds in release proves
 # its overflow checks. A job's every required check is named in .github/required-checks.txt, and
-# every required job is named here.
+# every required job is named here, but an aggregate: a required job that needs the others of its
+# workflow, runs no command of its own and passes only when they do, whose shape the policy holds
+# (aggregateProblems in .github/scripts/policy/required-checks.test.mjs). The jobs it needs are
+# required jobs, named here.
 
 ci.yml#rust: node .github/scripts/build-time-code.mjs --before-toolchain
 ci.yml#rust: node .github/scripts/build-time-code.mjs
@@ -57,17 +60,27 @@ ci.yml#docs: npm run test:harness
 
 commits.yml#commits: node .github/scripts/commits.mjs
 
-mutants.yml#in-diff: node .github/scripts/build-time-code.mjs --before-toolchain
-mutants.yml#in-diff: node .github/scripts/build-time-code.mjs
-mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh setup
-mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh check
-mutants.yml#in-diff: git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
-mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran
-mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
-mutants.yml#in-diff: /usr/bin/bash .github/scripts/test-sandbox.sh bound
-mutants.yml#in-diff: cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants"
-mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs evidence "$out" "$deleted_out" > evidence.txt
-mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
+mutants.yml#plan: node .github/scripts/build-time-code.mjs --before-toolchain
+mutants.yml#plan: node .github/scripts/build-time-code.mjs
+mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh check
+mutants.yml#plan: git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
+mutants.yml#plan: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
+mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh ran
+mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh bound
+mutants.yml#plan: node .github/scripts/mutants-floor.mjs plan diff-mutants.json deleted-mutants.json "$(cat baseline-seconds.txt)" plan >> "$GITHUB_OUTPUT"
+
+mutants.yml#shard: node .github/scripts/build-time-code.mjs --before-toolchain
+mutants.yml#shard: node .github/scripts/build-time-code.mjs
+mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh setup
+mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh check
+mutants.yml#shard: node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
+mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh ran
+mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
+mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh bound
+mutants.yml#shard: cargo mutants "${shard[@]}" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants"
+mutants.yml#shard: node .github/scripts/mutants-floor.mjs evidence "$out" > evidence.txt
+mutants.yml#shard: node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" "$out" > unrun.txt
 
 generated.yml#paths: node .github/scripts/build-time-code.mjs --before-toolchain
 generated.yml#paths: node .github/scripts/build-time-code.mjs

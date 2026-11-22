@@ -156,13 +156,14 @@ const TOOL_ENV =
   /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|RUSTFMT|CLIPPY_|BASH_ENV$|BASH_FUNC_|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_|NPM_CONFIG_|LD_|DYLD_|GLIBC_TUNABLES$|GCONV_|LOCPATH$|MALLOC_|GIT_|HOME$|XDG_|TMPDIR$|OPENSSL_|SSL_CERT_|CURL_CA_BUNDLE$|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$)/i;
 const TOOL_ENV_ALLOWED = new Map([
   ["CARGO_TERM_COLOR", { value: "always", jobs: null }],
-  // The full run's alarm inherits the workflow's two, and runs no cargo and no nextest.
-  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
+  // The full run's alarm, and a pull request's aggregate, inherit their workflow's two, and run no
+  // cargo and no nextest.
+  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // The fuzzer's release build also asserts what a debug build asserts.
   ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", { value: "true", jobs: ["fuzz.yml#fuzz"] }],
   // The base branch's build beside this change's.
   ["CARGO_TARGET_DIR", { value: "${{ github.workspace }}/../target", jobs: ["perf.yml#kernels"] }],
-  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#in-diff", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
+  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // A warning fails the build.
   ["RUSTFLAGS", { value: "-D warnings", jobs: ["ci.yml#rust"] }],
 ]);

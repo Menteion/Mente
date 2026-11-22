@@ -8,7 +8,7 @@ import path from "node:path";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "../lib/watch.mjs";
 import { SANDBOX_PROGRAM, deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "../lib/mutants-floor.mjs";
 import { ROOT, filesUnder, read, tracked, workspace } from "./repo.mjs";
-import { REPORT_FORMS, WATCH_FORMS, WORKFLOWS, allJobs, hasWatch, isReport, normalize, repoPaths, requiredChecks, requiredJobs, scriptTexts, steps } from "./workflows.mjs";
+import { REPORT_FORMS, WATCH_FORMS, WORKFLOWS, allJobs, hasWatch, isReport, needsOf, normalize, repoPaths, requiredChecks, requiredJobs, scriptTexts, steps } from "./workflows.mjs";
 
 /// Every check of this module counts itself when it runs, and the module fails when fewer ran than
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
@@ -32,10 +32,12 @@ const isDir = (dir) => [...tracked()].some((f) => f.startsWith(`${dir}/`));
 check("every instrument workflow decides at its first step, and every later step obeys", () => {
   const sections = parsePaths(read(PATHS_FILE));
   const required = new Set(requiredChecks());
-  for (const { file, id, job, names } of allJobs()) {
+  for (const { file, doc, id, job, names } of allJobs()) {
     const all = steps(job);
     if (!hasWatch(job)) {
-      assert.ok(!sections.has(file) || !names.some((n) => required.has(n)), `${file}, job ${id}: a required job of an instrument workflow with no watch step`);
+      // An aggregate decides through the job it needs that holds the watch: its plan.
+      const planned = needsOf(job).some((need) => hasWatch(doc.jobs?.[need] ?? {}));
+      assert.ok(!sections.has(file) || !names.some((n) => required.has(n)) || planned, `${file}, job ${id}: a required job of an instrument workflow with no watch step`);
       continue;
     }
     const where = `${file}, job ${id}`;

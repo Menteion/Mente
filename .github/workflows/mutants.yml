@@ -4,9 +4,14 @@
 # with chosen inputs can report this job's check. Tests run through nextest. Settings:
 # .cargo/mutants.toml and .config/nextest.toml.
 #
-# "Mutants in the diff" is a required check of `main`: it runs on every pull request, and its first
-# step after the checkout ends the job at once when no path .github/instrument-paths.txt lists for
-# it changed. In the merge queue it does not run again, since it ran on the pull request's head.
+# "Mutants in the diff" is a required check of `main`, the aggregate below: it passes only when
+# the plan succeeded and every shard the plan made passed, or when the plan found nothing to
+# mutate, for a reason it names. The plan's first step after the checkout decides whether any path
+# .github/instrument-paths.txt lists for it changed; in the merge queue it does not run again,
+# since it ran on the pull request's head. The plan lists the change's mutants, checks the floor of
+# the whole diff, times the tests once without a mutant, and deals the mutants round-robin to as
+# many shards as that time needs, at most sixteen (.github/scripts/lib/mutants-floor.mjs); each
+# shard runs exactly its share.
 name: Mutants
 
 on:
@@ -23,21 +28,22 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_MUTANTS_VERSION: "27.1.0"
-  # The nextest profile that stops a test running too long (.config/nextest.toml).
+  # The nextest profile that stops a test running too long, and runs the tests that take every
+  # core after the others (.config/nextest.toml).
   NEXTEST_PROFILE: mutants
 
 jobs:
-  in-diff:
-    # Each mutant rebuilds and runs the whole workspace's tests, one after another, so a large
-    # pull request takes hours on one runner; four shards share its mutants.
-    name: Mutants in the diff (shard ${{ matrix.shard }} of 4)
+  plan:
+    name: Mutants plan
     runs-on: ubuntu-24.04
-    # The most GitHub allows a job: a shard of #120 took 154 minutes.
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [0, 1, 2, 3]
+    # Its own tests once, with their build, and the lists: PR 191's took under ten minutes.
+    timeout-minutes: 60
+    outputs:
+      run: ${{ steps.watch.outputs.run }}
+      reason: ${{ steps.plan.outputs.reason }}
+      count: ${{ steps.plan.outputs.count }}
+      shards: ${{ steps.plan.outputs.shards }}
+      needed: ${{ steps.plan.outputs.needed }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -71,19 +77,16 @@ jobs:
         run: /usr/bin/bash .github/scripts/tools.sh record
       - name: The sandbox the code of the change runs in, proven before any of it runs
         if: steps.watch.outputs.run != 'false'
-        # Every test executable of the baseline and of each mutant runs as a user of its own in a
-        # root that holds the workspace read-only and none of the tools, with no network and no
-        # sight of another process: cargo-mutants and nextest, and the outcomes and logs they
-        # write, are out of its reach. The canary proves it on this runner
-        # (.github/scripts/test-sandbox.sh).
+        # Every test executable of the baseline runs as a user of its own in a root that holds the
+        # workspace read-only and none of the tools, with no network and no sight of another
+        # process: nextest, and the lists and logs the job writes, are out of its reach. The canary
+        # proves it on this runner (.github/scripts/test-sandbox.sh).
         run: |
           /usr/bin/bash .github/scripts/test-sandbox.sh setup
           /usr/bin/bash .github/scripts/test-sandbox.sh check
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: The diff and the lists the floor reads, before any code of the change runs
         if: steps.watch.outputs.run != 'false'
-        env:
-          SHARD: ${{ matrix.shard }}
         # Read before the tests run: one of them could move origin's refs, or rewrite the base's
         # settings, and bring the floor to 0. Listing mutants reads the sources and runs no code of
         # the change. The diff is read as text whatever .gitattributes says: a file it marks -diff
@@ -99,11 +102,8 @@ jobs:
           node .github/scripts/mutants-floor.mjs deleted pr.diff all-mutants.json diff-mutants.json > deleted-re.txt
           deleted=()
           while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
-          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --list --json > shard-mutants.json
-          : > shard-deleted.json
           : > deleted-mutants.json
           if [ "${#deleted[@]}" -gt 0 ]; then
-            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --list --json > shard-deleted.json
             cargo mutants "${deleted[@]}" --list --json > deleted-mutants.json
           fi
           # The base's settings, so that a pull request cannot exclude what it changes.
@@ -114,8 +114,135 @@ jobs:
           fi
           cargo mutants --list --json "${config[@]}" > base-all-mutants.json
           /usr/bin/bash .github/scripts/tools.sh verify
-      - name: Run the tests once without a mutant
+      - name: The floor of the whole diff, before any code of the change runs
         if: steps.watch.outputs.run != 'false'
+        # When the diff changes code where mutants lie, counted apart from cargo-mutants' own diff
+        # filter and under the base's .cargo/mutants.toml, every mutant it changes is in the run's
+        # lists by name (.github/scripts/mutants-floor.mjs). A diff of tests, comments or files
+        # outside the compiler holds no such mutant: floor 0. Every count must be a number: an
+        # empty one fails, never compares.
+        run: |
+          count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
+          expected=$(node .github/scripts/mutants-floor.mjs expected pr.diff base-all-mutants.json)
+          count "$expected" "the mutants the diff changes"
+          in_diff=$(node .github/scripts/mutants-floor.mjs count diff-mutants.json)
+          count "$in_diff" "the mutants cargo-mutants lists for the diff"
+          around=$(node .github/scripts/mutants-floor.mjs count deleted-mutants.json)
+          count "$around" "the mutants around deleted lines"
+          node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
+          lost=$(grep -c . missing.txt || true)
+          count "$lost" "the expected mutants the run leaves out"
+          echo "Mutants the diff changes, under the base's settings: $expected; listed for the run: $((in_diff + around)); left out: $lost" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$lost" -gt 0 ]; then
+            { echo "## Mutants the run leaves out"; echo '```text'; cat missing.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$lost of the $expected mutants the diff changes are not in the run's lists: an exclusion lands apart from the change to what it excludes"
+            exit 1
+          fi
+          /usr/bin/bash .github/scripts/tools.sh verify
+      - name: Run the tests once without a mutant, and time them
+        if: steps.watch.outputs.run != 'false'
+        # Built first, so that the time is the tests' alone: what a mutant no test catches runs
+        # again, and the plan's estimate of each mutant (.github/scripts/lib/mutants-floor.mjs).
+        # The clock is the shell's, outside the sandbox.
+        run: |
+          set -o pipefail
+          # The change's tests, under the limits every test runs under.
+          . .github/scripts/limits.sh
+          cargo nextest run --workspace --no-run
+          start=$(date +%s)
+          cargo nextest run --workspace 2>&1 | tee baseline.log
+          echo "$(( $(date +%s) - start ))" > baseline-seconds.txt
+          { echo "## Slowest tests without a mutant"; echo '```text'
+            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
+            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/test-sandbox.sh bound
+          /usr/bin/bash .github/scripts/tools.sh verify
+      - name: Deal the mutants to the shards the baseline's time needs
+        id: plan
+        if: steps.watch.outputs.run != 'false'
+        # Read from the lists made before the tests ran; the plan checks that every mutant of the
+        # run lies in exactly one shard, and writes the shards' names and exact regexes.
+        run: |
+          node .github/scripts/mutants-floor.mjs plan diff-mutants.json deleted-mutants.json "$(cat baseline-seconds.txt)" plan >> "$GITHUB_OUTPUT"
+          cat plan/summary.md >> "$GITHUB_STEP_SUMMARY"
+          /usr/bin/bash .github/scripts/tools.sh verify
+      - name: Keep the plan for the shards
+        if: steps.watch.outputs.run != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutants-plan
+          path: |
+            pr.diff
+            diff-mutants.json
+            deleted-mutants.json
+            base-all-mutants.json
+            missing.txt
+            plan
+          if-no-files-found: error
+
+  shard:
+    # Each shard runs exactly the mutants the plan dealt it, in one cargo-mutants run whose tests
+    # run in the sandbox. GitHub runs no job of an empty matrix, so a plan of no shard skips it.
+    name: Mutants shard ${{ matrix.shard }}
+    needs: plan
+    if: needs.plan.outputs.run == 'true' && needs.plan.outputs.count != '0'
+    runs-on: ubuntu-24.04
+    # The most GitHub allows a job, as the bound; the plan sized each shard to half of it.
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
+      - name: The plan
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mutants-plan
+          path: mutants-plan
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked --version "$CARGO_MUTANTS_VERSION"
+      - name: Install cargo-nextest
+        run: bash .github/scripts/install-nextest.sh
+      - name: Record the tools, before any code of the change runs
+        run: /usr/bin/bash .github/scripts/tools.sh record
+      - name: The sandbox the code of the change runs in, proven before any of it runs
+        # Every test executable of the baseline and of each mutant runs as a user of its own in a
+        # root that holds the workspace read-only and none of the tools, with no network and no
+        # sight of another process: cargo-mutants and nextest, and the outcomes and logs they
+        # write, are out of its reach. The canary proves it on this runner
+        # (.github/scripts/test-sandbox.sh).
+        run: |
+          /usr/bin/bash .github/scripts/test-sandbox.sh setup
+          /usr/bin/bash .github/scripts/test-sandbox.sh check
+          /usr/bin/bash .github/scripts/tools.sh verify
+      - name: This shard's mutants, as the plan dealt them, before any code of the change runs
+        env:
+          SHARD: ${{ matrix.shard }}
+        # cargo-mutants lists, by the exact regex of each name the plan dealt this shard, the
+        # mutants the run below will test: they must be the names dealt, each as often.
+        run: |
+          case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard is not a number: '$SHARD'"; exit 1 ;; esac
+          shard=()
+          while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "mutants-plan/plan/shard-$SHARD.re"
+          if [ "${#shard[@]}" -eq 0 ]; then echo "::error::the plan dealt shard $SHARD no mutant"; exit 1; fi
+          cargo mutants "${shard[@]}" --list --json > shard-mutants.json
+          node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
+          if [ -s unlisted.txt ]; then
+            { echo "## Mutants listed otherwise than the plan dealt them"; echo '```text'; cat unlisted.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::cargo-mutants lists this shard's mutants otherwise than the plan dealt them"
+            exit 1
+          fi
+          /usr/bin/bash .github/scripts/tools.sh verify
+      - name: Run the tests once without a mutant
         # cargo-mutants' own baseline tests only the packages it mutates, though every mutant
         # runs the whole workspace's tests, so the timeout it set from that baseline was often
         # its 20 s minimum, and cut a mutant's tests short before any had failed. This baseline
@@ -125,13 +252,9 @@ jobs:
           # The change's tests, under the limits every test runs under.
           . .github/scripts/limits.sh
           cargo nextest run --workspace 2>&1 | tee baseline.log
-          { echo "## Slowest tests without a mutant"; echo '```text'
-            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
-            echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
-      - name: Mutate the lines this pull request changes
-        if: steps.watch.outputs.run != 'false'
+      - name: Mutate this shard's mutants
         env:
           SHARD: ${{ matrix.shard }}
         run: |
@@ -139,6 +262,9 @@ jobs:
           . .github/scripts/limits.sh
           # Every count the floor reads must be a number: an empty one fails, never compares.
           count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
+          case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard is not a number: '$SHARD'"; exit 1 ;; esac
+          shard=()
+          while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "mutants-plan/plan/shard-$SHARD.re"
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
           # missed and 3 when one timed out. A mutant that loops without end fails the test
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
@@ -147,40 +273,22 @@ jobs:
           # cargo-mutants writes its outcomes and logs outside the workspace: inside it a test
           # could read them, and tell which mutant it runs under.
           status=0
-          cargo mutants --in-diff pr.diff --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
+          cargo mutants "${shard[@]}" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
-          # The mutants around deleted lines, read before the tests ran.
-          deleted=()
-          while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
-          if [ "${#deleted[@]}" -gt 0 ]; then
-            status=0
-            cargo mutants "${deleted[@]}" --shard "$SHARD/4" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants-deleted" || status=$?
-            case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
-          fi
           failed=0
           out=$RUNNER_TEMP/mutants/mutants.out
-          deleted_out=$RUNNER_TEMP/mutants-deleted/mutants.out
-          for dir in "$out" "$deleted_out"; do
-            for outcome in missed timeout; do
-              if [ -s "$dir/$outcome.txt" ]; then
-                { echo "## Mutants $outcome"; echo '```text'; cat "$dir/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-                failed=2
-              fi
-            done
+          for outcome in missed timeout; do
+            if [ -s "$out/$outcome.txt" ]; then
+              { echo "## Mutants $outcome"; echo '```text'; cat "$out/$outcome.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              failed=2
+            fi
           done
-          # The floor of work done. Every mutant cargo-mutants lists for this shard has an outcome;
-          # and when the diff changes code where mutants lie, counted apart from cargo-mutants' own
-          # diff filter and under the base's .cargo/mutants.toml, so that a pull request cannot
-          # exclude what it changes (.github/scripts/mutants-floor.mjs), the run tested some. A
-          # diff of tests, comments or files outside the compiler holds no such mutant: floor 0.
-          tested=$(cat "$out/caught.txt" "$out/missed.txt" "$out/timeout.txt" "$out/unviable.txt" \
-            "$deleted_out/caught.txt" "$deleted_out/missed.txt" "$deleted_out/timeout.txt" \
-            "$deleted_out/unviable.txt" 2>/dev/null | grep -c . || true)
+          tested=$(cat "$out/caught.txt" "$out/missed.txt" "$out/timeout.txt" "$out/unviable.txt" 2>/dev/null | grep -c . || true)
           count "$tested" "the mutants tested"
           # Every mutant counted caught had a test fail under nextest, which had handed its tests
           # to the sandbox, and every one counted unviable a build the compiler refused: its own
           # log shows it (.github/scripts/mutants-floor.mjs).
-          node .github/scripts/mutants-floor.mjs evidence "$out" "$deleted_out" > evidence.txt
+          node .github/scripts/mutants-floor.mjs evidence "$out" > evidence.txt
           lacking=$(grep -c . evidence.txt || true)
           count "$lacking" "the mutants whose outcome their logs do not show"
           if [ "$lacking" -gt 0 ]; then
@@ -188,48 +296,83 @@ jobs:
             echo "::error::$lacking mutants are counted caught or unviable without a failed test or a failed build in their logs"
             failed=1
           fi
-          # The lists were read before the tests ran.
-          listed=$(node .github/scripts/mutants-floor.mjs count shard-mutants.json)
-          count "$listed" "the mutants listed for this shard"
-          more=$(node .github/scripts/mutants-floor.mjs count shard-deleted.json)
-          count "$more" "the mutants of deleting hunks listed for this shard"
-          listed=$((listed + more))
-          echo "Mutants listed for this shard: $listed; tested: $tested" | tee -a "$GITHUB_STEP_SUMMARY"
-          if [ "$tested" -ne "$listed" ]; then
-            echo "::error::cargo-mutants listed $listed mutants for this shard and reported an outcome for $tested"
+          # The run tested exactly the mutants the plan dealt this shard, each once: none left
+          # out, none beside them.
+          node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" "$out" > unrun.txt
+          unrun=$(grep -c . unrun.txt || true)
+          count "$unrun" "the mutants tested otherwise than the plan dealt them"
+          echo "Mutants tested in shard $SHARD: $tested; otherwise than dealt: $unrun" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$unrun" -gt 0 ]; then
+            { echo "## Mutants tested otherwise than the plan dealt them"; echo '```text'; cat unrun.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$unrun of this shard's mutants were tested otherwise than the plan dealt them"
             failed=1
-          fi
-          if [ "$SHARD" = 0 ]; then
-            expected=$(node .github/scripts/mutants-floor.mjs expected pr.diff base-all-mutants.json)
-            count "$expected" "the mutants the diff changes"
-            in_diff=$(node .github/scripts/mutants-floor.mjs count diff-mutants.json)
-            count "$in_diff" "the mutants cargo-mutants lists for the diff"
-            around=$(node .github/scripts/mutants-floor.mjs count deleted-mutants.json)
-            count "$around" "the mutants around deleted lines"
-            # Every mutant the base's settings expect must be in the run's lists, by name.
-            node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
-            lost=$(grep -c . missing.txt || true)
-            count "$lost" "the expected mutants the run leaves out"
-            echo "Mutants the diff changes, under the base's settings: $expected; listed for the run: $((in_diff + around)); left out: $lost" | tee -a "$GITHUB_STEP_SUMMARY"
-            if [ "$lost" -gt 0 ]; then
-              { echo "## Mutants the run leaves out"; echo '```text'; cat missing.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-              echo "::error::$lost of the $expected mutants the diff changes are not in the run's lists: an exclusion lands apart from the change to what it excludes"
-              failed=1
-            fi
           fi
           # cargo ignored the sandbox as its runner if fewer commands ran there than mutants were
           # caught: none, then. Each caught mutant's own log is the evidence above.
-          caught=$(cat "$out/caught.txt" "$deleted_out/caught.txt" 2>/dev/null | grep -c . || true)
+          caught=$(cat "$out/caught.txt" 2>/dev/null | grep -c . || true)
           count "$caught" "the mutants caught"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
           /usr/bin/bash .github/scripts/test-sandbox.sh bound
           /usr/bin/bash .github/scripts/tools.sh verify
           exit "$failed"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always() && steps.watch.outputs.run != 'false'
+      - name: Keep this shard's outcomes and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutants-in-diff-${{ matrix.shard }}
-          path: |
-            ${{ runner.temp }}/mutants/mutants.out
-            ${{ runner.temp }}/mutants-deleted/mutants.out
+          path: ${{ runner.temp }}/mutants/mutants.out
           if-no-files-found: ignore
+
+  aggregate:
+    # The one required check. It runs whatever the plan and the shards did, since a skipped job
+    # reports a check GitHub counts as passing, and passes only when the plan succeeded and every
+    # shard the plan made passed, or the plan found nothing to mutate for a reason it names. It
+    # checks out nothing and runs nothing of the tree.
+    name: Mutants in the diff
+    needs: [plan, shard]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every shard the plan made passed
+        env:
+          EVENT: ${{ github.event_name }}
+          PLAN: ${{ needs.plan.result }}
+          RUN: ${{ needs.plan.outputs.run }}
+          REASON: ${{ needs.plan.outputs.reason }}
+          COUNT: ${{ needs.plan.outputs.count }}
+          LIST: ${{ needs.plan.outputs.shards }}
+          NEEDED: ${{ needs.plan.outputs.needed }}
+          SHARDS: ${{ needs.shard.result }}
+        # Only values it has matched are printed: an output the plan gave otherwise is named, not
+        # echoed into a workflow command.
+        run: |
+          say() { echo "Mutants in the diff: $1" >> "$GITHUB_STEP_SUMMARY"; }
+          fail() { echo "::error::Mutants in the diff: $1"; say "$1"; exit 1; }
+          pass() { echo "::notice::Mutants in the diff: $1"; say "$1"; exit 0; }
+          case "$SHARDS" in success|failure|cancelled|skipped) ;; *) fail "the shards' result is none GitHub gives" ;; esac
+          if [ "$PLAN" != success ]; then fail "the plan did not succeed, so no shard stands for the diff"; fi
+          case "$RUN" in
+            false)
+              if [ "$SHARDS" != skipped ]; then fail "the watch skipped the plan, and the shards ran: $SHARDS"; fi
+              if [ "$EVENT" = merge_group ]; then pass "nothing to mutate here: it ran on the pull request's head, not again in the merge queue"; fi
+              pass "nothing to mutate: the change touches no path the instrument watches" ;;
+            true) ;;
+            *) fail "the plan's watch decided neither true nor false" ;;
+          esac
+          case "$COUNT" in ''|*[!0-9]*) fail "the plan's count of shards is no number" ;; esac
+          case "$NEEDED" in ''|*[!0-9]*) fail "the plan's count of shards needed is no number" ;; esac
+          case "$REASON" in
+            sharded)
+              if [ "$COUNT" -lt 1 ]; then fail "the plan made shards and counts none"; fi
+              if [ "$LIST" != "[$(seq -s, 0 $((COUNT - 1)))]" ]; then fail "the plan's shards are not the $COUNT it counts"; fi
+              if [ "$SHARDS" != success ]; then fail "the plan made $COUNT shards, and their result is $SHARDS"; fi
+              pass "every one of the plan's $COUNT shards passed" ;;
+            no-mutants)
+              if [ "$COUNT" != 0 ] || [ "$SHARDS" != skipped ]; then fail "the plan found nothing to mutate, and counts $COUNT shards, whose result is $SHARDS"; fi
+              pass "nothing to mutate: the diff changes no line where a mutant lies" ;;
+            too-large)
+              fail "the diff's mutants need $NEEDED shards at the plan's time for each, more than a run takes (.github/scripts/lib/mutants-floor.mjs): split the pull request" ;;
+            *)
+              fail "the plan gave no reason the aggregate knows" ;;
+          esac

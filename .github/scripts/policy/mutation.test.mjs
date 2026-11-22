@@ -5,7 +5,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "../lib/commits.mjs";
-import { SANDBOX_PROGRAM, deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "../lib/mutants-floor.mjs";
+import { BUILD_SECONDS, MAX_SHARDS, PLAN_REASONS, SANDBOX_PROGRAM, SHARD_MINUTES, deletedRegexes, evidence, exactRegex, expected, missing, nameProblems, parseDiff, planShards, readList, runList, touched } from "../lib/mutants-floor.mjs";
 import { read, strings, tracked, workspace } from "./repo.mjs";
 import { steps, workflows } from "./workflows.mjs";
 
@@ -13,7 +13,7 @@ import { steps, workflows } from "./workflows.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 3;
+const FLOOR = 4;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -442,7 +442,8 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   // the tab git ends it with.
   assert.throws(() => parseDiff('diff --git "a/compiler/a/src/\\303\\251.rs" "b/compiler/a/src/\\303\\251.rs"\n--- "a/compiler/a/src/\\303\\251.rs"\n+++ "b/compiler/a/src/\\303\\251.rs"\n@@ -1,1 +1,2 @@\n x\n+y\n'), /git quoted/);
   assert.deepEqual([...parseDiff("diff --git a/compiler/a/src/a b.rs b/compiler/a/src/a b.rs\n--- a/compiler/a/src/a b.rs\t\n+++ b/compiler/a/src/a b.rs\t\n@@ -1,1 +1,2 @@\n x\n+y\n").added.keys()], ["compiler/a/src/a b.rs"]);
-  const mutantsJob = steps(workflows().find((w) => w.file === "mutants.yml").doc.jobs["in-diff"]).map((s) => String(s.run ?? "")).join("\n");
+  const mutantsDoc = workflows().find((w) => w.file === "mutants.yml").doc;
+  const mutantsJob = ["plan", "shard"].flatMap((id) => steps(mutantsDoc.jobs[id])).map((s) => String(s.run ?? "")).join("\n");
   // With quotePath off, git quotes only a path holding a quote, a backslash or a control character,
   // which the floor refuses; a path in any other script stays as it is (the fourth review).
   assert.match(mutantsJob, /^\s*git -c core\.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > pr\.diff$/m, "the Mutants job reads the diff in a form .gitattributes or the path's characters can change");
@@ -596,4 +597,51 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     assert.equal(evidence({ outcomes: one }, logs(one)).length, c.expect === "refused" ? 1 : 0, `${id}, from real rustc output, is not ${c.expect}: ${c.why}`);
   }
   assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
+});
+
+check("the plan deals every mutant of the run to one shard, as many shards as the baseline's time needs, and each shard runs its share", () => {
+  const m = (name) => ({ name, file: "compiler/a/src/lib.rs", function: null, span: { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } } });
+  // The run: the diff's list, then each mutant around a deleted line it does not hold.
+  assert.deepEqual(runList([m("a"), m("b")], [m("b"), m("c"), m("c")]).map((x) => x.name), ["a", "b", "c", "c"]);
+  // Nothing to mutate.
+  assert.deepEqual(planShards([], 186), { reason: "no-mutants", needed: 0, shards: [] });
+  // As many shards as the estimate needs: each mutant the baseline's tests and BUILD_SECONDS.
+  const fit = Math.floor((SHARD_MINUTES * 60) / (100 + BUILD_SECONDS));
+  const names = (n) => Array.from({ length: n }, (_, k) => m(`m${k}`));
+  assert.equal(planShards(names(fit), 100).needed, 1, "a shard's worth of mutants takes one shard");
+  assert.equal(planShards(names(fit + 1), 100).needed, 2, "one more takes a second");
+  assert.equal(planShards(names(1), 100).needed, 1);
+  // Dealt round-robin in the list's order, all of a name to one shard: a slice by file put the
+  // slowest files in one shard.
+  const dealt = planShards(names(10), Math.ceil((SHARD_MINUTES * 60 * 3) / 10) - BUILD_SECONDS);
+  assert.equal(dealt.reason, "sharded");
+  assert.deepEqual(dealt.shards.map((s) => s.map((x) => x.name)), [["m0", "m3", "m6", "m9"], ["m1", "m4", "m7"], ["m2", "m5", "m8"]]);
+  const twins = planShards([m("x"), m("y"), m("x"), m("z")], Math.ceil((SHARD_MINUTES * 60 * 2) / 4) - BUILD_SECONDS);
+  assert.deepEqual(twins.shards.map((s) => s.map((x) => x.name)), [["x", "x", "z"], ["y"]], "two mutants of one name in two shards, each listing both by its regex");
+  // More than MAX_SHARDS refuse the run, with the shards it would need; at MAX_SHARDS it runs.
+  const most = Math.floor((MAX_SHARDS * SHARD_MINUTES * 60) / (100 + BUILD_SECONDS));
+  assert.equal(planShards(names(most), 100).needed, MAX_SHARDS);
+  assert.deepEqual(planShards(names(most + 1), 100), { reason: "too-large", needed: MAX_SHARDS + 1, shards: [] });
+  for (const seconds of [0, -1, 1.5, Number.NaN, "100"]) assert.throws(() => planShards(names(3), seconds), /whole number of seconds/, String(seconds));
+  assert.deepEqual(PLAN_REASONS, ["sharded", "no-mutants", "too-large"], "the reasons the aggregate's script knows");
+  // A shard's names against those it ran, each counted as often as it stands.
+  assert.deepEqual(nameProblems(["a", "b", "b"], ["b", "a", "b"]), []);
+  assert.deepEqual(nameProblems(["a", "b"], ["a"]), ["b: dealt 1 more time(s) than it ran"]);
+  assert.deepEqual(nameProblems(["a"], ["a", "c"]), ["c: ran 1 more time(s) than it was dealt"]);
+  assert.deepEqual(nameProblems(["a", "a"], ["a"]), ["a: dealt 1 more time(s) than it ran"], "a twin dealt twice and run once");
+  // The workflow keeps to the plan: no run of cargo-mutants slices the list itself, the shards'
+  // time limit holds twice the plan's time for each, and each shard reads the files the plan wrote.
+  const doc = workflows().find((w) => w.file === "mutants.yml").doc;
+  const scripts = Object.values(doc.jobs).flatMap((j) => steps(j)).map((s) => String(s.run ?? "")).join("\n");
+  assert.doesNotMatch(scripts, /--shard\b/, "a run of cargo-mutants in mutants.yml takes --shard, beside the plan's own dealing");
+  assert.ok(doc.jobs.shard["timeout-minutes"] >= 2 * SHARD_MINUTES, "a shard's time limit is less than twice the plan's time for it");
+  assert.ok(doc.jobs.shard.strategy?.matrix?.shard === "${{ fromJSON(needs.plan.outputs.shards) }}", "the shards are not those the plan made");
+  const planStep = steps(doc.jobs.plan).find((s) => s.id === "plan");
+  assert.match(String(planStep?.run), /mutants-floor\.mjs plan diff-mutants\.json deleted-mutants\.json "\$\(cat baseline-seconds\.txt\)" plan >> "\$GITHUB_OUTPUT"\n/);
+  const upload = steps(doc.jobs.plan).find((s) => String(s.uses ?? "").startsWith("actions/upload-artifact@"));
+  const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@"));
+  assert.equal(upload?.with?.name, download?.with?.name, "the shards download another artifact than the plan keeps");
+  assert.ok(String(upload.with.path).split("\n").includes("plan") && download.with.path === "mutants-plan", "the shards read the plan's files elsewhere than it keeps them");
+  const shardScripts = steps(doc.jobs.shard).map((s) => String(s.run ?? "")).join("\n");
+  assert.equal(shardScripts.split('< "mutants-plan/plan/shard-$SHARD.re"').length, 3, "the shard's list and its run do not both read its regexes");
 });

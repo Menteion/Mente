@@ -10,7 +10,10 @@ every `*.test.mjs` of this directory, with `policy-run.test.mjs` and `yaml.test.
 What it holds:
 - Every check `.github/required-checks.txt` names is produced by exactly one job, whose workflow
   runs on every pull request and in the merge queue with no `paths:` or `branches:` filter, and
-  which nothing can skip, let fail, or give more than read access.
+  which nothing can skip, let fail, or give more than read access. Such a job that needs others is
+  the aggregate of its workflow, as "Mutants in the diff" is of its plan and shards: it runs
+  `if: always()`, needs every other job of the workflow, checks out nothing, reads every one's
+  result in its one step, and passes only when they do; the jobs it needs are required jobs too.
 - Every instrument workflow decides at its first step after the checkout whether it has anything
   to check (`.github/scripts/watch.mjs`); every later step runs unless the decision was "false",
   so a decision never written runs the instrument.

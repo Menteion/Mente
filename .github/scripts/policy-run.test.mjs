@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 16;
+const FLOOR = 18;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1067,6 +1067,118 @@ check("the fuzz summary stays under GitHub's limit for a step's summary, reads b
     assert.equal(summary().status, 2);
     fs.rmSync(path.join(out, "summary.txt"));
     assert.match(summary(out, "t", "101").stdout.toString("utf8"), /no summary: mn fuzz exited with 101/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("mutants-floor.mjs plan writes each shard's names and exact regexes and the plan's outputs, and assigned holds a shard to its names", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mutants-plan-"));
+  try {
+    const m = (name) => ({ name, file: "compiler/a/src/lib.rs", function: null, span: { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } } });
+    const write = (file, value) => fs.writeFileSync(path.join(dir, file), typeof value === "string" ? value : JSON.stringify(value));
+    const floor = (...args) => spawnSync(process.execPath, [path.join(ROOT, ".github/scripts/mutants-floor.mjs"), ...args], { cwd: dir, encoding: "utf8", timeout: 30000 });
+    // Five mutants, one of them around a deleted line, at 10770 s each with the build's 30: one
+    // shard of three hours each, so five shards.
+    write("diff.json", [m("a.rs:1:1: replace f -> bool with true"), m("a.rs:2:1: replace g with ()"), m("a.rs:3:1: delete ! in h"), m("a.rs:4:1: replace i -> u8 with 0")]);
+    write("deleted.json", [m("a.rs:3:1: delete ! in h"), m("a.rs:9:1: replace j (x|y) with ()")]);
+    const out = floor("plan", "diff.json", "deleted.json", "10770", "plan");
+    assert.equal(out.status, 0, out.stderr);
+    assert.equal(out.stdout, "reason=sharded\ncount=5\nshards=[0,1,2,3,4]\nneeded=5\n");
+    const shard = (k, ext) => fs.readFileSync(path.join(dir, "plan", `shard-${k}.${ext}`), "utf8");
+    assert.deepEqual(JSON.parse(shard(4, "json")), ["a.rs:9:1: replace j (x|y) with ()"]);
+    assert.equal(shard(4, "re"), "^a\\.rs:9:1: replace j \\(x\\|y\\) with \\(\\)$\n", "the regex matches the one name exactly");
+    assert.match(fs.readFileSync(path.join(dir, "plan", "summary.md"), "utf8"), /5 mutants at 10770 s of tests and 30 s of build each need 5 shard\(s\)/);
+    // Nothing to mutate, a run past sixteen shards, and a time that is no count.
+    write("none.json", "");
+    assert.equal(floor("plan", "none.json", "none.json", "100", "empty").stdout, "reason=no-mutants\ncount=0\nshards=[]\nneeded=0\n");
+    const big = floor("plan", "diff.json", "deleted.json", "200000", "big");
+    assert.equal(big.stdout, "reason=too-large\ncount=0\nshards=[]\nneeded=93\n");
+    assert.match(fs.readFileSync(path.join(dir, "big", "summary.md"), "utf8"), /more than the 16 a run takes: split the pull request/);
+    for (const seconds of ["", "0", "1.5", "-3", "60 "]) assert.equal(floor("plan", "diff.json", "deleted.json", seconds, "x").status, 1, `a baseline of '${seconds}' seconds passes`);
+    // assigned: against cargo-mutants' list for the shard, and against its run's outcomes.
+    write("dealt.json", ["x", "y", "y"]);
+    write("listed.json", [m("y"), m("x"), m("y")]);
+    assert.equal(floor("assigned", "dealt.json", "listed.json").stdout, "\n");
+    write("short.json", [m("x"), m("y")]);
+    assert.equal(floor("assigned", "dealt.json", "short.json").stdout, "y: dealt 1 more time(s) than it ran\n");
+    fs.mkdirSync(path.join(dir, "out"));
+    const outcome = (name) => ({ scenario: { Mutant: { name } }, summary: "CaughtMutant" });
+    write("out/outcomes.json", { outcomes: [{ scenario: "Baseline", summary: "Success" }, outcome("x"), outcome("y"), outcome("y"), outcome("z")] });
+    assert.equal(floor("assigned", "dealt.json", "out").stdout, "z: ran 1 more time(s) than it was dealt\n");
+    write("out/outcomes.json", { outcomes: [outcome("x"), { scenario: { Mutant: {} } }] });
+    assert.equal(floor("assigned", "dealt.json", "out").status, 1, "an outcome that names no mutant passes");
+    write("bad.json", { x: 1 });
+    assert.equal(floor("assigned", "bad.json", "listed.json").status, 1, "a shard's file that is no list of names passes");
+    fs.rmSync(path.join(dir, "out", "outcomes.json"));
+    assert.equal(floor("assigned", "dealt.json", "out").status, 1, "a run that wrote no outcomes passes");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("Mutants in the diff passes only when the plan succeeded and every shard it made passed, or it found nothing to mutate", () => {
+  // The aggregate's script, as mutants.yml runs it, over the results its plan and shards can give.
+  const job = parseYaml(read(`${WORKFLOWS}/mutants.yml`)).jobs.aggregate;
+  const step = job.steps[0];
+  const names = Object.keys(step.env).sort();
+  assert.deepEqual(names, ["COUNT", "EVENT", "LIST", "NEEDED", "PLAN", "REASON", "RUN", "SHARDS"], "the aggregate reads other values than this test gives it");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mutants-aggregate-"));
+  try {
+    const summary = path.join(dir, "summary.md");
+    const run = (values) => {
+      const env = { PATH: process.env.PATH, GITHUB_STEP_SUMMARY: summary.replace(/\\/g, "/"), EVENT: "pull_request", PLAN: "success", RUN: "true", REASON: "sharded", COUNT: "3", LIST: "[0,1,2]", NEEDED: "3", SHARDS: "success", ...values };
+      const r = spawnSync(bashPath(), ["-e", "-c", step.run], { encoding: "utf8", env, timeout: 30000 });
+      return { status: r.status, out: `${r.stdout}${r.stderr}` };
+    };
+    const passes = [
+      [{}, "every one of the plan's 3 shards passed"],
+      [{ COUNT: "1", LIST: "[0]", NEEDED: "1" }, "every one of the plan's 1 shards passed"],
+      [{ REASON: "no-mutants", COUNT: "0", LIST: "[]", NEEDED: "0", SHARDS: "skipped" }, "the diff changes no line where a mutant lies"],
+      [{ RUN: "false", REASON: "", COUNT: "", LIST: "", NEEDED: "", SHARDS: "skipped" }, "the change touches no path the instrument watches"],
+      [{ EVENT: "merge_group", RUN: "false", REASON: "", COUNT: "", LIST: "", NEEDED: "", SHARDS: "skipped" }, "not again in the merge queue"],
+    ];
+    for (const [values, said] of passes) {
+      const r = run(values);
+      assert.equal(r.status, 0, `${JSON.stringify(values)} fails: ${r.out}`);
+      assert.ok(r.out.includes(`::notice::Mutants in the diff: `) && r.out.includes(said), `${JSON.stringify(values)} passes without saying why: ${r.out}`);
+    }
+    const fails = [
+      [{ PLAN: "failure" }, "the plan failed"],
+      [{ PLAN: "cancelled" }, "the plan was cancelled"],
+      [{ PLAN: "skipped" }, "the plan was skipped"],
+      [{ PLAN: "failure", RUN: "false", SHARDS: "skipped" }, "the plan failed after its watch said no"],
+      [{ RUN: "" }, "the watch decided nothing"],
+      [{ RUN: "maybe" }, "the watch decided neither"],
+      [{ RUN: "false", SHARDS: "success" }, "the shards ran though the watch said no"],
+      [{ SHARDS: "failure" }, "a shard failed"],
+      [{ SHARDS: "cancelled" }, "a shard was cancelled"],
+      [{ SHARDS: "skipped" }, "the shards were skipped though the plan made some"],
+      [{ SHARDS: "" }, "the shards gave no result"],
+      [{ COUNT: "0", LIST: "[]" }, "shards made and none counted"],
+      [{ COUNT: "" }, "no count"],
+      [{ COUNT: "3x" }, "a count that is no number"],
+      [{ NEEDED: "" }, "no count of shards needed"],
+      [{ LIST: "[0,1]" }, "fewer shards than counted"],
+      [{ LIST: "[0,1,2,3]" }, "more shards than counted"],
+      [{ REASON: "no-mutants", COUNT: "2", SHARDS: "skipped" }, "nothing to mutate, with shards counted"],
+      [{ REASON: "no-mutants", COUNT: "0", LIST: "[]", SHARDS: "success" }, "nothing to mutate, with shards run"],
+      [{ REASON: "too-large", COUNT: "0", LIST: "[]", NEEDED: "20", SHARDS: "skipped" }, "a run past sixteen shards"],
+      [{ REASON: "", COUNT: "0", LIST: "[]", SHARDS: "skipped" }, "a count of 0 with no reason"],
+      [{ REASON: "unwatched", COUNT: "0", LIST: "[]", SHARDS: "skipped" }, "a reason the plan does not give"],
+    ];
+    for (const [values, what] of fails) {
+      const r = run(values);
+      assert.equal(r.status, 1, `${what} passes: ${r.out}`);
+      assert.match(r.out, /^::error::Mutants in the diff: /m, `${what} fails without saying why`);
+    }
+    assert.match(run({ REASON: "too-large", COUNT: "0", LIST: "[]", NEEDED: "20", SHARDS: "skipped" }).out, /need 20 shards .* split the pull request/);
+    // An output the plan gave otherwise is named, never echoed into a workflow command.
+    for (const values of [{ REASON: "x\n::warning::planted" }, { RUN: "x\n::warning::planted" }, { COUNT: "1\n::warning::planted" }, { SHARDS: "x\n::warning::planted" }]) {
+      const r = run(values);
+      assert.equal(r.status, 1);
+      assert.doesNotMatch(r.out, /^::warning::/m, `${JSON.stringify(values)} reaches the log as a command`);
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
