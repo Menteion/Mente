@@ -11,6 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -205,6 +206,45 @@ test("which commits main holds, the remote says: a locally moved origin/main let
     assert.match(answer.words, /could not ask .* for its main/);
     assert.match(prePush(line, work, "").words, /no remote's URL/);
   });
+});
+
+test("the hook asks the remote git pushes to, never one an insteadOf rewrites to, and refuses a remote that does not answer in time", async () => {
+  // The seventh review's case: url.<fake>.insteadOf points ls-remote at a fake repository whose main
+  // holds the unpassed commit, while pushInsteadOf keeps the push itself on the real one.
+  await new Promise((done) => {
+    withRemote(({ dir, work, run, git, push, commit, remoteHas }) => {
+      const real = git(work, "remote", "get-url", "origin");
+      const fake = path.join(dir, "fake.git");
+      git(dir, "init", "-q", "--bare", fake);
+      git(work, "checkout", "-q", "-b", "feature");
+      commit(work, "f.md", "f\n");
+      git(work, "push", "-q", "--no-verify", fake, "feature:main");
+      const r = run(work, ["-c", `url.${fake}.insteadOf=${real}`, "-c", `url.${real}.pushInsteadOf=${real}`, "push", "-q", "origin", "feature"]);
+      refused({ status: r.status, words: r.stderr }, /would ask .*fake\.git instead/);
+      assert.equal(remoteHas("feature"), "", "nothing reached the real remote");
+      done();
+    });
+  });
+  // A remote that accepts the connection and never answers: the hook gives up in time.
+  const server = net.createServer(() => {});
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  try {
+    await new Promise((done) => {
+      withRemote(({ work, git, commit }) => {
+        git(work, "checkout", "-q", "-b", "stalled");
+        commit(work, "x.md", "x\n");
+        const sha = git(work, "rev-parse", "HEAD");
+        const started = Date.now();
+        const answer = prePush(`refs/heads/stalled ${sha} refs/heads/stalled ${"0".repeat(40)}\n`, work, `git://127.0.0.1:${server.address().port}/stalled.git`, { timeoutMs: 3000 });
+        assert.equal(answer.status, 1);
+        assert.match(answer.words, /did not say which commit is its main within 3 s/);
+        assert.ok(Date.now() - started < 30000, "the hook waited past its time");
+        done();
+      });
+    });
+  } finally {
+    server.close();
+  }
 });
 
 test("a merge in progress refuses, and each worktree is held to its own record", () => {

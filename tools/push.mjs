@@ -57,24 +57,41 @@ function exists(dir, ref) {
   }
 }
 
+/** How long the hook waits for the remote to say which commit is main. */
+export const REMOTE_TIMEOUT_MS = 60000;
+
 /**
  * The commit the remote at `url` names main, asked of the remote itself, never of a local ref such
- * as refs/remotes/origin/main, which any local command can move (the sixth review of #203): its sha,
- * or null when the remote has no main. Throws where the remote cannot be asked.
+ * as refs/remotes/origin/main, which any local command can move (the sixth review of #203):
+ * { main } with its sha, or null when the remote has no main; or { elsewhere } with the URL
+ * ls-remote would contact instead of `url`, the one git pushes to, which git hands the hook after
+ * its push-side rewriting and ls-remote would rewrite again by url.<base>.insteadOf (the seventh
+ * review). Within `timeoutMs`, with no prompt for credentials; throws where the remote cannot be
+ * asked in time.
  */
-function remoteMain(dir, url) {
-  const line = git(dir, "ls-remote", "--", url, "refs/heads/main")
+function remoteMain(dir, url, timeoutMs) {
+  const run = (args) =>
+    execFileSync("git", ["-C", dir, ...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      timeout: timeoutMs,
+    }).trim();
+  const asked = run(["ls-remote", "--get-url", "--", url]);
+  if (asked !== url) return { elsewhere: asked };
+  const line = run(["ls-remote", "--", url, "refs/heads/main"])
     .split(/\r?\n/)
     .find((l) => /\trefs\/heads\/main$/.test(l));
-  return line ? line.split("\t")[0] : null;
+  return { main: line ? line.split("\t")[0] : null };
 }
 
 /**
  * What the pre-push hook answers to `text`, the lines git gave it, in the checkout `dir`, pushing to
  * `url`, the URL git gave it: status 0 to let the push run, or 1 to refuse it, with the words for
- * whoever pushed. Throws where git fails, which the hook refuses.
+ * whoever pushed. It waits for the remote `timeoutMs` at most. Throws where git fails, which the
+ * hook refuses.
  */
-export function prePush(text, dir, url) {
+export function prePush(text, dir, url, { timeoutMs = REMOTE_TIMEOUT_MS } = {}) {
   const sends = [];
   for (const line of String(text).split(/\r?\n/).filter((l) => l.trim() !== "")) {
     const parts = line.trim().split(/\s+/);
@@ -103,12 +120,15 @@ export function prePush(text, dir, url) {
   // queue hold: a tag of it, or a branch at it, needs no pass of its own (the fourth review of
   // #203). Which commit main is, the remote says, by the URL git pushes to.
   if (typeof url !== "string" || url === "") return { status: 1, words: "the pre-push hook refused: git gave it no remote's URL to ask for its main" };
-  let main;
+  let asked;
   try {
-    main = remoteMain(dir, url);
+    asked = remoteMain(dir, url, timeoutMs);
   } catch (e) {
+    if (e.code === "ETIMEDOUT" || e.signal) return { status: 1, words: `the pre-push hook refused: ${url} did not say which commit is its main within ${Math.round(timeoutMs / 1000)} s, so it cannot tell whether ${pending[0].ref} is already on main` };
     return { status: 1, words: `the pre-push hook refused: it could not ask ${url} for its main, so it cannot tell whether ${pending[0].ref} is already on main: ${String(e.stderr || e.message).trim().split(/\r?\n/)[0]}` };
   }
+  if (asked.elsewhere !== undefined) return { status: 1, words: `the pre-push hook refused: asking ${url} for its main would ask ${asked.elsewhere} instead, which a url.<base>.insteadOf rewrites it to, so it cannot tell what main is where the push goes` };
+  const main = asked.main;
   let rest = pending;
   if (main !== null) {
     if (!exists(dir, `${main}^{commit}`)) return { status: 1, words: `the pre-push hook refused: the remote's main (${main.slice(0, 12)}) is not in this repository, so it cannot tell whether ${pending[0].ref} is already on main; fetch first, then push again` };
