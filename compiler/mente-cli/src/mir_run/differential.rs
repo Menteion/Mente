@@ -746,7 +746,7 @@ const PARTS: usize = 5;
 const HEAVY: &[(&[&str], usize)] = &[
     // MIR and native code copy their arguments, values up to 4 GiB, whole: each costs as much
     // as many programs together, and side by side they cost one of them (the brief
-    // `values-within-4-gib-cost`).
+    // `values-within-four-gib-cost`).
     (
         &[
             "core-calculus/array_within_4_gib.mn",

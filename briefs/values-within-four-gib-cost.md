@@ -1,9 +1,9 @@
 ---
-id: values-within-4-gib-cost
+id: values-within-four-gib-cost
 status: deferred
 trigger: when pull request 215 merges
 type: chore
-affectedFiles: [compiler/mente-codegen/src/**, compiler/mente-mir/src/**, compiler/mente-cli/src/mir_run.rs, compiler/mente-cli/src/mir_run/differential.rs, briefs/values-within-4-gib-cost.md, briefs/archive/values-within-4-gib-cost.md]
+affectedFiles: [compiler/mente-codegen/src/**, compiler/mente-mir/src/**, compiler/mente-cli/src/mir_run.rs, compiler/mente-cli/src/mir_run/differential.rs, briefs/values-within-four-gib-cost.md, briefs/archive/values-within-four-gib-cost.md]
 protectedFiles: [.github/**, CLAUDE.md, spec/**, compiler/mente-sema/**, compiler/mente-interp/**]
 ---
 

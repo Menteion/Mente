@@ -45,6 +45,12 @@
     { "name": "spec directives", "when": "documents", "run": ["cargo", "run", "--quiet", "--bin", "mn", "--", "spec"] },
     { "name": "documentation tools", "when": "documents", "run": ["npm", "run", "verify:docs"] },
     {
+      "name": "records",
+      "when": "documents",
+      "run": ["cargo", "test", "-p", "mente-cli", "--test", "records", "--test", "register", "--test", "escapes"],
+      "why": "The rules of the records: every Markdown file declared once, each record named by a key, a brief's id its file's key, the register's entries and the escapes. No other check here runs them, so a brief named with a word that is a number passed these checks and failed every Rust job on CI (PR 215, `values-within-4-gib-cost`)."
+    },
+    {
       "name": "workflow policy",
       "when": "every file",
       "run": ["npm", "run", "test:ci"],
