@@ -151,6 +151,7 @@ pub const DOCUMENTS: &[Documents] = &[
     },
     Documents {
         patterns: &[
+            ".github/scripts/policy/README.md",
             "benchmark/README.md",
             "compiler/mente-cli/src/front-matter/README.md",
             "conformance/README.md",
