@@ -1847,6 +1847,41 @@ fn test_a_condition_that_changes_state_is_seen() {
     }
 }
 
+/// A join counts as "branch of no type beside two that give values" only with a branch or an arm
+/// that gives none and two that give one, through an `else if` and a branch that is an `if`
+/// itself: one value beside an `unreachable`, as a guard's `if` has, or two values and no branch
+/// of no type, does not.
+#[test]
+fn test_a_branch_of_no_type_counts_beside_two_values_only() {
+    let row = "branch of no type beside two that give values";
+    let reaches = |body: &str| {
+        let source = format!("module m\npub fn f(c: bool, d: bool, k: u8, x: u8) -> u8 = {body}\n");
+        let module = mente_sema::check_program(&source).unwrap();
+        let mut seen = BTreeSet::new();
+        module
+            .functions
+            .iter()
+            .flatten()
+            .for_each(|f| reached_rows(f, &mut seen));
+        seen.contains(row)
+    };
+    for body in [
+        "if c { x } else if d { 3 } else { unreachable(\"u\") }",
+        "if c { unreachable(\"u\") } else if d { x } else { 3 }",
+        "if c { x } else {\n  if d { 3 } else { todo(\"t\") }\n}",
+        "match k {\n  0 => x\n  1 => 3\n  _ => unreachable(\"u\")\n}",
+    ] {
+        assert!(reaches(body), "{}", body);
+    }
+    for body in [
+        "if c { x } else { unreachable(\"u\") }",
+        "if c { x } else if d { 3 } else { 4 }",
+        "match k {\n  0 => x\n  _ => todo(\"t\")\n}",
+    ] {
+        assert!(!reaches(body), "{}", body);
+    }
+}
+
 /// The seeds the test reads: the first programs of each mode.
 const SEEDS: u64 = 300;
 
