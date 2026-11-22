@@ -278,41 +278,10 @@ export function requireRunner({ cwd = process.cwd(), env = process.env, say = (l
   return false;
 }
 
-// The processes of the gates' refresher and entries (briefs/gate-tools-from-main.md, "How the
-// refresher's processes are run"): an environment of their own making, git by its absolute path,
-// a command's whole process tree held to a time, a blob's id as git defines it, and the lock of a
-// refresh, which the operating system releases when its holder ends.
-
-/// Variables removed from every process the refresher starts and every git command of the entries'
-/// checks: git's own, node's (NODE_OPTIONS preloads code), and those that name certificate files.
-const DROPPED = [/^GIT_/i, /^NODE_/i, /^SSL_CERT_FILE$/i, /^SSL_CERT_DIR$/i, /^CURL_CA_BUNDLE$/i];
-
-/**
- * The environment of the gates' processes: `env` with DROPPED removed, and git's system and user
- * configuration closed, so that no setting of either (an insteadOf, a proxy's sslVerify) reaches
- * git, wherever HOME or XDG_CONFIG_HOME points; GIT_CONFIG_GLOBAL is /dev/null, which Git for
- * Windows accepts when node starts it, so no file is left for a command to fill. No prompt for
- * credentials.
- */
-export function gateEnv(env = process.env) {
-  const kept = Object.fromEntries(Object.entries(env).filter(([key]) => !DROPPED.some((drop) => drop.test(key))));
-  return { ...kept, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" };
-}
-
-/// Where the gates look for git, in order, by absolute path, never on PATH: the system's, then on
-/// Windows Git for Windows' per-user install (through LOCALAPPDATA, a limit the brief names).
-export function gitLocations(env = process.env) {
-  if (!WINDOWS) return ["/usr/bin/git"];
-  const own = env.LOCALAPPDATA ? [path.join(env.LOCALAPPDATA, "Programs", "Git", "cmd", "git.exe").replace(/\\/g, "/")] : [];
-  return ["C:/Program Files/Git/cmd/git.exe", ...own];
-}
-
-/// The first of gitLocations that exists, or null.
-export const systemGit = (env = process.env) => gitLocations(env).find((at) => fs.existsSync(at)) ?? null;
-
-/// A blob's id as git defines it, the SHA-1 of `blob <size>`, a zero byte and the bytes, so that no
-/// attribute or filter changes it, and drift is caught even when no git is found.
-export const blobId = (bytes) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+// The processes of the gates' refresher (briefs/gate-tools-from-main.md): a command's whole
+// process tree held to a time, and the lock of a refresh, which the operating system releases when
+// its holder ends. Their environment, where git is and a blob's id are in
+// tools/gate-entries/verify.mjs, which the stable entries share.
 
 /**
  * A runner of one command whose whole process tree is held to a time, run by `node -e`. A time

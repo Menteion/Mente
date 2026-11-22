@@ -1,0 +1,9 @@
+#!/bin/sh
+# git's pre-push hook for every checkout of this repository: core.hooksPath names this directory,
+# <common git directory>/mente-gates/entry/hooks, a path that never changes
+# (briefs/gate-tools-from-main.md). It removes NODE_OPTIONS, has hook.mjs check the copy that
+# mente-gates/current names, and runs that copy's tools/git-hooks/pre-push, which refuses a push of
+# a tree the quick checks have not passed (tools/push.mjs). A refusal of the check refuses the push.
+unset NODE_OPTIONS
+copy=$(node "$(dirname "$0")/../hook.mjs") || exit 1
+exec "$copy/tools/git-hooks/pre-push" "$@"

@@ -15,7 +15,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { LOCK_FD_VARIABLE, PASSED, TREE_RUNNER, blobId, gateEnv, gitLocations, systemGit, takeLock } from "./local-limits.mjs";
+import { LOCK_FD_VARIABLE, PASSED, TREE_RUNNER, takeLock } from "./local-limits.mjs";
+import { blobId, gateEnv, gitLocations, systemGit } from "./gate-entries/verify.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
