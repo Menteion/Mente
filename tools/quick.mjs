@@ -6,6 +6,10 @@
 // change calls for is forgotten: on 2026-11-16 a pull request that added conformance programs went
 // out without its golden files and failed CI for it.
 //
+// It runs in one of the machine's build slots, and runs each check under the build limits
+// (tools/local-limits.mjs): each process at most 8 GB committed, all of a check's at most 16 GB, a
+// check at most 30 minutes (the reset of 2026-11-22).
+//
 //   node tools/quick.mjs                       the checks the changed files call for
 //   node tools/quick.mjs --list                which checks those are, without running them
 //   node tools/quick.mjs -- -p mente-sema frames
@@ -15,10 +19,10 @@
 //
 // Which files call for which checks is written once, in tools/quick-checks.json.
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";
 
-const env = { ...process.env, CARGO_BUILD_JOBS: process.env.CARGO_BUILD_JOBS ?? "8", RUST_TEST_THREADS: process.env.RUST_TEST_THREADS ?? "8" };
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).split(/\r?\n/).filter(Boolean);
 
 /** Every file the branch changes against origin/main, committed or not, and every new file. */
@@ -58,14 +62,14 @@ if (process.argv.includes("--list")) {
   for (const check of due) console.log(`  ${check.name}: ${check.run.join(" ")}`);
   process.exit(0);
 }
+if (!requireRunner()) process.exit(2);
+const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);
 const results = [];
 for (const check of due) {
   console.log(`== ${check.name}: ${check.run.join(" ")}`);
-  const [cmd, ...args] = check.run;
-  // npm is a .cmd on Windows, which only a shell starts.
-  const r = spawnSync(cmd, args, { stdio: "inherit", env, shell: process.platform === "win32" && cmd === "npm" });
-  results.push([check.name, r.status === 0]);
+  results.push([check.name, runCapped(check.run, BUILD) === 0]);
 }
+slot.release();
 console.log("\nquick:");
 for (const [name, ok] of results) console.log(`  ${ok ? "pass" : "FAIL"}  ${name}`);
 const failed = results.filter(([, ok]) => !ok).length;
