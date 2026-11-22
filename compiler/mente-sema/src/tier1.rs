@@ -5308,10 +5308,13 @@ impl<'a> Fx<'a> {
                 }
             }
             // `and` and `or` have their arm above; an arithmetic or bit operation is a value.
+            // A comparison read as a condition changes nothing (`core-calculus.md`, item 10), so
+            // its right operand leaves its left one as it was read; one that is a value, and may
+            // pass a binding `mut`, is evaluated for its effects alone, its result unread
+            // (`Fx::eval`).
             ExprKind::Binary { op, lhs, rhs } => match Rel::of(*op) {
                 Some(op) => {
-                    let mut l = self.eval(st, *lhs);
-                    self.read_before(st, *rhs, [&mut l]);
+                    let l = self.eval(st, *lhs);
                     let r = self.eval(st, *rhs);
                     match (far(self.literal(*lhs)), far(self.literal(*rhs))) {
                         (_, Some(c)) => Cond::Far(op, Box::new((l, c))),
@@ -5997,8 +6000,10 @@ impl<'a> Fx<'a> {
         }
     }
 
-    /// The bindings a statement declares, assigns or passes as `mut`: a loop's in its header,
-    /// its condition, invariants and measures, which run at every round, as in its body.
+    /// The bindings a statement declares, assigns or passes as `mut`: a loop's in its body. A
+    /// condition and a loop's clauses change nothing (`Fx::changes_nothing`), and a binding one
+    /// declares itself, in a block or a pattern inside it, it declares anew before reading it,
+    /// wherever it runs, so none is named here.
     fn changed_stmt(&self, s: StmtId, out: &mut Vec<usize>) {
         match &self.tree.stmt(s).kind {
             StmtKind::Binding { init, .. } => {
@@ -6010,21 +6015,8 @@ impl<'a> Fx<'a> {
                 self.changed_expr(*place, out);
                 self.changed_expr(*value, out);
             }
-            StmtKind::While {
-                cond,
-                invariants,
-                decreases,
-                body,
-            } => {
-                for &e in std::iter::once(cond).chain(invariants).chain(decreases) {
-                    self.changed_expr(e, out);
-                }
-                self.changed_block(*body, out);
-            }
-            StmtKind::Guard { cond, otherwise } => {
-                self.changed_expr(*cond, out);
-                self.changed_block(*otherwise, out);
-            }
+            StmtKind::While { body, .. } => self.changed_block(*body, out),
+            StmtKind::Guard { otherwise, .. } => self.changed_block(*otherwise, out),
             StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
                 self.changed_expr(*e, out)
             }
@@ -9545,6 +9537,26 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_a_loop_condition_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while next(mut i) > 0 and r < 8 {\n    r += 1\n  }\n  r\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    /// The same for a loop's `invariant` and its `decreases`, clauses that the loop's statement
+    /// checks before its analysis reads them.
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the clause at 10:15 changes `i`, and a condition changes nothing"
+    )]
+    fn test_a_loop_invariant_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while r < 8\n    invariant next(mut i) >= 0\n  {\n    r += 1\n  }\n  r\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the clause at 10:15 changes `i`, and a condition changes nothing"
+    )]
+    fn test_a_loop_measure_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while r < 8\n    decreases next(mut i)\n  {\n    r += 1\n  }\n  r\n}";
         with_fx(src, |fx, st| fx.body(&mut st.clone()));
     }
 

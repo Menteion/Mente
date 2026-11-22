@@ -429,6 +429,58 @@ fn conjuncts(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
     }
 }
 
+/// Where `e` is written, its parentheses included: the bytes of the source that hold it. An
+/// expression's span runs from its first operand's to its last's, and an operand's parentheses
+/// lie outside the operand's span, so that `(a or b)` spans `a or b` and `(c) == 0` spans
+/// `c) == 0`. Advice that quotes a part of a condition quotes this, so that what the program
+/// groups stays grouped.
+fn written(tree: &Tree, src: &str, e: ExprId) -> (usize, usize) {
+    let at = tree.expr(e).span;
+    let (start, end) = match &tree.expr(e).kind {
+        ExprKind::Binary { lhs, rhs, .. } => (
+            written(tree, src, *lhs).0.min(at.start),
+            written(tree, src, *rhs).1.max(at.end),
+        ),
+        ExprKind::Unary { operand, .. } => (at.start, written(tree, src, *operand).1.max(at.end)),
+        ExprKind::Index { base, .. } | ExprKind::Field { base, .. } => {
+            (written(tree, src, *base).0.min(at.start), at.end)
+        }
+        // Each of these spans its own delimiters, its closing bracket, parenthesis or brace.
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => (at.start, at.end),
+    };
+    parenthesized(src, start, end)
+}
+
+/// `start..end` widened over each pair of parentheses around it alone. Parentheses balance, so
+/// a `(` just before and a `)` just after are one pair: at worst one the program needed for
+/// another reason, such as a call's, which still groups the same expression.
+fn parenthesized(src: &str, start: usize, end: usize) -> (usize, usize) {
+    let (mut start, mut end) = (start, end);
+    loop {
+        let before = src.get(..start).unwrap_or("").trim_end();
+        let after = src.get(end..).unwrap_or("").trim_start();
+        match (before.strip_suffix('('), after.strip_prefix(')')) {
+            (Some(open), Some(rest)) => {
+                start = open.len();
+                end = src.len() - rest.len();
+            }
+            (None, _) | (_, None) => return (start, end),
+        }
+    }
+}
+
 /// What a loop's condition that changes state is told where no call can be named.
 const EVERY_ROUND: &str = "move it to the top of the loop's body, which runs every round, and leave the loop there with `guard ... else { break }`";
 
@@ -450,14 +502,19 @@ fn report(
     let root = tree.expr(open.root).span;
     let name = resolution.unused_name_besides("v", given);
     let call = holding_call(tree, &open.effects);
-    // The text of `e` with the call replaced by the name.
+    // `e` as written, its parentheses included ([`written`]).
+    let source = |e: ExprId| {
+        let (start, end) = written(tree, src, e);
+        src.get(start..end).unwrap_or("").to_string()
+    };
+    // The same with the call replaced by the name.
     let with_name = |e: ExprId, call: ExprId| {
-        let (at, c) = (tree.expr(e).span, tree.expr(call).span);
+        let ((start, end), c) = (written(tree, src, e), tree.expr(call).span);
         format!(
             "{}{}{}",
-            src.get(at.start..c.start).unwrap_or(""),
+            src.get(start..c.start).unwrap_or(""),
             name,
-            src.get(c.end..at.end).unwrap_or("")
+            src.get(c.end..end).unwrap_or("")
         )
     };
     let leading = call.filter(|&c| evaluated_first(tree, open.root, c));
@@ -474,10 +531,9 @@ fn report(
             });
             match k.filter(|&k| evaluated_first(tree, parts[k], c)) {
                 Some(k) => {
-                    let head: Vec<String> =
-                        parts[..k].iter().map(|&p| text(tree.expr(p).span)).collect();
+                    let head: Vec<String> = parts[..k].iter().map(|&p| source(p)).collect();
                     let mut test = vec![with_name(parts[k], c)];
-                    test.extend(parts[k + 1..].iter().map(|&p| text(tree.expr(p).span)));
+                    test.extend(parts[k + 1..].iter().map(|&p| source(p)));
                     format!(
                         "to call `{}` every round, write `while {} {{` and start its body with `val {} = {}` and then `guard {} else {{ break }}`",
                         text(at),
@@ -578,6 +634,48 @@ mod tests {
         );
         let at = src[d[0].primary.start..d[0].primary.end].to_string();
         (d[0].clone(), at)
+    }
+
+    /// The advice quotes each part of the condition as written, its parentheses included
+    /// (`written`): rebuilt from the parts' own spans, `while (a or b) and r < 8 and next(mut i)
+    /// > 0` was told `while a or b and r < 8 {`, which `and` binding tighter than `or` reads as
+    /// another loop, one that traps where the program returns 3 (the Opus review of pull request
+    /// 196). The `guard` it suggests, and a conjunct that is a parenthesized `if`, kept no
+    /// parentheses either, and a `guard`'s own condition lost its last one.
+    #[test]
+    fn test_the_advice_keeps_what_the_program_groups() {
+        let message = |cond: &str| {
+            let body = format!(
+                "pub fn f(n: u8, a: bool, b: bool) -> u8 {{\n  var i = n\n  var r: u8 = 0\n  while {} {{\n    r += 1\n  }}\n  r\n}}",
+                cond
+            );
+            refused(&body).0.message
+        };
+        let ends = |cond: &str, end: &str| {
+            let m = message(cond);
+            assert!(m.ends_with(end), "{}\n{}", cond, m);
+        };
+        ends(
+            "(a or b) and r < 8 and next(mut i) > 0",
+            "write `while (a or b) and r < 8 {` and start its body with `val v = next(mut i)` and then `guard v > 0 else { break }`",
+        );
+        ends(
+            "next(mut i) > 0 and (a or b)",
+            "write `while true {` and start its body with `val v = next(mut i)` and then `guard v > 0 and (a or b) else { break }`",
+        );
+        ends(
+            "(if a { 1 } else { 0 }) == 0 and next(mut i) > 0",
+            "write `while (if a { 1 } else { 0 }) == 0 {` and start its body with `val v = next(mut i)` and then `guard v > 0 else { break }`",
+        );
+        let (d, _) = refused(
+            "pub fn f(n: u8, a: bool, b: bool) -> u8 {\n  var i = n\n  guard next(mut i) > 0 and (a or b) else {\n    return 0\n  }\n  i\n}",
+        );
+        assert!(
+            d.message
+                .ends_with("`val v = next(mut i)`, and test `v > 0 and (a or b)`"),
+            "{}",
+            d.message
+        );
     }
 
     #[test]
