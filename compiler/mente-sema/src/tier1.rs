@@ -8467,21 +8467,26 @@ mod tests {
 
     /// A compound remainder's place is an integer, or the `Any` of `todo` or `unreachable`, which
     /// the checker accepts too (`Fx::rest`): Tier 1 meets such a place only where no run
-    /// reaches, since evaluating `todo` empties the state first. The program checks, and the
-    /// statement after the `todo` is reached in an empty state.
+    /// reaches, since evaluating either empties the state first. For each, the program checks, and
+    /// the statement after it is reached in an empty state.
     #[test]
     fn test_a_compound_remainder_of_a_todo_place_is_met_only_where_no_run_reaches() {
-        let src = "pub fn f(a: [2]u8[1..=9]) -> u8 {\n  var y = todo(\"later\")\n  y %= a[1]\n  _ = y\n  0\n}";
-        assert_eq!(codes(src), NONE);
-        with_fx(src, |fx, st| {
-            let Some(Body::Block(b)) = fx.syntax.body else {
-                panic!("a block body");
-            };
-            let stmts = fx.tree.block(b).stmts.clone();
-            let mut at = st.clone();
-            fx.stmt_eval(&mut at, stmts[0], None);
-            assert!(at.is_empty(), "the state after `todo` is reached");
-        });
+        for leaves in ["todo(\"later\")", "unreachable(\"later\")"] {
+            let src = format!(
+                "pub fn f(a: [2]u8[1..=9]) -> u8 {{\n  var y = {}\n  y %= a[1]\n  _ = y\n  0\n}}",
+                leaves
+            );
+            assert_eq!(codes(&src), NONE, "{}", leaves);
+            with_fx(&src, |fx, st| {
+                let Some(Body::Block(b)) = fx.syntax.body else {
+                    panic!("a block body");
+                };
+                let stmts = fx.tree.block(b).stmts.clone();
+                let mut at = st.clone();
+                fx.stmt_eval(&mut at, stmts[0], None);
+                assert!(at.is_empty(), "the state after {} is reached", leaves);
+            });
+        }
     }
 
     /// Every compound operator, after a site value on its right side, proves only what holds:
