@@ -1,7 +1,9 @@
 # Commit and pull request text, before it reaches `main`'s history, and the base the instruments
 # ran against (.github/scripts/commits.mjs): no "WIP", "Draft:", "fixup", "squash!" or "amend!"
 # subject, English in every commit message and in the pull request's title and body
-# (CLAUDE.md, invariant 3), and no base changed since the head was pushed, which would leave every
+# (CLAUDE.md, invariant 3), a body that declares the root cause of what the pull request fixes and
+# whether the fix removes it, or that it is no fix (root-cause-first in docs/design-review.md), and
+# no base changed since the head was pushed, which would leave every
 # instrument's result for the old base. It runs again when the title, the body or the base is
 # edited, and fails on every event while a base change is unanswered by a new commit. A required
 # check of `main`.

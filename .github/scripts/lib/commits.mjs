@@ -7,6 +7,9 @@
 // - No commit message, and not the pull request's title or body, holds CJK text: the repository's
 //   text is English (CLAUDE.md, invariant 3). CJK_RANGES are `is_cjk`'s in
 //   compiler/mente-cli/tests/gates.rs, and a test keeps the two equal.
+// - Every pull request's body declares, in one canonical form, the root cause of what it fixes and
+//   whether the fix removes it, or that it fixes nothing (root-cause-first in
+//   docs/design-review.md; declarationProblems). Dependabot's declare themselves by their author.
 // - A pull request whose base changed after its head was pushed fails, on every event, until a new
 //   commit is pushed: retargeting fires only `pull_request: edited`, which no instrument runs on,
 //   so their results are for the old base, and a later edit of the title or a re-run of an earlier
@@ -58,6 +61,94 @@ export function badSubject(subject) {
   return m ? `starts with ${JSON.stringify(m[1])}` : null;
 }
 
+// ------------------------------------------------------------------------- the declaration
+
+/// The labels of a pull request's declaration, each written at the start of a line, in this very
+/// case, followed by its text on the same line (root-cause-first, Norman, 2026-11-22: "every
+/// problem must be evaluated for whether it can be solved at its root cause"):
+/// - a fix: `Root cause:` the cause, then exactly one of `Removed at the root:` how the fix removes
+///   it, or `Not removable at the root:` why not, followed by `Guard:` what holds the class
+///   instead;
+/// - or `Not a fix:` what the pull request is, a feature, a refactor, a brief, instruments, a
+///   dependency update.
+export const ROOT_CAUSE = "Root cause:";
+export const REMOVED = "Removed at the root:";
+export const NOT_REMOVABLE = "Not removable at the root:";
+export const GUARD = "Guard:";
+export const NOT_A_FIX = "Not a fix:";
+const LABELS = [ROOT_CAUSE, REMOVED, NOT_REMOVABLE, GUARD, NOT_A_FIX];
+/// The authors whose pull requests the policy declares, by what every one of them is: Dependabot
+/// writes its own text, and every pull request it opens updates a dependency. The author is the
+/// event's, which GitHub writes, never a word of the body.
+export const DECLARED_BY_AUTHOR = new Map([["dependabot[bot]", `${NOT_A_FIX} a dependency update`]]);
+/// A line that reads like a label in another case, spelling or decoration (`root cause:`,
+/// `**Root cause:**`, `## Root cause`, `- Not a Fix:`), which the one canonical form refuses
+/// rather than pass over.
+const NEAR_LABEL = /^[\s>#*_+-]*(?:\*\*|__)?\s*(root\s*[-_]?\s*cause|removed\s+at\s+the\s+root|not\s+removable\s+at\s+the\s+root|guard|not\s+a\s+fix)\s*(?:\*\*|__)?\s*(?::|$)/i;
+
+/// The lines of a body that it shows as prose, each with its 1-based number: no line of a fenced
+/// code block, which may quote the labels, and no HTML comment, which GitHub does not show.
+export function proseLines(body) {
+  const text = String(body ?? "").replace(/\r\n?/g, "\n");
+  // A comment's lines are blanked, not removed, so that each line keeps its number; an unclosed one
+  // hides the rest of the body, as GitHub renders it.
+  const shown = text.replace(/<!--[\s\S]*?(?:-->|$)/g, (c) => c.replace(/[^\n]/g, " "));
+  const out = [];
+  let fence = null;
+  for (const [k, line] of shown.split("\n").entries()) {
+    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && line.trim() === marker[1]) fence = null;
+      continue;
+    }
+    if (marker) {
+      fence = marker[1];
+      continue;
+    }
+    out.push({ n: k + 1, line });
+  }
+  return out;
+}
+
+/// What keeps a pull request's body from declaring, in the one canonical form, either the root cause
+/// of what it fixes and whether the fix removes it, or that it fixes nothing. One message a problem;
+/// none for an author DECLARED_BY_AUTHOR declares. No text of the body is echoed, only line numbers
+/// and labels, so that none can reach the log as a workflow command.
+export function declarationProblems(body, author) {
+  if (DECLARED_BY_AUTHOR.has(author)) return [];
+  const found = [];
+  const at = new Map(LABELS.map((l) => [l, []]));
+  for (const { n, line } of proseLines(body)) {
+    const label = LABELS.find((l) => line.startsWith(l));
+    if (label) {
+      at.get(label).push(n);
+      if (line.slice(label.length).trim() === "") found.push(`line ${n}: \`${label}\` holds no text after it`);
+    } else if (NEAR_LABEL.test(line)) {
+      found.push(`line ${n} reads like a label of the declaration in another case, spelling or form: write it at the start of the line exactly as one of ${LABELS.map((l) => `\`${l}\``).join(", ")}`);
+    }
+  }
+  const [root, removed, notRemovable, guard, notAFix] = LABELS.map((l) => at.get(l));
+  const fix = root.length + removed.length + notRemovable.length + guard.length;
+  const lines = (list) => list.join(", ");
+  if (fix === 0 && notAFix.length === 0) {
+    found.push(`it declares neither \`${ROOT_CAUSE}\` with \`${REMOVED}\` or \`${NOT_REMOVABLE}\`, nor \`${NOT_A_FIX}\`: write one, each label at the start of a line`);
+  } else if (fix > 0 && notAFix.length > 0) {
+    found.push(`it declares both a fix (line ${lines([...root, ...removed, ...notRemovable, ...guard].sort((a, b) => a - b))}) and \`${NOT_A_FIX}\` (line ${lines(notAFix)}): keep the one that is true`);
+  } else if (notAFix.length > 1) {
+    found.push(`it declares \`${NOT_A_FIX}\` ${notAFix.length} times, lines ${lines(notAFix)}: once`);
+  } else if (fix > 0) {
+    if (root.length !== 1) found.push(root.length === 0 ? `it says how the fix meets the root (line ${lines([...removed, ...notRemovable, ...guard])}) with no \`${ROOT_CAUSE}\` before it` : `it declares \`${ROOT_CAUSE}\` ${root.length} times, lines ${lines(root)}: once`);
+    const follow = [...removed, ...notRemovable];
+    if (follow.length === 0) found.push(`its \`${ROOT_CAUSE}\` is followed by neither \`${REMOVED}\` nor \`${NOT_REMOVABLE}\``);
+    else if (follow.length > 1) found.push(`it says ${follow.length} times how the fix meets the root, lines ${lines(follow.sort((a, b) => a - b))}: once, as \`${REMOVED}\` or \`${NOT_REMOVABLE}\``);
+    else if (root.length === 1 && follow[0] < root[0]) found.push(`its \`${removed.length ? REMOVED : NOT_REMOVABLE}\` (line ${follow[0]}) stands before its \`${ROOT_CAUSE}\` (line ${root[0]})`);
+    if (notRemovable.length === 1 && guard.length !== 1) found.push(guard.length === 0 ? `its \`${NOT_REMOVABLE}\` names no \`${GUARD}\` that holds the class instead` : `it names \`${GUARD}\` ${guard.length} times, lines ${lines(guard)}: once`);
+    else if (notRemovable.length === 1 && guard[0] < notRemovable[0]) found.push(`its \`${GUARD}\` (line ${guard[0]}) stands before its \`${NOT_REMOVABLE}\` (line ${notRemovable[0]})`);
+    if (notRemovable.length === 0 && guard.length > 0) found.push(`it names \`${GUARD}\` (line ${lines(guard)}) with no \`${NOT_REMOVABLE}\`: a guard holds a class only where the root stays`);
+  }
+  return found;
+}
+
 /// Every problem in the commits, the pull request's text and its base, one line each.
 export function problems(commits, pullRequest, baseChanged = false) {
   const found = [];
@@ -77,6 +168,7 @@ export function problems(commits, pullRequest, baseChanged = false) {
       const lines = cjkLines(text ?? "");
       if (lines.length > 0) found.push(`the pull request's ${what}: CJK text, line ${lines.join(", ")}`);
     }
+    for (const p of declarationProblems(pullRequest.body, pullRequest.author)) found.push(`the pull request's body: ${p}`);
   }
   return found;
 }
@@ -159,7 +251,8 @@ export async function main(env, between) {
   if (eventName === "pull_request") {
     base = payload.pull_request?.base?.sha;
     head = payload.pull_request?.head?.sha;
-    pullRequest = { title: env.PR_TITLE ?? "", body: env.PR_BODY ?? "" };
+    // The author is the event's, which GitHub writes, as the base and the head are.
+    pullRequest = { title: env.PR_TITLE ?? "", body: env.PR_BODY ?? "", author: payload.pull_request?.user?.login ?? "" };
   } else if (eventName === "merge_group") {
     base = payload.merge_group?.base_sha;
     head = payload.merge_group?.head_sha;
@@ -184,7 +277,7 @@ export async function main(env, between) {
   console.log(`${commits.length} commits in ${base.slice(0, 7)}..${head.slice(0, 7)}${pullRequest ? ", and the pull request's title and body" : ""}.`);
   for (const p of found) console.log(`::error::${p}`);
   if (found.length > 0) {
-    console.log("Reword the commits, edit the pull request's text, or push a commit, as each error says.");
+    console.log("Reword the commits, edit the pull request's text, or push a commit, as each error says. An edit of the title or the body runs this check again.");
     return 1;
   }
   return 0;

@@ -36,7 +36,7 @@ export function jobDigest(doc, job) {
 export const PINNED_FILES = new Map([
   // The policy's list of its own files: a module dropped from it, or the total of checks lowered,
   // changes this digest too.
-  [".github/scripts/policy/modules.json", "669af665092a33c2ea782dfeecfaf3b6c47b3318bee0627f1f1aef0be18a368f"],
+  [".github/scripts/policy/modules.json", "d9273d06591457eb3a1bc6c2461aa3f4df6d0556f34df58d2a259fff17d9bec7"],
   [".github/scripts/limits.sh", "40747e4a7344895ce42dd902adb28dd669809d4dd6821d3c1e01921552669ed0"],
   [".github/scripts/memory-guard.sh", "c3c629010f58d39682fa06353305181cf7d1064d2b07abefd6885033045630d1"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
@@ -60,7 +60,7 @@ export const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "8594d53e73f3b014fff01ee9cc1014fa5575a9b3ee9b102fae33c03754b0f6af"],
-  [".github/scripts/policy-run.test.mjs", "2ebf07ce760bbf1731b0c313bcf77894216878146c34b579efebcdf409333218"],
+  [".github/scripts/policy-run.test.mjs", "00bf0f25aae5100fd3b19472f9d347f9b5a076ae6a81d0d7246e6588ccc40c2b"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -79,7 +79,7 @@ export const PINNED_FILES = new Map([
   [".github/scripts/lib/action-pins.mjs", "f08a9cec14bea0adb5a077a2dc33a52b668868bcd6cc15de2691c57ad8e837dc"],
   [".github/scripts/yaml.test.mjs", "4dc4626a1c6ecb74f5c82f82d3994e6d477d30a7ac63b5e25b2b702665f9eab3"],
   [".github/scripts/lib/yaml.mjs", "4c06080bc480b996513b6410b0290e1bc74c569a5a898968af3e8b27cbd88e30"],
-  [".github/scripts/lib/commits.mjs", "bd79c94ae1cc142d48e066b22ea559a2f6bbc20c5af877de56fc1b9d9d382a90"],
+  [".github/scripts/lib/commits.mjs", "1d77ac70e99c75dc5da683203830acf86f47cfc7349a7f00b48b6dd5cf37a060"],
   [".github/scripts/commits.mjs", "33c4156781145f9c0a0e127fb99c304a85e1ed508e1321c4e56a3992ce6d4322"],
   // Every file on the API key's path and on the lock's, which run beside the key or as root: a line
   // added anywhere in one, before the key's line or after it, is a change to a gate review sees

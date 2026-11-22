@@ -565,7 +565,9 @@ check("the Commits check fails on every event while a base change is newer than 
       return sh("rev-parse", "HEAD");
     };
     const env = Object.fromEntries(Object.entries(GIT_TEST_ENV).filter(([k]) => !k.startsWith("GITHUB_")));
-    const spawnWith = (eventName, payload) =>
+    // Every pull request's body declares what it is (root-cause-first).
+    const DECLARED = "Not a fix: a fixture of the Commits check's run test.";
+    const spawnWith = (eventName, payload, body = DECLARED) =>
       new Promise((done) => {
         const event = path.join(dir, "event.json");
         fs.writeFileSync(event, JSON.stringify(payload));
@@ -579,7 +581,7 @@ check("the Commits check fails on every event while a base change is newer than 
             GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
             GITHUB_TOKEN: "t",
             PR_TITLE: "Title",
-            PR_BODY: "Body",
+            PR_BODY: body,
           },
         });
         let stdout = "";
@@ -590,6 +592,13 @@ check("the Commits check fails on every event while a base change is newer than 
       spawnWith("pull_request", { action, changes, pull_request: { number: 7, base: { sha: base }, head: { sha: head } } });
     const change = (at) => ({ event: "base_ref_changed", created_at: at });
     const first = push("b\n");
+    // A body with no declaration fails, through the event as the job reads it; Dependabot's
+    // declares itself by its author, the event's.
+    api.runs.set(first, [{ created_at: "2026-11-12T10:00:00Z" }]);
+    const undeclared = await spawnWith("pull_request", { action: "edited", pull_request: { number: 7, base: { sha: base }, head: { sha: first }, user: { login: "someone" } } }, "Body");
+    assert.equal(undeclared.status, 1);
+    assert.match(undeclared.stdout, /::error::the pull request's body: it declares neither/);
+    assert.equal((await spawnWith("pull_request", { action: "edited", pull_request: { number: 7, base: { sha: base }, head: { sha: first }, user: { login: "dependabot[bot]" } } }, "Body")).status, 0, "Dependabot's body fails");
     api.runs.set(first, [{ created_at: "2026-11-12T10:00:00Z" }, { created_at: "2026-11-12T12:00:00Z" }]);
     assert.equal((await run(first, "synchronize")).status, 0);
     api.events = [change("2026-11-12T09:00:00Z")];
