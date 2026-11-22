@@ -225,25 +225,54 @@ test("the hook asks the remote git pushes to, never one an insteadOf rewrites to
       done();
     });
   });
-  // A remote that accepts the connection and never answers: the hook gives up in time.
-  const server = net.createServer(() => {});
+  // A remote over HTTP that accepts the connection and never answers: git hands it to its
+  // transport, git-remote-http, a process of its own. The hook gives up in time, and kills the
+  // whole tree, so no process of it keeps its connection open (the eighth review).
+  const sockets = new Set();
+  let connected = 0;
+  const server = net.createServer((socket) => {
+    connected++;
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => {});
+  });
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  // A repository of its own, removed only after the check below, so that a surviving process,
+  // which would hold it, fails the check and not the removal.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "stalled-"));
   try {
-    await new Promise((done) => {
-      withRemote(({ work, git, commit }) => {
-        git(work, "checkout", "-q", "-b", "stalled");
-        commit(work, "x.md", "x\n");
-        const sha = git(work, "rev-parse", "HEAD");
-        const started = Date.now();
-        const answer = prePush(`refs/heads/stalled ${sha} refs/heads/stalled ${"0".repeat(40)}\n`, work, `git://127.0.0.1:${server.address().port}/stalled.git`, { timeoutMs: 3000 });
-        assert.equal(answer.status, 1);
-        assert.match(answer.words, /did not say which commit is its main within 3 s/);
-        assert.ok(Date.now() - started < 30000, "the hook waited past its time");
-        done();
-      });
-    });
+    const empty = path.join(dir, "no-config");
+    fs.writeFileSync(empty, "");
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^GIT_/i.test(k))), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: empty, GIT_AUTHOR_NAME: "fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" };
+    const work = path.join(dir, "work");
+    fs.mkdirSync(work);
+    const git = (...args) => execFileSync("git", args, { cwd: work, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    git("init", "-q", "-b", "stalled");
+    fs.writeFileSync(path.join(work, "x.md"), "x\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "x");
+    const sha = git("rev-parse", "HEAD");
+    const started = Date.now();
+    const answer = prePush(`refs/heads/stalled ${sha} refs/heads/stalled ${"0".repeat(40)}\n`, work, `http://127.0.0.1:${server.address().port}/stalled.git`, { timeoutMs: 3000 });
+    assert.equal(answer.status, 1, answer.words);
+    assert.match(answer.words, /did not say which commit is its main within 3 s/);
+    assert.ok(Date.now() - started < 30000, "the hook waited past its time");
+    // The server learns of a connection only once this process's loop turns, after the hook has
+    // returned: a check at once would see none and pass whatever survived.
+    await new Promise((done) => setTimeout(done, 500));
+    assert.ok(connected > 0, "the transport never connected, so this case tested nothing");
+    // Every connection the transport opened is closed within moments: none of its processes lives.
+    const deadline = Date.now() + 5000;
+    while (sockets.size > 0 && Date.now() < deadline) await new Promise((done) => setTimeout(done, 100));
+    assert.equal(sockets.size, 0, `${sockets.size} connection(s) of the stalled ls-remote outlived its time: a process of its tree survived`);
   } finally {
+    for (const socket of sockets) socket.destroy();
     server.close();
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+    } catch {
+      // A surviving process holds it; the check above has said so.
+    }
   }
 });
 

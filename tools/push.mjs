@@ -19,7 +19,7 @@
 // second review of #203 found seven pushes a reading of refspecs, options and directories let
 // through), so the rule reads only for these.
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { PASSED } from "./local-limits.mjs";
@@ -61,22 +61,61 @@ function exists(dir, ref) {
 export const REMOTE_TIMEOUT_MS = 60000;
 
 /**
+ * A runner of one command whose whole process tree is held to a time, run by `node -e`: the
+ * command in a process group of its own on posix, killed whole with the group, and on Windows by
+ * taskkill /T, when the time passes. A time limit on the command alone would kill git and leave its
+ * transport, git-remote-http, holding its connection (the eighth review of #203). It writes the
+ * command's status, output and whether its time passed, as JSON.
+ */
+const TREE_RUNNER = `
+const { spawn, spawnSync } = require("node:child_process");
+const path = require("node:path");
+const [cmd, ...args] = JSON.parse(process.env.TREE_ARGS);
+const windows = process.platform === "win32";
+const child = spawn(cmd, args, { detached: !windows, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+let out = "", err = "", timedOut = false;
+child.stdout.setEncoding("utf8").on("data", (d) => (out += d));
+child.stderr.setEncoding("utf8").on("data", (d) => (err += d));
+const timer = setTimeout(() => {
+  timedOut = true;
+  if (windows) spawnSync(path.join(process.env.SystemRoot || "C:\\\\Windows", "System32", "taskkill.exe"), ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore", windowsHide: true });
+  else { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
+}, Number(process.env.TREE_TIMEOUT));
+const done = (code) => { clearTimeout(timer); process.stdout.write(JSON.stringify({ code, out, err, timedOut })); };
+child.on("close", (code) => done(code));
+child.on("error", (e) => { err += String(e.message); done(-1); });
+`;
+
+/**
+ * The output of `args`, a git command run in `dir` with `env`, its whole process tree held to
+ * `timeoutMs` (TREE_RUNNER): throws with code ETIMEDOUT when the time passed, and with git's words
+ * when it failed.
+ */
+function gitInTime(dir, args, timeoutMs, env) {
+  const r = spawnSync(process.execPath, ["-e", TREE_RUNNER], {
+    encoding: "utf8",
+    env: { ...env, TREE_ARGS: JSON.stringify(["git", "-C", dir, ...args]), TREE_TIMEOUT: String(timeoutMs) },
+    timeout: timeoutMs + 30000,
+    windowsHide: true,
+  });
+  if (r.error) throw r.error;
+  const result = JSON.parse(r.stdout);
+  if (result.timedOut) throw Object.assign(new Error(`git ${args[0]} took more than ${timeoutMs} ms`), { code: "ETIMEDOUT" });
+  if (result.code !== 0) throw Object.assign(new Error(result.err.trim() || `git ${args[0]} failed`), { stderr: result.err, status: result.code });
+  return result.out.trim();
+}
+
+/**
  * The commit the remote at `url` names main, asked of the remote itself, never of a local ref such
  * as refs/remotes/origin/main, which any local command can move (the sixth review of #203):
  * { main } with its sha, or null when the remote has no main; or { elsewhere } with the URL
  * ls-remote would contact instead of `url`, the one git pushes to, which git hands the hook after
  * its push-side rewriting and ls-remote would rewrite again by url.<base>.insteadOf (the seventh
- * review). Within `timeoutMs`, with no prompt for credentials; throws where the remote cannot be
- * asked in time.
+ * review). Within `timeoutMs`, its whole process tree, with no prompt for credentials; throws
+ * where the remote cannot be asked in time.
  */
 function remoteMain(dir, url, timeoutMs) {
-  const run = (args) =>
-    execFileSync("git", ["-C", dir, ...args], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
-      timeout: timeoutMs,
-    }).trim();
+  const run = (args) => gitInTime(dir, args, timeoutMs, { ...process.env, GIT_TERMINAL_PROMPT: "0" });
   const asked = run(["ls-remote", "--get-url", "--", url]);
   if (asked !== url) return { elsewhere: asked };
   const line = run(["ls-remote", "--", url, "refs/heads/main"])
@@ -124,7 +163,7 @@ export function prePush(text, dir, url, { timeoutMs = REMOTE_TIMEOUT_MS } = {}) 
   try {
     asked = remoteMain(dir, url, timeoutMs);
   } catch (e) {
-    if (e.code === "ETIMEDOUT" || e.signal) return { status: 1, words: `the pre-push hook refused: ${url} did not say which commit is its main within ${Math.round(timeoutMs / 1000)} s, so it cannot tell whether ${pending[0].ref} is already on main` };
+    if (e.code === "ETIMEDOUT") return { status: 1, words: `the pre-push hook refused: ${url} did not say which commit is its main within ${Math.round(timeoutMs / 1000)} s, so it cannot tell whether ${pending[0].ref} is already on main` };
     return { status: 1, words: `the pre-push hook refused: it could not ask ${url} for its main, so it cannot tell whether ${pending[0].ref} is already on main: ${String(e.stderr || e.message).trim().split(/\r?\n/)[0]}` };
   }
   if (asked.elsewhere !== undefined) return { status: 1, words: `the pre-push hook refused: asking ${url} for its main would ask ${asked.elsewhere} instead, which a url.<base>.insteadOf rewrites it to, so it cannot tell what main is where the push goes` };
