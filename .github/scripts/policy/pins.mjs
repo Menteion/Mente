@@ -50,8 +50,8 @@ export const PINNED_FILES = new Map([
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
-  [".github/scripts/lib/test-times.mjs", "b2854e9746bf16533d9e51174392482a6e0cce2f77465a448dd9b82e6d9df615"],
-  [".github/scripts/test-times.mjs", "e3ae0b3c7b41e56e73af5ec64fb9d737e64de704b486bd089df2a46e4094f33f"],
+  [".github/scripts/lib/test-times.mjs", "8f3d837c9b29b1a104709997d6cd2652fc5c2f6c6f08fd4a5b351fce67218956"],
+  [".github/scripts/test-times.mjs", "96695b890a644c12baa0b19d87fde9816a737b2559b6055a60716b0205a0ae6a"],
   [".github/scripts/tools.sh", "dee23b6f996a8b6772446056aa448ad2a35e60563a3e0320e1855b6a420e90d0"],
   [".github/scripts/test-sandbox.sh", "9ac640fe36800bc80902151031552ff8f218c104f03c85a3a79951df880a7bbd"],
   // The sandbox's one program, cargo's runner and the namespace's first process, which
@@ -112,7 +112,7 @@ export const PINNED_FILES = new Map([
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 export const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "9c56422117cff6cc471f3dc21a9109641c9d743e1832e0042fe78738e7d98834"],
+  ["ci.yml#rust", "dbc4c71b09cd3dd6123575a55727bfb9a72d581448b70064a5f03b153f6649c8"],
   ["mutants.yml#in-diff", "6b54eaf7d853b04bf84a06306bee5d6d0195bf17477bd7e2c6be4ceeaf9526ad"],
   ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],

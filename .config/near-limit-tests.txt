@@ -1,0 +1,35 @@
+# The tests that may take more than 45% of their stop, the time nextest ends them at, on one runner,
+# one a line as `<runner> <binary id> <test name> <share>  # owner: fix`: the runner by the label its
+# Rust job runs on, the test as nextest prints it, the share of its stop it may take there, past
+# 0.45 and under 1, and who owns the fix scheduled for it and what the fix is. The required Rust jobs
+# fail any other test past 45% of its stop (.github/scripts/lib/test-times.mjs). A line whose test
+# now takes under 30% of its stop on its runner, or names a test the run lacks, fails a pull request
+# and the queue: remove it, or rename it with its test. CODEOWNERS gives the file to its owner.
+#
+# Each runner's machines come in two classes, about twice apart in speed, so a test is listed on a
+# runner where its slower class passes 45%: from main's runs at 267be27 and before, each test's
+# highest share of its stop on each runner.
+
+# slots_review_generated_35.mn, which pull request 183 added to the conformance suite, takes Tier 1
+# 3.3 s to prove, and every test that proves the suite carries it: MIR reproducibility at 42% (fast)
+# to about 70% (slow) of its stop on x86-64 Linux, 65% on AArch64 and 67 to 75% on Windows;
+# diagnostics reproducibility at 35 to about 58%, 49% and 55% since pull request 207; and the replay
+# of Tier 1's loops at 40 to about 66%, 63% and 53%.
+ubuntu-24.04 mente-cli::reproducible test_mir_is_reproducible 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+ubuntu-24.04-arm mente-cli::reproducible test_mir_is_reproducible 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+windows-2025 mente-cli::reproducible test_mir_is_reproducible 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+ubuntu-24.04 mente-cli::reproducible test_diagnostics_are_reproducible 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+ubuntu-24.04-arm mente-cli::reproducible test_diagnostics_are_reproducible 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+windows-2025 mente-cli::reproducible test_diagnostics_are_reproducible 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+ubuntu-24.04 mente-cli::bin/mn tests::test_every_loop_replayed_from_the_memo_gives_what_its_analysis_gives 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+ubuntu-24.04-arm mente-cli::bin/mn tests::test_every_loop_replayed_from_the_memo_gives_what_its_analysis_gives 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+windows-2025 mente-cli::bin/mn tests::test_every_loop_replayed_from_the_memo_gives_what_its_analysis_gives 0.9  # native-frames session: the Tier 1 nested-loop fix of slots_review_generated_35.mn, with the work counts, after the containment oracle
+
+# The conformance suite on three paths, one test over the whole suite, at 61 to 65% of its stop on
+# AArch64 in every run of main since at least f7f72d5; on Windows up to 44% on its slower machines and
+# 26% on its faster, so no line there, which the faster would make lapse. The containment oracle adds
+# about 1.21 times to it, and its pull request measures that on every runner.
+ubuntu-24.04-arm mente-cli::bin/mn mir_run::differential::tests::test_three_paths_agree_on_the_conformance_suite 0.9  # tier1-oracle: split the three-path conformance test so that no one test holds most of its stop, a test for each spec directory or shards, right after the oracle merges
+
+# The incremental session test at 48% of its stop on AArch64.
+ubuntu-24.04-arm mente-sema incremental::tests::test_a_session_reports_what_the_whole_module_check_does 0.9  # native-frames session: find with the work counts what makes it cost that much, and fix it, after the nested-loop fix and the work counts
