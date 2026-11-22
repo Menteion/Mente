@@ -1,0 +1,23 @@
+// expect: E0426 E0412 E0426 E0417
+module conformance
+// A layout number counts bytes, bits or elements, which have no type, so it takes no suffix
+// (morphic-layouts.md, item 2): `8_banana` and `300_u8` once read as 8 and 300. Each is an
+// error that names the suffix and the number to write.
+@layout(size: 8_banana, align: 8)
+pub struct Size {
+  @bytes(0..8) pub v: u64
+}
+
+@layout(size: 8, align: 8)
+pub struct Range {
+  @bytes(0..8_u8) pub v: u64
+}
+
+pub bitstruct Bits : u8 {
+  @bits(0..8_u8) pub a: u8
+}
+
+@layout(size: 4, align: 1)
+pub struct Length {
+  @bytes(0..4) pub v: [4_u8]u8
+}

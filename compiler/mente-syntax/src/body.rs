@@ -2745,7 +2745,7 @@ fn assign_op(kind: &TokenKind) -> Option<AssignOp> {
 }
 
 /// The suffix of an integer literal as written: `u8` for `255_u8` and `0xFF_u8`.
-fn int_suffix(raw: &str) -> Option<String> {
+pub(crate) fn int_suffix(raw: &str) -> Option<String> {
     let hex = raw.starts_with("0x");
     let bytes = raw.as_bytes();
     (1..bytes.len())
