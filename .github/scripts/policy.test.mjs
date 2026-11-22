@@ -1292,10 +1292,10 @@ const PINNED_FILES = new Map([
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "3fbed2813c5c784d19b8208a269ffd365ba977e4c65a1e1ab8ae39752f5e2053"],
+  [".github/scripts/test-sandbox.sh", "f998c97e39ba375a6c082544f665464748dba30fedfdbdd9fe1c19b4b557e643"],
   // The sandbox's one program, cargo's runner and the namespace's first process, which
   // test-sandbox.sh builds at setup and every command runs through.
-  [".github/scripts/test-sandbox.rs", "d3339f7df2ca14e3ffd3d9d08909199d1dc670bf697cfcd09a2744a2d5eacd87"],
+  [".github/scripts/test-sandbox.rs", "8ce1084352c530f615812a052dcbf527f92dafc098d1310e8b64888a42e19b80"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
