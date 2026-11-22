@@ -738,6 +738,9 @@ struct RoutedClause {
     form: &'static str,
     clause: ExprId,
     ways: Vec<(&'static str, Option<ExprId>)>,
+    /// Whether it is a clause of the loop a routed function begins with, after its counter's
+    /// binding (`generate::Gen::leading_loop`).
+    first_loop: bool,
 }
 
 /// Each clause of `f`, its loops' invariants and measures among them, that is an `if` or a
@@ -752,24 +755,31 @@ fn routed_clauses(f: &FnSyntax) -> Vec<RoutedClause> {
             _ => None,
         }
     };
-    let mut clauses: Vec<(&'static str, ExprId)> = f
+    let mut clauses: Vec<(&'static str, ExprId, bool)> = f
         .contracts
         .iter()
-        .map(|c| (contract_kind(c), c.expr))
+        .map(|c| (contract_kind(c), c.expr, false))
         .collect();
-    for s in &tree.stmts {
+    // The loop a routed function begins with is its body's second statement, after its
+    // counter's binding.
+    let first_loop = match &f.body {
+        Some(Body::Block(b)) => tree.block(*b).stmts.get(1).map(|s| s.0 as usize),
+        Some(Body::Expr(_)) | None => None,
+    };
+    for (k, s) in tree.stmts.iter().enumerate() {
         if let StmtKind::While {
             invariants,
             decreases,
             ..
         } = &s.kind
         {
-            clauses.extend(invariants.iter().map(|&i| ("invariant", i)));
-            clauses.extend(decreases.iter().map(|&d| ("loop decreases", d)));
+            let first = first_loop == Some(k);
+            clauses.extend(invariants.iter().map(|&i| ("invariant", i, first)));
+            clauses.extend(decreases.iter().map(|&d| ("loop decreases", d, first)));
         }
     }
     let mut out = Vec::new();
-    for (kind, clause) in clauses {
+    for (kind, clause, first_loop) in clauses {
         let (form, ways) = match &tree.expr(clause).kind {
             ExprKind::If {
                 then,
@@ -807,6 +817,7 @@ fn routed_clauses(f: &FnSyntax) -> Vec<RoutedClause> {
             form,
             clause,
             ways,
+            first_loop,
         });
     }
     out
@@ -822,11 +833,85 @@ fn reached_routed(f: &FnSyntax, routing: Routing, seen: &mut BTreeSet<String>) {
     }
 }
 
+/// The classes of routed clauses, each held to a bar of its own on the share of those a run
+/// evaluates that leave a way no run takes ([`UNTAKEN_BARS`]): by kind, by which routed function
+/// holds it, the one called from outside or the one the program calls, and for a loop's clause,
+/// by whether the loop is the function's first, which only steps its counter.
+const ENTRY_REQUIRES: &str = "requires of the routed function called from outside";
+const ENTRY_ENSURES: &str = "ensures of the routed function called from outside";
+const ENTRY_FIRST_INVARIANT: &str =
+    "invariant of the first loop of the routed function called from outside";
+const ENTRY_FIRST_MEASURE: &str =
+    "measure of the first loop of the routed function called from outside";
+const CALLED_REQUIRES: &str = "requires of the routed function the program calls";
+const CALLED_ENSURES: &str = "ensures of the routed function the program calls";
+const CALLED_FIRST_INVARIANT: &str =
+    "invariant of the first loop of the routed function the program calls";
+const CALLED_FIRST_MEASURE: &str =
+    "measure of the first loop of the routed function the program calls";
+const LATER_INVARIANT: &str = "invariant of a later loop of a routed function";
+
+/// Each class of routed clause with the most of every hundred a run evaluates that may leave a way
+/// no run takes, and the few more any run may have.
+///
+/// Five classes take both ways by construction, so none may leave one: the routed function called
+/// from outside writes no `requires` of the fragment and refines its parameters by literals alone,
+/// so the call of every lowest value and the call of every highest exist (`function_calls`) and
+/// take its `requires`' two ways, split between them (`Split::across`); the call of every highest
+/// passes that `requires`, which fails on the lowest alone, runs the first loop's every round,
+/// which only steps its counter, and calls the routed function the program calls with its own
+/// highest values, which run that one's first loop the same way. Over seeds 0 to 2999 none did.
+///
+/// The others are measured over seeds 0 to 2999, the most per hundred their share there rounded
+/// up, and the few more twice the standard deviation of the count at the coverage test's 300
+/// seeds, at that share, rounded up, so that only a change that takes ways away crosses it:
+/// - an `ensures` of the function called from outside: 130 of 526, 25 in a hundred, and 7 more for
+///   about 53 a run evaluates there: it holds at each return, and the calls on one side of its
+///   split may each trap in the body first;
+/// - a `requires` of the function the program calls: 6 of 686, 1 in a hundred, and 2 more for about
+///   69: its caller's call of every lowest value stops at the caller's own failing `requires` where
+///   it has one, so the values below the split come from the random calls alone;
+/// - an `ensures` of the function the program calls: 86 of 607, 15 in a hundred, and 6 more for
+///   about 61, as for the other `ensures`;
+/// - an invariant of a later loop, which leaves, traps or returns where its body says: 127 of 251,
+///   51 in a hundred, and 5 more for about 25: a loop that goes round once takes both ways, and
+///   one that leaves in its first round takes one; it cannot be made live by construction without
+///   taking from its body what makes it a loop with a body.
+pub(super) const UNTAKEN_BARS: &[(&str, usize, usize)] = &[
+    (ENTRY_REQUIRES, 0, 0),
+    (ENTRY_FIRST_INVARIANT, 0, 0),
+    (ENTRY_FIRST_MEASURE, 0, 0),
+    (CALLED_FIRST_INVARIANT, 0, 0),
+    (CALLED_FIRST_MEASURE, 0, 0),
+    (ENTRY_ENSURES, 25, 7),
+    (CALLED_REQUIRES, 1, 2),
+    (CALLED_ENSURES, 15, 6),
+    (LATER_INVARIANT, 51, 5),
+];
+
+/// The class of a routed clause ([`UNTAKEN_BARS`]): of kind `kind`, held by the routed function
+/// called from outside when `entry`, and of the function's first loop when `first_loop`.
+fn class(kind: &str, entry: bool, first_loop: bool) -> &'static str {
+    match (kind, entry, first_loop) {
+        ("requires", true, _) => ENTRY_REQUIRES,
+        ("requires", false, _) => CALLED_REQUIRES,
+        ("ensures", true, _) => ENTRY_ENSURES,
+        ("ensures", false, _) => CALLED_ENSURES,
+        ("invariant", true, true) => ENTRY_FIRST_INVARIANT,
+        ("invariant", false, true) => CALLED_FIRST_INVARIANT,
+        ("loop decreases", true, true) => ENTRY_FIRST_MEASURE,
+        ("loop decreases", false, true) => CALLED_FIRST_MEASURE,
+        _ => LATER_INVARIANT,
+    }
+}
+
 /// What the runs of a program take of one of its routed clauses ([`reached_routed_runs`]).
 #[derive(Clone, Debug, Default)]
 pub(super) struct ClauseRuns {
     /// The seed, the function and where the clause stands, for a problem to name.
     at: String,
+    /// Its class, whose bar holds it ([`UNTAKEN_BARS`]).
+    class: &'static str,
     /// Whether a run evaluated the clause.
     ran: bool,
     /// Each of its ways by name, with whether a run took it.
@@ -837,21 +922,10 @@ pub(super) struct ClauseRuns {
     held: usize,
 }
 
-/// The most routed clauses, of every hundred that a run evaluates, that leave a way no run takes,
-/// and the few more any run may have. A routed function's clauses split where the values the
-/// calls from outside pass fall on both sides (`generate::Split`), and its first loop runs every
-/// round, so a way stays untaken where no call reaches the clause past the guards that leave
-/// early, or every call that does traps first, in the function's body for an `ensures`. Of the
-/// routed clauses of seeds 0 to 2999 that a run evaluated, 118 of 3296, 4 in a hundred, left a
-/// way untaken; with each `requires` and `ensures` split at the highest value its name takes, as
-/// the first round of pull request 217 split some, 744 did, 23 in a hundred.
-pub(super) const MAX_UNTAKEN_PER_HUNDRED: usize = 8;
-const UNTAKEN_ROOM: usize = 3;
-
 /// What the runs of routed clauses show that none may: a `requires` that stops every call from
 /// outside that reaches it, which hides its function from the comparison, as a recursion's would
-/// whose every call passes the lowest value down; and more clauses with a way no run takes than
-/// [`MAX_UNTAKEN_PER_HUNDRED`] allows.
+/// whose every call passes the lowest value down; and, of each class, more clauses with a way no
+/// run takes than its bar allows ([`UNTAKEN_BARS`]).
 pub(super) fn routed_runs_problems(runs: &[ClauseRuns]) -> Vec<String> {
     let mut out: Vec<String> = runs
         .iter()
@@ -864,13 +938,16 @@ pub(super) fn routed_runs_problems(runs: &[ClauseRuns]) -> Vec<String> {
             )
         })
         .collect();
-    let ran: Vec<&ClauseRuns> = runs.iter().filter(|r| r.ran).collect();
-    let untaken: Vec<&&ClauseRuns> = ran
-        .iter()
-        .filter(|r| r.taken.iter().any(|(_, taken)| !taken))
-        .collect();
-    let most = MAX_UNTAKEN_PER_HUNDRED * ran.len() / 100 + UNTAKEN_ROOM;
-    if untaken.len() > most {
+    for &(class, per_hundred, room) in UNTAKEN_BARS {
+        let ran: Vec<&ClauseRuns> = runs.iter().filter(|r| r.ran && r.class == class).collect();
+        let untaken: Vec<&&ClauseRuns> = ran
+            .iter()
+            .filter(|r| r.taken.iter().any(|(_, taken)| !taken))
+            .collect();
+        let most = per_hundred * ran.len() / 100 + room;
+        if untaken.len() <= most {
+            continue;
+        }
         let names: Vec<String> = untaken
             .iter()
             .map(|r| {
@@ -884,10 +961,11 @@ pub(super) fn routed_runs_problems(runs: &[ClauseRuns]) -> Vec<String> {
             })
             .collect();
         out.push(format!(
-            "{} of the {} routed clauses a run evaluates leave a way no run takes, above the {} \
-             that may: {}",
+            "{} of the {} {} clauses a run evaluates leave a way no run takes, above the {} that \
+             may: {}",
             untaken.len(),
             ran.len(),
+            class,
             most,
             names.join("; ")
         ));
@@ -905,9 +983,11 @@ pub(super) fn routed_runs_problems(runs: &[ClauseRuns]) -> Vec<String> {
 fn test_a_requires_that_stops_every_call_that_reaches_it_is_a_problem() {
     let run = |text: &str| {
         let module = mente_sema::check_program(text).unwrap_or_else(|d| panic!("{:?}", d));
-        let routings: Vec<Routing> = functions(text).iter().map(|(_, r)| *r).collect();
+        let fns = functions(text);
+        let routings: Vec<Routing> = fns.iter().map(|(_, r, _)| *r).collect();
+        let public: Vec<bool> = fns.iter().map(|(_, _, p)| *p).collect();
         let mut seen = BTreeSet::new();
-        let runs = reached_routed_runs(0, text, &module, &routings, &mut seen);
+        let runs = reached_routed_runs(0, text, &module, &routings, &public, &mut seen);
         routed_runs_problems(&runs.unwrap_or_else(|e| panic!("{}", e)))
     };
     let clause = "  requires (if n > 1 { n > 1 } else { n != 0 })\n";
@@ -930,34 +1010,50 @@ fn test_a_requires_that_stops_every_call_that_reaches_it_is_a_problem() {
     assert_eq!(run(&once), Vec::<String>::new());
 }
 
-/// More routed clauses with a way no run takes than [`MAX_UNTAKEN_PER_HUNDRED`] allows are a
-/// problem, and as many are none; a clause no run evaluates counts toward neither.
+/// Of a class of routed clause, more with a way no run takes than its bar allows are a problem,
+/// and as many are none; a clause no run evaluates counts toward neither, and a class of clauses
+/// that take both ways by construction allows none.
 #[test]
 fn test_routed_clauses_with_a_way_untaken_are_held_to_their_bar() {
-    let clause = |ran: bool, untaken: bool| ClauseRuns {
+    let clause = |class: &'static str, ran: bool, untaken: bool| ClauseRuns {
         at: "c".into(),
+        class,
         ran,
         taken: vec![("its then branch", true), ("its else branch", !untaken)],
         ..ClauseRuns::default()
     };
-    let most = MAX_UNTAKEN_PER_HUNDRED + UNTAKEN_ROOM;
-    let runs = |untaken: usize| -> Vec<ClauseRuns> {
-        let mut runs: Vec<ClauseRuns> = (0..100).map(|k| clause(true, k < untaken)).collect();
-        runs.extend((0..50).map(|_| clause(false, true)));
+    let bar = |class: &str| {
+        UNTAKEN_BARS
+            .iter()
+            .find(|(c, _, _)| *c == class)
+            .map_or(0, |(_, per_hundred, room)| per_hundred + room)
+    };
+    let runs = |class: &'static str, untaken: usize| -> Vec<ClauseRuns> {
+        let mut runs: Vec<ClauseRuns> =
+            (0..100).map(|k| clause(class, true, k < untaken)).collect();
+        runs.extend((0..50).map(|_| clause(class, false, true)));
         runs
     };
-    assert_eq!(routed_runs_problems(&runs(most)), Vec::<String>::new());
-    let over = routed_runs_problems(&runs(most + 1));
+    let most = bar(ENTRY_ENSURES);
+    assert!(most > 0);
+    assert_eq!(
+        routed_runs_problems(&runs(ENTRY_ENSURES, most)),
+        Vec::<String>::new()
+    );
+    let over = routed_runs_problems(&runs(ENTRY_ENSURES, most + 1));
     assert_eq!(over.len(), 1, "{:?}", over);
     assert!(
         over[0].starts_with(&format!(
-            "{} of the 100 routed clauses a run evaluates leave a way no run takes, above the {}",
+            "{} of the 100 {} clauses a run evaluates leave a way no run takes, above the {}",
             most + 1,
+            ENTRY_ENSURES,
             most
         )),
         "{}",
         over[0]
     );
+    assert_eq!(bar(ENTRY_REQUIRES), 0);
+    assert_eq!(routed_runs_problems(&runs(ENTRY_REQUIRES, 1)).len(), 1);
 }
 
 /// The rows of [`way_row`] and [`TRAPPING_REQUIRES`] the runs of a program reach, when it holds
@@ -970,6 +1066,7 @@ fn reached_routed_runs(
     text: &str,
     module: &CheckedModule,
     routings: &[Routing],
+    public: &[bool],
     seen: &mut BTreeSet<String>,
 ) -> Result<Vec<ClauseRuns>, String> {
     if !routings.iter().any(|r| r.checked || r.prove) {
@@ -997,6 +1094,7 @@ fn reached_routed_runs(
     let mut runs: Vec<ClauseRuns> = clauses
         .iter()
         .map(|(k, c, _)| {
+            let entry = public.get(*k).copied().unwrap_or(false);
             let span = module.functions[*k]
                 .as_ref()
                 .map(|f| f.syntax.tree.expr(c.clause).span);
@@ -1008,6 +1106,7 @@ fn reached_routed_runs(
                     c.kind,
                     span.map_or(String::new(), |s| format!("{}:{}", s.line, s.col))
                 ),
+                class: class(c.kind, entry, c.first_loop),
                 ..ClauseRuns::default()
             }
         })
@@ -1958,20 +2057,21 @@ fn reached_enum(e: &EnumSyntax, seen: &mut BTreeSet<String>) {
 
 /// The functions of `src`, which must parse, their trees as name resolution qualifies them:
 /// `a.b`, `a` an enum, is a variant.
-fn functions(src: &str) -> Vec<(FnSyntax, Routing)> {
+fn functions(src: &str) -> Vec<(FnSyntax, Routing, bool)> {
     let module = mente_syntax::parse_module(src).unwrap_or_else(|d| panic!("{:?}\n{}", d, src));
     let parsed = mente_sema::parse_qualified(src, &module);
     let diags: Vec<_> = parsed.iter().flat_map(|p| p.errors.iter()).collect();
     assert!(diags.is_empty(), "{:?}\n{}", diags, src);
-    // Each function's routing, from its attributes, as the checker reads it.
+    // Each function's routing, from its attributes, as the checker reads it, and whether it is
+    // public.
     let routings = module.items.iter().filter_map(|i| match i {
-        mente_syntax::ItemDecl::Fn(f) => Some(Routing::of(&f.attrs)),
+        mente_syntax::ItemDecl::Fn(f) => Some((Routing::of(&f.attrs), f.is_pub)),
         _ => None,
     });
     parsed
         .into_iter()
         .zip(routings)
-        .filter_map(|(p, r)| Some((p.syntax?, r)))
+        .filter_map(|(p, (r, public))| Some((p.syntax?, r, public)))
         .collect()
 }
 
@@ -2116,12 +2216,13 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
         if let Some(module) = &c.module {
             let text = &c.program.text;
             let fns = functions(text);
-            for (f, routing) in &fns {
+            for (f, routing, _) in &fns {
                 reached(f, &mut seen);
                 reached_routed(f, *routing, &mut seen);
             }
-            let routings: Vec<Routing> = fns.iter().map(|(_, r)| *r).collect();
-            match reached_routed_runs(seed, text, module, &routings, &mut seen) {
+            let routings: Vec<Routing> = fns.iter().map(|(_, r, _)| *r).collect();
+            let public: Vec<bool> = fns.iter().map(|(_, _, p)| *p).collect();
+            match reached_routed_runs(seed, text, module, &routings, &public, &mut seen) {
                 Ok(runs) => routed = runs,
                 Err(wrong) => problems.push(wrong),
             }
@@ -2182,18 +2283,19 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
     }
     println!("{}", generate::claims_summary(regenerated, &claims));
     problems.extend(generate::beyond_the_bars(SEEDS, regenerated, &claims));
-    // The share of routed clauses with a way untaken, which the cap's derivation measures.
-    let ran = routed.iter().filter(|r| r.ran).count();
-    let untaken = routed
-        .iter()
-        .filter(|r| r.ran && r.taken.iter().any(|(_, taken)| !taken))
-        .count();
-    println!(
-        "{} routed clauses, {} of them evaluated by a run, {} of those with a way no run takes",
-        routed.len(),
-        ran,
-        untaken
-    );
+    // Of each class of routed clause, how many a run evaluates and how many of those leave a way
+    // no run takes, which the derivation of its bar measures.
+    for &(class, _, _) in UNTAKEN_BARS {
+        let ran = routed.iter().filter(|r| r.ran && r.class == class).count();
+        let untaken = routed
+            .iter()
+            .filter(|r| r.ran && r.class == class && r.taken.iter().any(|(_, taken)| !taken))
+            .count();
+        println!(
+            "{}: {} evaluated by a run, {} with a way no run takes",
+            class, ran, untaken
+        );
+    }
     problems.extend(routed_runs_problems(&routed));
     // Some function is generated again, so that a program replayed from its attempts is seen.
     if regenerated == 0 {

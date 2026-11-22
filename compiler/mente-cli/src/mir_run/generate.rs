@@ -1164,6 +1164,30 @@ impl Param {
     }
 }
 
+/// What a function is to the routing of its clauses outside the Tier-1 fragment (`Gen::function`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    /// One of a program's own functions, which routes none.
+    Own,
+    /// The routed function the program calls, private: the routed function called from outside
+    /// calls it, passing its own parameters through, so that a callee's routed clauses meet
+    /// Tier 1's call sites, MIR's checks at a call site and a trap passed back to the caller.
+    Called,
+    /// The routed function called from outside, public, which ends a refined program and calls
+    /// the one the program calls.
+    Entry,
+}
+
+/// The routed function the program calls, as the routed function called from outside calls it
+/// (`Role::Called`): its name and the types of its parameters, each an integer.
+#[derive(Clone, Debug)]
+struct Callee {
+    name: String,
+    params: Vec<IntT>,
+    /// Whether it gives a result, which the call discards.
+    returns: bool,
+}
+
 /// Where a routed clause over a name splits (`Gen::holding`): an `if` at `k`, the name above it one
 /// way and not above it the other; a `match`'s expression arm at `arm`, its block arm at every
 /// other value; and the value it fails on, if any, which that way then says only the name is not.
@@ -1361,6 +1385,9 @@ struct Gen {
     /// `@checked` or `@prove`, so that its loops may write such an invariant and measure
     /// ([`Gen::holding`], [`Gen::measure`]).
     routed: bool,
+    /// The routed function the program calls, once it is written, for the routed function called
+    /// from outside to call ([`Role::Called`]).
+    callee: Option<Callee>,
 }
 
 impl Gen {
@@ -1397,6 +1424,7 @@ impl Gen {
             helpers: Vec::new(),
             helper_bindings: 0,
             routed: false,
+            callee: None,
         }
     }
 
@@ -1436,7 +1464,7 @@ impl Gen {
         for (k, public) in public.into_iter().enumerate() {
             // A function's text holds the marks of its bit operations of literals alone, which
             // give each one's span here, and nothing else does (`E::Bits`).
-            let (text, marked) = unmarked(&self.function(k, public, false));
+            let (text, marked) = unmarked(&self.function(k, public, Role::Own));
             out.push('\n');
             let start = out.len();
             out.push_str(&text);
@@ -1467,19 +1495,24 @@ impl Gen {
                 functions.push((name, start..out.len()));
             }
         }
-        // A refined program ends with a routed function (`Gen::function`), public, written after
-        // every function the program calls and from random sources of its own, so that every
-        // function above stays as it is and none calls it.
+        // A refined program ends with two routed functions (`Gen::function`), written after every
+        // function the program calls and from random sources of their own, so that every function
+        // above stays as it is: the one the program calls, private, and the one called from outside,
+        // public, which calls it. Each is named apart from the functions before it, whose names
+        // follow their places.
         if self.mode == Mode::Refined {
-            let k = functions.len();
-            let (text, marked) = unmarked(&self.function(k, true, true));
-            out.push('\n');
-            let start = out.len();
-            out.push_str(&text);
-            functions.push((format!("f{}", k), start..out.len()));
-            bits.extend(marked.into_iter().filter_map(|(at, name)| {
-                Some((start + at.start..start + at.end, IntT::named(&name)?))
-            }));
+            for role in [Role::Called, Role::Entry] {
+                let k = functions.len();
+                let (text, marked) = unmarked(&self.function(k, role == Role::Entry, role));
+                out.push('\n');
+                let start = out.len();
+                out.push_str(&text);
+                functions.push((routed_name(k), start..out.len()));
+                bits.extend(marked.into_iter().filter_map(|(at, name)| {
+                    Some((start + at.start..start + at.end, IntT::named(&name)?))
+                }));
+            }
+            self.callee = None;
         }
         // The functions the loops' conjuncts call, which no other function is generated with.
         for (k, text) in std::mem::take(&mut self.helpers).into_iter().enumerate() {
@@ -5131,6 +5164,19 @@ impl Gen {
                     format!("invariant {} <= {}", c.marked(), bound)
                 });
             }
+            // In a routed function, now and then an invariant outside the fragment on a loop with a
+            // body, which may leave or trap, split between the counter's first value at a head and
+            // its second, so that a run takes both ways where the loop goes round once.
+            if self.routed && bound > 0 && self.rng.chance(50) {
+                let (first, k) = if up { (0, 0) } else { (bound, bound - 1) };
+                let split = Split {
+                    k: Num::new(false, u128::from(k)),
+                    arm: Num::new(false, u128::from(first)),
+                    fails_on: None,
+                };
+                let held = self.holding(&c.marked(), split);
+                clauses.push(format!("invariant {}", held));
+            }
             if self.rng.chance(60) {
                 clauses.push(if up {
                     format!("decreases {} - {}", bound, c.marked())
@@ -5450,7 +5496,8 @@ impl Gen {
 
     // ---------------------------------------------------------------- functions
 
-    fn function(&mut self, index: usize, public: bool, routed: bool) -> String {
+    fn function(&mut self, index: usize, public: bool, role: Role) -> String {
+        let routed = role != Role::Own;
         self.binds.clear();
         self.exclude.clear();
         self.pending.clear();
@@ -5466,7 +5513,11 @@ impl Gen {
         // (`Gen::module`).
         let lane = if routed { ROUTED_LANE } else { 0 };
         self.rng = stream(self.seed, index, lane);
-        let name = format!("f{}", index);
+        let name = if routed {
+            routed_name(index)
+        } else {
+            format!("f{}", index)
+        };
         let refined = self.mode == Mode::Refined;
         let mut params: Vec<Param> = Vec::new();
         // A routed function does not recurse: no call but those from outside passes it values.
@@ -5526,9 +5577,25 @@ impl Gen {
                 refine,
             });
         }
+        // The routed function the program calls takes integers alone, of no refinement, which the
+        // one called from outside passes from its own parameters.
+        if role == Role::Called {
+            params.clear();
+            for k in 0..1 + self.rng.below(3) as usize {
+                let t = *self
+                    .rng
+                    .pick(&[INTS[0], INTS[1], INTS[2], INTS[3], INTS[5], INTS[6]]);
+                params.push(Param {
+                    name: format!("p{}", k),
+                    is_mut: false,
+                    ty: Ty::Int(t),
+                    refine: None,
+                });
+            }
+        }
         // Now and then a function that changes an array of structs and gives an index, which
         // a caller holding such an array may index it with (`index_call`).
-        let changer = !self.structs.is_empty() && self.rng.chance(30);
+        let changer = role != Role::Called && !self.structs.is_empty() && self.rng.chance(30);
         if changer {
             let k = self.rng.below(self.structs.len() as u64) as usize;
             let name = self.structs[k].name.clone();
@@ -5538,6 +5605,16 @@ impl Gen {
                 ty: Ty::Array(2, Box::new(Ty::Struct(name))),
                 refine: None,
             });
+        }
+        // A routed function's parameters are refined by literals alone, so that the calls from outside
+        // of every lowest value and of every highest exist (`function_calls`): a refinement by another
+        // parameter, `p2: u64[0..p1]`, leaves `p2` no value where `p1` is its lowest.
+        if routed {
+            for p in params.iter_mut() {
+                if p.literal_range().is_none() {
+                    p.refine = None;
+                }
+            }
         }
         // A routed function marks itself `@checked` or `@prove`, and holds a parameter of an
         // integer type whose values the calls from outside pass (`Param::domain`), which its
@@ -5567,6 +5644,28 @@ impl Gen {
                 ty: Ty::Int(t),
                 refine: None,
             });
+        }
+        // The routed function called from outside passes the one the program calls a parameter of
+        // its own for each of that one's, of its type and of no refinement, added where it has none,
+        // so that the callee's clauses see the values the calls from outside pass.
+        let mut passed: Vec<usize> = Vec::new();
+        if let (Role::Entry, Some(callee)) = (role, self.callee.clone()) {
+            for want in callee.params {
+                let own = (0..params.len()).find(|&i| {
+                    let p = &params[i];
+                    p.ty == Ty::Int(want) && !p.is_mut && p.refine.is_none()
+                });
+                let i = own.unwrap_or_else(|| {
+                    params.push(Param {
+                        name: format!("p{}", params.len()),
+                        is_mut: false,
+                        ty: Ty::Int(want),
+                        refine: None,
+                    });
+                    params.len() - 1
+                });
+                passed.push(i);
+            }
         }
         let ret = if changer {
             Some(Ty::Int(USIZE))
@@ -5642,23 +5741,40 @@ impl Gen {
         // item 2; `tier1-containment`).
         let mut routed_requires = Vec::new();
         let mut routed_ensures = Vec::new();
+        let mut fails_on: Option<(usize, Num)> = None;
         if let Some(attr) = route {
             let seen = seen(&params);
             if !seen.is_empty() && self.rng.chance(70) {
                 let (i, r) = *self.rng.pick(&seen);
                 // Under `@checked`, now and then a `requires` that fails on the parameter's lowest
                 // value and holds on the others, so that the run-time check `@checked` asks for traps
-                // the calls that pass it and lets the rest through. An `@prove` clause holds on every
-                // value: `@prove` states that `mn prove` will prove it, which a clause that fails
-                // on a call refutes.
-                let fails = attr == "checked" && self.rng.chance(50);
+                // the calls that pass it and lets the rest through: at the function's entry, or, for
+                // the one the program calls, inside the call, whose trap the caller passes back. An
+                // `@prove` clause holds on every value: `@prove` states that `mn prove` will prove it,
+                // which a clause that fails on a call refutes. The function called from outside fails on
+                // none of the parameters it passes on, so that the lowest reaches the callee.
+                let fails = attr == "checked" && !passed.contains(&i) && self.rng.chance(50);
+                if fails {
+                    fails_on = Some((i, r.lo));
+                }
                 let c = self.holding(&params[i].name, Split::across(r, fails));
                 routed_requires.push(format!("requires {}", c));
             }
             if !seen.is_empty() && self.rng.chance(70) {
                 let (i, r) = *self.rng.pick(&seen);
-                let c = self.holding(&params[i].name, Split::across(r, false));
-                routed_ensures.push(format!("ensures {}", c));
+                // An `ensures` sees the values a call returns with: of the parameter the `requires`
+                // fails on, all but that value, which no call that returns passes.
+                let r = match fails_on {
+                    Some((j, lowest)) if j == i => R {
+                        lo: lowest.add(Num::small(1)).unwrap_or(r.hi),
+                        hi: r.hi,
+                    },
+                    _ => r,
+                };
+                if r.lo < r.hi {
+                    let c = self.holding(&params[i].name, Split::across(r, false));
+                    routed_ensures.push(format!("ensures {}", c));
+                }
             }
         }
         self.routed = route.is_some();
@@ -5701,6 +5817,24 @@ impl Gen {
             let lead = self.leading_loop();
             first.extend(lead);
         }
+        if let (Role::Entry, Some(callee)) = (role, self.callee.clone()) {
+            let args: Vec<(bool, E)> = passed
+                .iter()
+                .map(|&i| {
+                    let e = E::name(&params[i].name);
+                    if let Some(id) = self.root(&e) {
+                        self.binds[id].read = true;
+                    }
+                    (false, e)
+                })
+                .collect();
+            let call = E::Call(callee.name, args);
+            first.push(if callee.returns {
+                S::Discard(call)
+            } else {
+                S::Expr(call)
+            });
+        }
         // An expression body for a small function without contracts on its result.
         let expression = first.is_empty() && ret_range.is_none() && self.rng.chance(20);
         let body = match (&ret, expression) {
@@ -5731,11 +5865,26 @@ impl Gen {
         if let Some(depth) = self.recursion {
             cost *= depth + 1;
         }
-        // No other function calls a routed one, so that the values its clauses see are those the
-        // calls from outside pass, and no internal call passes the value its failing `requires`
-        // fails on, as a recursion would on its way down.
-        if !routed {
-            self.sigs.push(Sig { cost, ..sig });
+        // No function calls the routed one called from outside, and only it calls the one the
+        // program calls, so that the values a routed clause sees are those the calls from outside
+        // pass, and no call passes a failing `requires`'s value on every call, as a recursion would
+        // on its way down.
+        match role {
+            Role::Own => self.sigs.push(Sig { cost, ..sig }),
+            Role::Called => {
+                self.callee = Some(Callee {
+                    name: name.clone(),
+                    params: params
+                        .iter()
+                        .filter_map(|p| match p.ty {
+                            Ty::Int(t) => Some(t),
+                            _ => None,
+                        })
+                        .collect(),
+                    returns: ret.is_some(),
+                })
+            }
+            Role::Entry => {}
         }
         self.current = None;
         self.routed = false;
@@ -6499,6 +6648,12 @@ pub struct AlwaysTraps {
     /// How the call that served the check best ended: for a claim never reached, the call
     /// that came furthest toward it.
     pub furthest: String,
+}
+
+/// The name of the routed function at place `k` of a program: `r` and its place, apart from the
+/// `f` the program's own functions, the meeting arrays and the deep recursion take.
+fn routed_name(k: usize) -> String {
+    format!("r{}", k)
 }
 
 /// The part every random source of a routed function adds to its own (`stream`), past those of
