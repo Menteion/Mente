@@ -86,12 +86,40 @@ fn test_the_record_holds_only_files_named_by_a_key() {
         assert_eq!(problems.len(), 1, "{}: {:?}", path, problems);
         let entry = path.split('/').next().unwrap();
         assert!(
-            problems[0].starts_with(&format!("{}: no escape", entry)),
+            problems[0].starts_with(&format!("{}: not an escaped bug", entry)),
             "{}: {:?}",
             path,
             problems
         );
     }
+}
+
+/// Every problem of the record is reported in one run: a name that is no key beside a file whose
+/// front matter is broken, both (the review of PR 175, where `mn escapes` named only the first).
+#[test]
+fn test_every_problem_of_the_record_is_reported_at_once() {
+    let good = file("2026-11-14", "checker", "No lint.", LINT);
+    let dir = planted(
+        "every-problem",
+        &[
+            ("walker-hid-operands.md", &good),
+            ("Bad.md", &good),
+            ("broken-one.md", "no front matter\n"),
+        ],
+    )
+    .unwrap();
+    let problems = escapes::read(&dir).expect_err("two problems");
+    assert_eq!(problems.len(), 2, "{:?}", problems);
+    assert!(
+        problems[0].starts_with("Bad.md: not an escaped bug"),
+        "{:?}",
+        problems
+    );
+    assert!(
+        problems[1].starts_with("broken-one.md: no front matter"),
+        "{:?}",
+        problems
+    );
 }
 
 /// A file is refused for each way its front matter breaks the record's form: no front matter, an

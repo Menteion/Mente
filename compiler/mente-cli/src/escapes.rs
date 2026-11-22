@@ -12,8 +12,8 @@ use std::path::Path;
 
 use crate::records;
 
-/// The record's directory, from the repository's root.
-pub const RECORD: &str = "docs/escapes";
+/// The record's directory, from the repository's root, as its kind declares it.
+pub const RECORD: &str = records::ESCAPES.dir;
 
 /// The fields of an escape's front matter, each once, in this order.
 pub const FIELDS: [&str; 5] = ["date", "fixed-by", "area", "missed-by", "guard"];
@@ -63,30 +63,17 @@ pub struct Escape {
     pub guard: Guard,
 }
 
-/// Every escape in the record's directory `dir`, in the order of their keys, or each problem in
-/// reading it: an entry that is no file `<key>.md` whose key the key rule admits, and a file whose
-/// front matter is not the record's. Keys are unique since files' names are.
+/// Every escape in the record's directory `dir`, in the order of their keys, or every problem in
+/// reading it, all of them in one run: an entry that is no record of the kind, by
+/// [`records::scan`], and a file whose front matter is not the record's. Keys are unique since
+/// files' names are.
 pub fn read(dir: &Path) -> Result<Vec<Escape>, Vec<String>> {
-    let entries = fs::read_dir(dir).map_err(|e| vec![format!("{}: {}", dir.display(), e)])?;
-    let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
     let mut rows = Vec::new();
-    let mut problems = Vec::new();
-    for entry in entries {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let path = entry.path();
-        let key = name
-            .strip_suffix(".md")
-            .filter(|k| path.is_file() && records::is_key(k));
-        let Some(key) = key else {
-            problems.push(format!(
-                "{}: no escape, which is a file `<key>.md` whose key is lowercase words of letters and digits joined by hyphens",
-                name
-            ));
-            continue;
-        };
+    let (entries, mut problems) = records::scan(&records::ESCAPES, dir);
+    for (key, path) in entries {
+        let name = format!("{}.md", key);
         match fs::read_to_string(&path) {
-            Ok(text) => match parse(key, &text) {
+            Ok(text) => match parse(&key, &text) {
                 Ok(row) => rows.push(row),
                 Err(why) => problems.push(format!("{}: {}", name, why)),
             },

@@ -2,11 +2,9 @@
   "$schema": "./node_modules/@spec-family/spec-brief/schema.json",
   "briefs": "briefs",
   "archive": "briefs/archive",
-  "files": "[0-9]*.md",
+  "files": "*.md",
   "id": {
-    "source": "filename",
-    "separator": "_",
-    "digits": 3
+    "source": "frontmatter"
   },
   "status": {
     "field": "status",
@@ -94,7 +92,7 @@
       "**Archived {date}.**",
       "{summary}",
       "Merged in pull request {pr}.",
-      "Recorded at commit `{commit}`: {diffstat}.",
+      "Recorded at commit `{commit}`.",
       "{links}",
       "The body below describes the tree before execution and is not maintained."
     ],
