@@ -28,7 +28,7 @@ test("the guard reads a push in each form it names, from the directory it runs i
     ["git -C a -C b push", [[at("a/b"), []]]],
     ["git -c user.name=x --no-pager push", [[cwd, []]]],
     ["cd ../other && git push", [[at("../other"), []]]],
-    ["cd /c/Repos/x && git push", [[path.resolve("C:/Repos/x"), []]]],
+    ["cd /c/Repos/x && git push", [[process.platform === "win32" ? path.resolve("C:/Repos/x") : "/c/Repos/x", []]]],
     ["Set-Location ..\\other; git push origin b", [[at("../other"), ["origin", "b"]]]],
     ["echo a; git status && git push origin b | tail -1", [[cwd, ["origin", "b"]]]],
     ['bash -c "cd x && git push"', [[at("x"), []]]],

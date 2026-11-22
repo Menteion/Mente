@@ -40,10 +40,13 @@ const opaque = (value) => /[$`%]/.test(value);
 /** A directory the guard cannot read for what it names: one opaque as a revision is, a home, or the last. */
 const opaqueDir = (value) => opaque(value) || /^~|^-$/.test(value);
 
-/** A directory as a shell names it, from `dir`: a path of git bash's /c/ form read as C:/. */
+/**
+ * A directory as a shell names it, from `dir`: on Windows, a path of git bash's /c/ form read as
+ * C:/; elsewhere /c/ is a directory of its own.
+ */
 function moved(dir, to) {
   if (dir === null || opaqueDir(to)) return null;
-  const drive = /^\/([a-zA-Z])(\/|$)/.exec(to);
+  const drive = process.platform === "win32" && /^\/([a-zA-Z])(\/|$)/.exec(to);
   return path.resolve(dir, drive ? `${drive[1].toUpperCase()}:/${to.slice(3)}` : to);
 }
 
