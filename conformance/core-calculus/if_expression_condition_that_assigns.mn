@@ -1,0 +1,18 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (item 10): the condition of an `if` that is a value,
+// whose own condition holds an assignment in a block of an `if` inside it.
+pub fn f(n: u8) -> u8 {
+  var i = n
+  val k: u8 = 1 + (if (if n > 3 {
+    i = 0
+    true
+  } else {
+    false
+  }) {
+    1
+  } else {
+    0
+  })
+  k + i
+}

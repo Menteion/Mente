@@ -1,0 +1,20 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (item 10): a `match` inside a loop's condition passes
+// `i` as `mut`, which would change it at the head of every round.
+fn next(mut i: u8) -> u8 {
+  i = i / 2 + 1
+  i
+}
+
+pub fn f(n: u8) -> u8 {
+  var i: u8 = n
+  var rounds: u8 = 0
+  while (match next(mut i) {
+    1 => false
+    _ => rounds < 10
+  }) {
+    rounds += 1
+  }
+  rounds
+}

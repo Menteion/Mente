@@ -1,0 +1,20 @@
+// expect: pass
+module conformance
+// A conjunct of a loop's condition that calls a function is no candidate (spec item 2, "Facts at
+// a loop head"), whether or not the callee returns: its `ensures` holds only where the call runs
+// and returns. `never` returns nowhere, and its contradictory `ensures` once left Tier 1 a head
+// with no state, which proved `x + 250` fits in `u8` in `take`'s argument. It is a run-time
+// check, which traps where `x` is above 5.
+fn take(x: u8) -> u8 = x
+
+fn never(x: u8) -> u8
+  ensures result > 200 and result < 100
+= todo("never")
+
+pub fn f(x: u8, n: u8) -> u8 {
+  var i: u8 = 0
+  while take(x + 250) > 0 and (if x > 5 { never(x) } else { 0 }) == 0 and i < n {
+    i += 1
+  }
+  i
+}

@@ -32,6 +32,7 @@ use cranelift_codegen::isa::{self, OwnedTargetIsa, TargetIsa};
 use cranelift_codegen::settings::{self, Configurable, OptLevel};
 use cranelift_codegen::{CompiledCode, Context};
 use cranelift_module::{FuncId, Module};
+use cranelift_object::object;
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use object::write::SymbolId;
 

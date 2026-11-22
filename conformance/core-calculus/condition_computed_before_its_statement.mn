@@ -1,0 +1,43 @@
+// expect: pass
+module conformance
+// What a condition would have changed is computed into a `val` on a line of its own, and the
+// condition keeps its comparison (item 10): before an `if` or a `guard`, where the call ran
+// first anyway, and at the top of a loop's body, where it runs every round the loop's own
+// condition lets it.
+fn next(mut i: u8) -> u8 {
+  i = i / 2
+  i
+}
+
+pub fn before_an_if(n: u8) -> u8[0..4] {
+  var i = n
+  val v = next(mut i)
+  if v < 4 {
+    return v
+  }
+  0
+}
+
+pub fn before_a_guard(n: u8) -> u8 {
+  var i = n
+  val v = next(mut i)
+  guard v > 3 else {
+    return 0
+  }
+  i
+}
+
+pub fn every_round(n: u8) -> u8 {
+  var i = n
+  var rounds: u8 = 0
+  while rounds < 10 {
+    val v = next(mut i)
+    guard v > 0 else {
+      break
+    }
+    rounds += 1
+  }
+  rounds
+}
+
+pub fn main() -> u8 = before_an_if(200) + before_a_guard(9) + every_round(200)

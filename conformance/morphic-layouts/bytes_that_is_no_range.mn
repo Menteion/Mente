@@ -1,0 +1,9 @@
+// expect: E0412
+module conformance
+// A @bytes that is no range of two integer literals is no range at all (morphic-layouts.md, item
+// 2): its fix replaces it with the one range contiguity leaves, where it once wrote a second.
+@layout(size: 8, align: 4)
+pub struct Pair {
+  @bytes(0..4) pub a: u32
+  @bytes(4) pub b: u32
+}

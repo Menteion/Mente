@@ -12,6 +12,16 @@ updates:
       timezone: Asia/Taipei
     open-pull-requests-limit: 5
     groups:
+      # cranelift-codegen and cranelift-object use gimli and object in their own signatures, so
+      # these move as one pull request, never apart: pull request 164 moved gimli and object alone
+      # and every Rust job failed. A dependency joins the first group that matches it, so this one
+      # stands before the catch-all; test_gimli_and_object_are_cranelifts in
+      # compiler/mente-cli/tests/gates.rs refuses a lock that splits them.
+      cranelift:
+        patterns:
+          - "cranelift-*"
+          - "gimli"
+          - "object"
       cargo:
         patterns:
           - "*"

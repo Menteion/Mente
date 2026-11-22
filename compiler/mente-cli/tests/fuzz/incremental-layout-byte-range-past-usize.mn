@@ -1,0 +1,13 @@
+
+module o
+@layout(size:8,align:8)
+struct Stamp{
+  @bytes(0..18446744073709551615)u64
+}
+
+struct Et{
+@bytes(0..8)at Stamp
+  
+}
+
+fn d()->i

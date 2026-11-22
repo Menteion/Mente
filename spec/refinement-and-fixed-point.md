@@ -11,7 +11,7 @@ date: 2026-11-04
 
 ## 1. Specification
 
-None of the type rules below are checked yet: `mente-syntax` keeps a type as a raw string and `mente-sema` has no type checker.
+The type checker of `mente-sema` checks the rules below that carry an `Implemented` claim, and Tier 1 proves the refinements it states (`ghost-contracts-and-totality.md`); every other rule is `Specified`.
 
 1. `Specified` **Bounded interval types**:
    - Any scalar primitive (`i8`..`i128`, `u8`..`u128`, `usize`, `f32`, `f64`) MAY be refined by a compile-time half-open `[min..max]` or closed `[min..=max]` interval:
@@ -20,6 +20,8 @@ None of the type rules below are checked yet: `mente-syntax` keeps a type as a r
      - `f64[0.0..=1.0]` (normalized probability, implicitly forbidding `NaN` and `+-Inf`)
    - **Entering and leaving a refinement**: `T[a..b]` is a subtype of `T`, so a refined value is accepted wherever `T` is, and widening needs no conversion. A value enters a refinement only when its interval is known to lie inside it: a literal in range, the result of arithmetic on refined operands (`u8[0..10] + u8[0..10]` has the interval `[0, 18]`), or a value narrowed by a `guard` or `if` condition. Anything else is a compile-time error carrying Tier 1's counterexample and `guard` prescription (`ghost-contracts-and-totality.md`).
    - **Bounds that name other bindings**: a bound may name another binding (`usize[0..items.len]`, `usize[0..CAP]`) only when that binding cannot change during the refined value's scope: a read-only parameter, a `val`, or a compile-time parameter. A bound over a `var` or a `mut` parameter is an error, since a push or a reassignment would silently invalidate every value refined by it. The refined binding itself may be a `var` (`var lo: usize[0..=items.len]`).
+   - `Implemented`: a refinement's literal bound lies within `i128..=u128`, where Tier 1, the lowering and native code keep its bounds exactly; since no literal lies above `u128`, only a negative one can lie beyond, and one below `i128` is an error (`E0235`), in the signature or the body of a function with a body, a field of a struct without `@layout`, or an enum's payload. A function without a body, a trait method's signature and a `@layout` struct's field are not type-checked yet, their refinements' names no more than their bounds. As a lower bound it bounds nothing the type does not, so the fix, machine-applicable, writes the type's least value in its place; as an upper bound it leaves the refinement no value, and no fix is offered. The ends of `i128` and `u128` are bounds like any other.
+     <!-- @assert-count target="compiler/mente-sema/src/check.rs" symbol="fn test_a_literal_bound_below_i128_is_e0235" min="1" reason="A literal bound below i128 is E0235 everywhere a refinement is written, and its fix checks" -->
 2. `Specified` **Arrays and slices**:
    - `[N]T` is an array of `N` values stored inline, `N` a compile-time value. `[]T` is a slice: a view of a contiguous run of `T` with a `.len`, following the provenance rules of `regions-and-pools.md`. `List<T>` owns a growable buffer. There is no `Slice<T>` spelling.
    - A refinement suffix binds to the scalar it follows: `[]u8[0..10]` is a slice of `u8[0..10]` values. A slice's length is never refined in its type; it is constrained by a contract (`requires buf.len >= 1`) or through the indices refined by it (`usize[0..buf.len]`).

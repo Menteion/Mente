@@ -30,6 +30,39 @@ pub struct Tree {
     pub types: Vec<TypeExpr>,
 }
 
+/// How many nodes of each table a tree holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub exprs: usize,
+    pub stmts: usize,
+    pub blocks: usize,
+    pub types: usize,
+}
+
+impl Tree {
+    /// How many nodes of each table it holds.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            exprs: self.exprs.len(),
+            stmts: self.stmts.len(),
+            blocks: self.blocks.len(),
+            types: self.types.len(),
+        }
+    }
+
+    /// The first nodes of each table, as many as `c` counts: a function's header, whose nodes
+    /// the parser builds before its body's ([`FnSyntax::header`]).
+    pub fn prefix(&self, c: Counts) -> Tree {
+        let first = |n: usize, len: usize| n.min(len);
+        Tree {
+            exprs: self.exprs[..first(c.exprs, self.exprs.len())].to_vec(),
+            stmts: self.stmts[..first(c.stmts, self.stmts.len())].to_vec(),
+            blocks: self.blocks[..first(c.blocks, self.blocks.len())].to_vec(),
+            types: self.types[..first(c.types, self.types.len())].to_vec(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UnaryOp {
     /// `-x`
@@ -431,6 +464,10 @@ pub struct FnSyntax {
     pub contracts: Vec<Contract>,
     pub body: Option<Body>,
     pub tree: Tree,
+    /// How many nodes of each table of `tree` its parameters, result and clauses take: the
+    /// parser builds them before the body, so they are the first ones, and a caller can be given
+    /// them alone ([`Tree::prefix`]).
+    pub header: Counts,
 }
 
 /// One field of a struct declaration.
@@ -753,49 +790,63 @@ impl Tree {
                 )
             }
             ExprKind::Field { base, name } => format!("(. {} {})", self.render_expr(*base), name),
+            // An argument, a field built and an arm name each of their parts, so that a part
+            // added to one is rendered or left out on purpose: a header holds this text
+            // (`tier1::header`). Where a part is written is no part of the text.
             ExprKind::Call { callee, args } => {
                 let mut out = format!("(call {}", callee);
-                for a in args {
+                for Arg { is_mut, value } in args {
                     out.push(' ');
-                    if a.is_mut {
+                    if *is_mut {
                         out.push_str("mut ");
                     }
-                    out.push_str(&self.render_expr(a.value));
+                    out.push_str(&self.render_expr(*value));
                 }
                 out.push(')');
                 out
             }
             ExprKind::Construct { name, fields } => {
                 let mut out = format!("(new {}", name);
-                for f in fields {
-                    out.push_str(&format!(" ({} {})", f.name, self.render_expr(f.value)));
+                for FieldInit {
+                    name,
+                    name_span: _,
+                    value,
+                } in fields
+                {
+                    out.push_str(&format!(" ({} {})", name, self.render_expr(*value)));
                 }
                 out.push(')');
                 out
             }
             ExprKind::Variant {
                 enum_name,
+                enum_span: _,
                 name,
+                name_span: _,
                 payload,
-                ..
             } => match payload {
                 Payload::None => format!("{}.{}", enum_name, name),
                 Payload::Named(fields) => {
                     let mut out = format!("(new {}.{}", enum_name, name);
-                    for f in fields {
-                        out.push_str(&format!(" ({} {})", f.name, self.render_expr(f.value)));
+                    for FieldInit {
+                        name: field,
+                        name_span: _,
+                        value,
+                    } in fields
+                    {
+                        out.push_str(&format!(" ({} {})", field, self.render_expr(*value)));
                     }
                     out.push(')');
                     out
                 }
                 Payload::Positional(args) => {
                     let mut out = format!("(call {}.{}", enum_name, name);
-                    for a in args {
+                    for Arg { is_mut, value } in args {
                         out.push(' ');
-                        if a.is_mut {
+                        if *is_mut {
                             out.push_str("mut ");
                         }
-                        out.push_str(&self.render_expr(a.value));
+                        out.push_str(&self.render_expr(*value));
                     }
                     out.push(')');
                     out
@@ -803,12 +854,17 @@ impl Tree {
             },
             ExprKind::Match { scrutinee, arms } => {
                 let mut out = format!("(match {}", self.render_expr(*scrutinee));
-                for a in arms {
-                    let body = match a.body {
-                        ArmBody::Expr(e) => self.render_expr(e),
-                        ArmBody::Block(b) => self.render_block(b),
+                for Arm {
+                    pattern,
+                    body,
+                    span: _,
+                } in arms
+                {
+                    let body = match body {
+                        ArmBody::Expr(e) => self.render_expr(*e),
+                        ArmBody::Block(b) => self.render_block(*b),
                     };
-                    out.push_str(&format!(" (=> {} {})", render_pattern(&a.pattern), body));
+                    out.push_str(&format!(" (=> {} {})", render_pattern(pattern), body));
                 }
                 out.push(')');
                 out
@@ -927,12 +983,14 @@ impl Tree {
     pub fn render_type(&self, id: TypeId) -> String {
         match &self.ty(id).kind {
             TypeKind::Int { name, refinement } => match refinement {
-                Some(r) => format!(
+                // Each part is named, so that a part added to a refinement is rendered or left
+                // out on purpose: a header holds this text (`tier1::header`).
+                Some(Refinement { lo, hi, inclusive }) => format!(
                     "{}[{}{}{}]",
                     name,
-                    render_bound(&r.lo),
-                    if r.inclusive { "..=" } else { ".." },
-                    render_bound(&r.hi)
+                    render_bound(lo),
+                    if *inclusive { "..=" } else { ".." },
+                    render_bound(hi)
                 ),
                 None => name.clone(),
             },
@@ -980,19 +1038,25 @@ impl Tree {
 
 /// A pattern in canonical form: `Name.A`, `(Name.B (field x) (other _))`, `-1`, `true`, `_`.
 pub fn render_pattern(p: &Pattern) -> String {
-    match &p.kind {
+    let Pattern { kind, span: _ } = p;
+    match kind {
         PatternKind::Variant {
             enum_name,
             name,
+            name_span: _,
             bindings,
-            ..
         } => match bindings {
             None => format!("{}.{}", enum_name, name),
             Some(bs) => {
                 let mut out = format!("({}.{}", enum_name, name);
-                for b in bs {
-                    let bound = b.name.as_deref().unwrap_or("_");
-                    match &b.field {
+                for PatBinding {
+                    field,
+                    name,
+                    name_span: _,
+                } in bs
+                {
+                    let bound = name.as_deref().unwrap_or("_");
+                    match field {
                         Some((f, _)) => out.push_str(&format!(" ({} {})", f, bound)),
                         None => out.push_str(&format!(" {}", bound)),
                     }

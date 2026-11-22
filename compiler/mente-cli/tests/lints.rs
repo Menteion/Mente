@@ -830,17 +830,17 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-codegen/src/lower.rs",
-        "if_expr",
-        "wildcard arm",
-        "match (&shape, self.interval(e)) { _ }",
-        "an `if` of `()` or of no type has no value to meet in its join",
-    ),
-    (
-        "mente-codegen/src/lower.rs",
         "in_memory",
         "matches!",
         "matches!(self, Shape::Array(..) | Shape::Struct(_) | Shape::Enum(_))",
         "a value lies in memory when it is an aggregate; an integer, a `bool` and `()` are SSA values",
+    ),
+    (
+        "mente-codegen/src/lower.rs",
+        "kept_exact",
+        "wildcard arm",
+        "match (v, from, to) { (v, _, _) }",
+        "keeping changes integers only, at every depth of arrays; a `bool`, a struct, an enum, `()` and no value are kept as they are",
     ),
     (
         "mente-codegen/src/lower.rs",
@@ -865,13 +865,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-codegen/src/lower.rs",
-        "literal_element",
-        "wildcard arm",
-        "match (exact, v, elem) { (_, v, _) }",
-        "every element but an exact integer is narrowed into the element's shape, which `narrow` does for each kind",
-    ),
-    (
-        "mente-codegen/src/lower.rs",
         "match_expr",
         "if let",
         "if let (PatternKind::Variant { name, bindings, .. }, V::Mem(a), Shape::Enum(es)) = (&arm.pattern.kind, s, &read)",
@@ -890,13 +883,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "wildcard arm",
         "match (&arm.pattern.kind, tested) { _ }",
         "a pattern of another kind than its scrutinee is reported as an error",
-    ),
-    (
-        "mente-codegen/src/lower.rs",
-        "match_expr",
-        "wildcard arm",
-        "match (&shape, self.interval(e)) { _ }",
-        "a `match` of `()` or of no type has no value to join",
     ),
     (
         "mente-codegen/src/lower.rs",
@@ -1139,6 +1125,13 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "only a branch has targets for the branch mutants to change",
     ),
     // mente-sema
+    (
+        "mente-sema/src/conditions.rs",
+        "decides",
+        "matches!",
+        "matches!(typing.exprs.get(scrutinee.0 as usize), Some(Ty::Bool))",
+        "a `match` on a `bool` decides as an `if` does, and its scrutinee is a condition; one on any other type is read as a value",
+    ),
     (
         "mente-sema/src/check.rs",
         "arrays_in_one_piece",
@@ -1554,13 +1547,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-sema/src/tier1.rs",
-        "match_arms",
-        "matches!",
-        "matches!(self.typing.exprs[scrutinee.0 as usize], Ty::Bool)",
-        "a `bool` scrutinee is read as a condition; every other is read as a value",
-    ),
-    (
-        "mente-sema/src/tier1.rs",
         "names_changed",
         "matches!",
         "matches!(&t.kind, mente_syntax::TokenKind::Ident(n) if self.named(n).is_some_and(|b| changed.contains(&b)))",
@@ -1736,27 +1722,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-sema/src/wide.rs",
-        "array",
-        "let-else",
-        "let Ty::Array(_, elem) = &self.typing.exprs[e.0 as usize]",
-        "only an array literal has elements to bound",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "array",
-        "matches!",
-        "matches!(leaf, Ty::Int(Int::Mixed(None)))",
-        "only elements of no one type need a bound on their mix",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "array",
-        "while let",
-        "while let Ty::Array(_, inner) = leaf",
-        "an array's leaves are what lies below every array level",
-    ),
-    (
-        "mente-sema/src/wide.rs",
         "check",
         "if let",
         "if let StmtKind::Assign { place, op: AssignOp::Compound(op), value, } = &s.kind",
@@ -1782,20 +1747,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
         "matches!",
         "matches!(s.kind, StmtKind::While { .. })",
         "a binding cannot go before a loop's condition, which runs every round; any other statement takes it",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "leaves",
-        "matches!",
-        "matches!(self.typing.exprs[i.0 as usize], Ty::Array(..))",
-        "an element that is itself an array is bounded by its leaves' type; any other element by its own range",
-    ),
-    (
-        "mente-sema/src/wide.rs",
-        "leaves",
-        "while let",
-        "while let Ty::Array(_, inner) = t",
-        "an array's leaves are what lies below every array level",
     ),
     (
         "mente-sema/src/wide.rs",
