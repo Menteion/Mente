@@ -9,7 +9,7 @@ import path from "node:path";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "../lib/commits.mjs";
 import { globToRegExp } from "../lib/watch.mjs";
 import { JS_MODULE, jsImports, jsTokens } from "./js.mjs";
-import { GATE_FILES, PINNED_FILES, PINNED_JOBS, QUICK_MAP, jobDigest, owns } from "./pins.mjs";
+import { GATE_FILES, PINNED_FILES, PINNED_JOBS, POLICY_FILES, POLICY_LIST, POLICY_LIST_FILE, QUICK_MAP, isPolicy, jobDigest, owns } from "./pins.mjs";
 import { FACTS, ROOT, digest, filesUnder, gitHead, read, readFacts, tracked, workspace } from "./repo.mjs";
 import { LEFT_OUTSIDE } from "./sandbox.mjs";
 import { BROKER_STEP, SECRET_JOBS, isStep, secretStepsEnd } from "./secrets.mjs";
@@ -31,10 +31,15 @@ function check(name, fn) {
 after(() => {
   assert.ok(ran >= FLOOR, `${ran} of the policy's ${FLOOR} checks of pins-and-owners.test.mjs ran: a skip or a filter left the rest out`);
 });
-/// The policy itself, its modules in this directory, which cannot hold their own digests: CODEOWNERS
-/// gives them to their owner, and every other script a pinned job runs is pinned here.
+/// A file that runs as a script: a module by its name, or a shell or PowerShell script.
+const isScript = (f) => JS_MODULE.test(f) || /\.(sh|ps1)$/.test(f);
+/// A script a pinned job runs that PINNED_FILES must hold: every one under .github/scripts, whatever
+/// its name, but the policy's own files, exactly those its list names (the review of f217d1e: a
+/// directory prefix exempted every script under it, and a name with a dot in it, such as a
+/// dotfile's, passed the pattern of names this read).
+const toPin = (f) => f.startsWith(".github/scripts/") && isScript(f) && !isPolicy(f);
+/// The directory of the policy's files.
 const POLICY_DIR = ".github/scripts/policy/";
-const isPolicy = (f) => f.startsWith(POLICY_DIR);
 
 /// The shell and PowerShell scripts under .github/scripts a text names by path.
 const namedScripts = (text) => [...String(text).matchAll(/\.github\/scripts\/[\w./-]+\.(?:sh|ps1)\b/g)].map((m) => m[0]);
@@ -64,9 +69,16 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
     const job = w.doc.jobs[id];
     const read = LEFT_OUTSIDE.has(key) ? { ...job, steps: steps(job).slice(0, steps(job).findIndex((s) => s.run === TOOLCHAIN_STEP) + 1) } : job;
     assert.ok(steps(read).length > 0, `${key} is read nowhere`);
-    for (const f of repoPaths(scriptTexts(w.doc, read))) if (/^\.github\/scripts\/[\w/-]+\.(sh|ps1|mjs)$/.test(f) && !isPolicy(f)) pending.push([key, f]);
+    for (const f of repoPaths(scriptTexts(w.doc, read))) if (toPin(f)) pending.push([key, f]);
   }
   for (const f of PINNED_FILES.keys()) pending.push(["PINNED_FILES", f]);
+  // The policy's own files, exactly those its list names, are exempt; any other script under its
+  // directory that a pinned job runs is pinned like every other (the review of f217d1e: `bash
+  // .github/scripts/policy/helper.sh` in a pinned job passed unpinned).
+  for (const f of POLICY_FILES) assert.ok(isPolicy(f) && !toPin(f), `${f}, a file of the policy, taken for a script to pin`);
+  for (const f of [`${POLICY_DIR}helper.sh`, `${POLICY_DIR}x.mjs`, `${POLICY_DIR}.secrets-and-broker.test.mjs`, `${POLICY_DIR}sub/a.ps1`, `${POLICY_DIR}repo.mjs.sh`]) {
+    assert.ok(toPin(f) && !isPolicy(f), `${f}, run by a pinned job, escapes its pin`);
+  }
   // In a secret job, every file its steps run up to the end of its secret steps, whatever its
   // directory, and every module those import: no earlier step can change the environment the
   // secret steps start in, through $GITHUB_ENV, $GITHUB_PATH or a program it leaves on the runner,
@@ -118,7 +130,7 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
 /// broker's, with every module those import: the scripts and modules, not the data they read.
 export function secretPrefixFiles(doc, job) {
   const prefix = { ...job, steps: steps(job).slice(0, secretStepsEnd(steps(job))) };
-  const files = [...repoPaths(scriptTexts(doc, prefix))].filter((f) => (JS_MODULE.test(f) || /\.(sh|ps1)$/.test(f)) && !isPolicy(f));
+  const files = [...repoPaths(scriptTexts(doc, prefix))].filter((f) => isScript(f) && !isPolicy(f));
   // The broker, whose path start-broker.sh builds from the workspace's, which no reading of a path
   // follows.
   return prefix.steps.some((s) => isStep(s, BROKER_STEP)) ? [...files, PERMISSION.broker.script] : files;
@@ -172,12 +184,49 @@ check("CODEOWNERS gives the gate files, and only them, to their owner", () => {
   assert.ok(owns("/.github/", ".github/workflows/ci.yml") && !owns("/perf/run.mjs", "perf/run.test.mjs") && owns("/Cargo.toml", "Cargo.toml"));
 });
 
+/// Whether node's glob, as --test reads it, passes over `file` for `pattern`: it matches no name
+/// that starts with a dot where the pattern has a wildcard (the review of f217d1e: a module renamed
+/// to a dotfile was counted as run, and node ran none of it).
+const dotUnderWildcard = (pattern, file) => {
+  const parts = file.split("/");
+  return pattern.split("/").some((part, k) => part.includes("*") && parts[k]?.startsWith("."));
+};
+
 /// The files `npm run test:ci` runs, as package.json, a gate file, names them: a glob, such as the
 /// policy's modules, read as the tracked files it matches, as node --test reads it.
 const policyEntries = () =>
   (String(JSON.parse(read("package.json")).scripts?.["test:ci"] ?? "").match(/[^\s"']+\.mjs/g) ?? []).flatMap((e) =>
-    e.includes("*") ? [...tracked()].filter((f) => globToRegExp(e).test(f)).sort() : [e],
+    e.includes("*") ? [...tracked()].filter((f) => globToRegExp(e).test(f) && !dotUnderWildcard(e, f)).sort() : [e],
   );
+
+/// What keeps the policy's directory from holding exactly its listed files (`list`, its
+/// modules.json; `files`, the tracked files; `readText`, a file's text): each listed module and
+/// library tracked; nothing else there but README.md and the list; no dotfile; every module a
+/// .test.mjs and no library one; and the modules' FLOORs, each its module's checks, adding up to the
+/// list's total (the review of f217d1e: a module renamed to plain .mjs, or to a dotfile, left every
+/// count passing).
+function policyDirProblems(list, files, readText) {
+  const problems = [];
+  const listed = new Set([...list.modules, ...list.libraries, POLICY_LIST_FILE, `${POLICY_DIR}README.md`]);
+  const inDir = files.filter((f) => f.startsWith(POLICY_DIR));
+  for (const f of inDir) {
+    if (f.slice(POLICY_DIR.length).split("/").some((s) => s.startsWith("."))) problems.push(`${f} is a dotfile, which node's glob does not run`);
+    else if (!listed.has(f)) problems.push(`${f} lies in the policy's directory but is none of the files ${POLICY_LIST_FILE} lists`);
+  }
+  for (const f of listed) if (!inDir.includes(f)) problems.push(`${f}, listed, is not tracked`);
+  for (const f of list.modules) if (!f.endsWith(".test.mjs")) problems.push(`${f}, listed as a module, is no .test.mjs node runs`);
+  for (const f of list.libraries) if (/\.test\.[^/]*$/.test(f)) problems.push(`${f}, listed as a library, is a test file`);
+  let total = 0;
+  for (const f of list.modules.filter((m) => inDir.includes(m))) {
+    const text = readText(f);
+    const checks = text.split("\n").filter((l) => l.startsWith('check("')).length;
+    const floor = Number(/^const FLOOR = (\d+);$/m.exec(text)?.[1]);
+    if (floor !== checks) problems.push(`${f}'s FLOOR is ${floor}, not its ${checks} checks`);
+    total += checks;
+  }
+  if (!(Number.isInteger(list.checks) && list.checks === total)) problems.push(`the policy's modules hold ${total} checks, not the ${list.checks} its list pins`);
+  return problems;
+}
 
 /// Every module the workflow policy's tests load, from `entries` through every relative import,
 /// static, `export ... from` or a literal `import("...")`, each text read by `readText`; and what
@@ -235,10 +284,26 @@ check("every module the workflow policy's tests load, directly or through anothe
   // policy passed 70 of 70 with a computed key planted in the harness. No module it loads may be
   // one an edit without the owner's review can change.
   const entries = policyEntries();
-  // Every module of the policy, each test file of its directory, and the YAML reader's tests.
-  const modulesOfPolicy = [...tracked()].filter((f) => isPolicy(f) && f.endsWith(".test.mjs")).sort();
-  assert.ok(modulesOfPolicy.length >= 11, `the policy has ${modulesOfPolicy.length} test modules`);
-  assert.deepEqual(entries.filter(isPolicy), modulesOfPolicy, `npm run test:ci runs ${entries.join(", ")}`);
+  // The policy's directory holds exactly its listed files, and npm run test:ci runs every listed
+  // module, as node reads its glob, and nothing else there.
+  const files = [...tracked()];
+  assert.deepEqual(policyDirProblems(POLICY_LIST, files, read), []);
+  assert.deepEqual(entries.filter((f) => f.startsWith(POLICY_DIR)), [...POLICY_LIST.modules].sort(), `npm run test:ci runs ${entries.join(", ")}`);
+  // Planted, as the review of f217d1e found them: each must be refused.
+  const moduleA = POLICY_LIST.modules[0];
+  const renamed = (to) => files.map((f) => (f === moduleA ? to : f));
+  const readAs = (to) => (f) => read(f === to ? moduleA : f);
+  for (const [planted, what] of [
+    [{ list: POLICY_LIST, files: renamed(moduleA.replace(/\.test\.mjs$/, ".mjs")), text: readAs(moduleA.replace(/\.test\.mjs$/, ".mjs")) }, "a module renamed to plain .mjs"],
+    [{ list: POLICY_LIST, files: renamed(`${POLICY_DIR}.${moduleA.slice(POLICY_DIR.length)}`), text: readAs(`${POLICY_DIR}.${moduleA.slice(POLICY_DIR.length)}`) }, "a module renamed to a dotfile"],
+    [{ list: POLICY_LIST, files: [...files, `${POLICY_DIR}extra.test.mjs`], text: read }, "a test module no list names"],
+    [{ list: { ...POLICY_LIST, modules: POLICY_LIST.modules.slice(1) }, files: files.filter((f) => f !== moduleA), text: read }, "a module dropped from the list and the tree"],
+    [{ list: { ...POLICY_LIST, modules: [...POLICY_LIST.modules, `${POLICY_DIR}ghost.test.mjs`] }, files, text: read }, "a module listed that is not there"],
+    [{ list: { ...POLICY_LIST, checks: POLICY_LIST.checks - 1 }, files, text: read }, "the total lowered"],
+  ]) {
+    assert.ok(policyDirProblems(planted.list, planted.files, planted.text).length > 0, `${what} passed`);
+  }
+  assert.ok(dotUnderWildcard(".github/scripts/policy/*.test.mjs", ".github/scripts/policy/.x.test.mjs") && !dotUnderWildcard(".github/scripts/policy/*.test.mjs", ".github/scripts/policy/x.test.mjs"), "node's glob read as matching a dotfile");
   assert.ok(entries.includes(".github/scripts/yaml.test.mjs"), `npm run test:ci runs ${entries.join(", ")}`);
   const unowned = (modules) => modules.filter((f) => !GATE_FILES.some((p) => owns(p, f)));
   const { modules, problems } = policyModules(entries, read);

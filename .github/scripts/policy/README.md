@@ -34,6 +34,14 @@ gates test holds. A check's own helpers and constants lie in its module. A value
 lies in one library of this directory, which the modules import, so that each fact has one
 definition, and two changes to different concerns touch different files.
 
+`modules.json` lists the policy's own files once: its test modules, its libraries, and the checks
+the modules hold in all. The policy and the gates test hold this directory to exactly those files,
+this README and the list, with no dotfile, which node's glob would not run; the modules' checks add
+up to the list's total; and the pins exempt exactly the listed files, while any other script here
+that a pinned job runs is pinned like every other. `PINNED_FILES` pins the list, so a new module, a
+module renamed or a lower total changes a digest the owner holds. `tools/verify-policy-move.mjs`
+compares the old `policy.test.mjs` with the modules, statement by statement.
+
 | Module | Concern |
 | :--- | :--- |
 | `actions-and-permissions.test.mjs` | What every workflow may run and with what token: pinned actions, read-only permissions, no expression in a script. |
@@ -54,7 +62,7 @@ definition, and two changes to different concerns touch different files.
 | :--- | :--- |
 | `repo.mjs` | The repository: its root, its files as git tracks them, the commit checked out and the collector's facts. |
 | `workflows.mjs` | The workflows: each parsed, its jobs and their checks' names, the required ones, the forms a step's condition takes, the permissions GitHub knows, and the nightly alarm's jobs. |
-| `pins.mjs` | The pins of the scripts and jobs that run the tests, the gate files, and the quick checks' map. |
+| `pins.mjs` | The pins of the scripts and jobs that run the tests, the gate files, the quick checks' map, and the policy's own files as `modules.json` lists them. |
 | `sandbox.mjs` | How jobs are classed for the tests' sandbox. |
 | `toolchain.mjs` | What may run before the toolchain, in every required or pinned job. |
 | `js.mjs` | The reading of JavaScript and TypeScript modules: their tokens and what they import. |

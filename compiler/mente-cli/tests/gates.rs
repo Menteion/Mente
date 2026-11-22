@@ -1033,14 +1033,135 @@ const SCRIPTS: [(&str, &str); 13] = [
     ),
 ];
 
+/// The directory of the workflow policy's files.
+const POLICY_DIR: &str = ".github/scripts/policy/";
+
+/// The workflow policy's list of its own files, `modules.json` in its directory, which its pins
+/// hold: the test modules node runs, the libraries they share, and the checks the modules hold in
+/// all.
+struct PolicyList {
+    modules: Vec<String>,
+    libraries: Vec<String>,
+    checks: usize,
+}
+
+/// Reads the policy's list from its text: `modules` and `libraries` each one array of plain
+/// strings, `checks` one number. A key written twice, which a JSON reader would take the last of,
+/// or an entry of any other kind is refused, so that the list is never read as fewer files.
+fn policy_list(text: &str) -> Result<PolicyList, String> {
+    let after_key = |key: &str| -> Result<&str, String> {
+        let quoted = format!("\"{key}\"");
+        let rest = match text.split(&quoted).collect::<Vec<_>>()[..] {
+            [_, rest] => rest.trim_start(),
+            _ => return Err(format!("modules.json names {quoted} other than once")),
+        };
+        rest.strip_prefix(':')
+            .map(str::trim_start)
+            .ok_or(format!("{quoted} is no key of modules.json"))
+    };
+    let strings = |key: &str| -> Result<Vec<String>, String> {
+        let body = after_key(key)?
+            .strip_prefix('[')
+            .and_then(|r| r.split_once(']'))
+            .ok_or(format!("{key} is no array"))?
+            .0;
+        body.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .filter(|s| !s.contains(['"', '\\']))
+                    .map(str::to_string)
+                    .ok_or(format!("{key} holds {s}, no plain string"))
+            })
+            .collect()
+    };
+    let checks = after_key("checks")?;
+    let digits: String = checks.chars().take_while(char::is_ascii_digit).collect();
+    if !checks[digits.len()..].trim_start().starts_with(['}', ',']) {
+        return Err(format!("checks is {checks}, no number"));
+    }
+    Ok(PolicyList {
+        modules: strings("modules")?,
+        libraries: strings("libraries")?,
+        checks: digits.parse().map_err(|e| format!("checks: {e}"))?,
+    })
+}
+
+/// What keeps the policy's directory from holding exactly its listed files, given the names it
+/// holds (`entries`), the list, and a reader of a file's text: no dotfile, which node's glob does not
+/// run; nothing but the listed modules and libraries, README.md and the list; every listed file
+/// there; every module a `.test.mjs` and no library a test file; and the modules' checks adding up to
+/// the list's total (the review of f217d1e: a module renamed out of the glob left every count
+/// passing).
+fn policy_dir_problems(
+    entries: &[String],
+    list: &PolicyList,
+    read: impl Fn(&str) -> Option<String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut listed: BTreeSet<String> = BTreeSet::from(["README.md".into(), "modules.json".into()]);
+    for f in list.modules.iter().chain(&list.libraries) {
+        match f.strip_prefix(POLICY_DIR).filter(|n| !n.contains('/')) {
+            Some(name) => {
+                listed.insert(name.to_string());
+            }
+            None => problems.push(format!("{f}, listed, lies outside {POLICY_DIR}")),
+        }
+    }
+    for e in entries {
+        if e.starts_with('.') {
+            problems.push(format!(
+                "{POLICY_DIR}{e} is a dotfile, which node's glob does not run"
+            ));
+        } else if !listed.contains(e) {
+            problems.push(format!(
+                "{POLICY_DIR}{e} is none of the files modules.json lists"
+            ));
+        }
+    }
+    for name in &listed {
+        if !entries.contains(name) {
+            problems.push(format!("{POLICY_DIR}{name}, listed, is missing"));
+        }
+    }
+    for f in &list.modules {
+        if !f.ends_with(".test.mjs") {
+            problems.push(format!(
+                "{f}, listed as a module, is no .test.mjs node runs"
+            ));
+        }
+    }
+    for f in &list.libraries {
+        if f.contains(".test.") {
+            problems.push(format!("{f}, listed as a library, is a test file"));
+        }
+    }
+    let total: usize = list
+        .modules
+        .iter()
+        .filter_map(|f| read(f))
+        .map(|text| text.lines().filter(|l| l.starts_with("check(\"")).count())
+        .sum();
+    if total != list.checks {
+        problems.push(format!(
+            "the policy's modules hold {total} checks, not the {} modules.json pins",
+            list.checks
+        ));
+    }
+    problems
+}
+
 /// The workflow policy runs where it blocks a merge, as written. ci.yml's Documentation job, a
 /// required check, runs it first, after only the checkout and node, through node itself, in a step
 /// of a name and a command alone; `npm ci` runs after it with no install script; the job sets
 /// nothing but its name, runner and steps, and none of its scripts writes the environment or the
 /// path of a later step; the workflow sets no shell and no environment but cargo's colours. The npm
 /// scripts are exactly SCRIPTS, with no hook, and no `.npmrc` changes npm. The policy's suites mark
-/// no test skipped, todo or only, and the policy declares a floor equal to its number of checks,
-/// which a run that skips any fails. Without this, a step deleted, a hook or an install script, a
+/// no test skipped, todo or only, and each module declares a floor equal to its number of checks,
+/// which a run that skips any fails; the policy's directory holds exactly the files its list
+/// names, and the modules hold the checks the list pins. Without this, a step deleted, a hook or an install script, a
 /// skip pattern, an option in `NODE_OPTIONS` or a shell that runs nothing would turn every check of
 /// the policy off unseen.
 #[test]
@@ -1161,22 +1282,113 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         !root.join(".npmrc").exists(),
         "a .npmrc changes what npm runs"
     );
-    // The policy's files: every module of .github/scripts/policy/, its test modules, which the step
-    // runs by their glob, and the libraries they share.
-    let mut policy: Vec<String> = fs::read_dir(root.join(".github/scripts/policy"))
+    // The policy's files, exactly those its list names: the test modules, which the step runs by
+    // their glob, and the libraries they share; the directory holds nothing else, and the modules
+    // hold the checks the list pins.
+    let entries: Vec<String> = fs::read_dir(root.join(POLICY_DIR))
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.ends_with(".mjs"))
-        .map(|n| format!(".github/scripts/policy/{n}"))
         .collect();
-    policy.sort();
-    let policy_tests: Vec<&String> = policy.iter().filter(|f| f.ends_with(".test.mjs")).collect();
-    assert!(
-        policy_tests.len() >= 11,
-        "the policy has {} test modules: its checks lie in .github/scripts/policy/*.test.mjs",
-        policy_tests.len()
+    let list =
+        policy_list(&fs::read_to_string(root.join(POLICY_DIR).join("modules.json")).unwrap())
+            .unwrap_or_else(|e| panic!("{e}"));
+    let read = |f: &str| fs::read_to_string(root.join(f)).ok();
+    assert_eq!(
+        policy_dir_problems(&entries, &list, read),
+        Vec::<String>::new()
     );
+    // Planted, as the review of f217d1e found them: a module renamed out of the glob, to plain
+    // `.mjs` or to a dotfile, which node's glob does not match; a test module the list does not
+    // name; a module dropped from the list and the tree; a module listed that is not there; and the
+    // total lowered.
+    let first = list.modules[0]
+        .strip_prefix(POLICY_DIR)
+        .unwrap()
+        .to_string();
+    let renamed = |to: &str| -> Vec<String> {
+        entries
+            .iter()
+            .map(|e| {
+                if *e == first {
+                    to.to_string()
+                } else {
+                    e.clone()
+                }
+            })
+            .collect()
+    };
+    let read_as = |to: String| {
+        let first = first.clone();
+        let root = &root;
+        move |f: &str| {
+            let f = if f == format!("{POLICY_DIR}{to}") {
+                format!("{POLICY_DIR}{first}")
+            } else {
+                f.to_string()
+            };
+            fs::read_to_string(root.join(f)).ok()
+        }
+    };
+    let plain = first.replace(".test.mjs", ".mjs");
+    let dotted = format!(".{first}");
+    let dropped = PolicyList {
+        modules: list.modules[1..].to_vec(),
+        libraries: list.libraries.clone(),
+        checks: list.checks,
+    };
+    let lowered = PolicyList {
+        modules: list.modules.clone(),
+        libraries: list.libraries.clone(),
+        checks: list.checks - 1,
+    };
+    let ghost = PolicyList {
+        modules: [&list.modules[..], &[format!("{POLICY_DIR}ghost.test.mjs")]].concat(),
+        libraries: list.libraries.clone(),
+        checks: list.checks,
+    };
+    let mut extra = entries.clone();
+    extra.push("extra.test.mjs".to_string());
+    let without: Vec<String> = entries.iter().filter(|e| **e != first).cloned().collect();
+    for (problems, what) in [
+        (
+            policy_dir_problems(&renamed(&plain), &list, read_as(plain.clone())),
+            "a module renamed to plain .mjs",
+        ),
+        (
+            policy_dir_problems(&renamed(&dotted), &list, read_as(dotted.clone())),
+            "a module renamed to a dotfile",
+        ),
+        (
+            policy_dir_problems(&extra, &list, read),
+            "a test module no list names",
+        ),
+        (
+            policy_dir_problems(&without, &dropped, read),
+            "a module dropped from the list and the tree",
+        ),
+        (
+            policy_dir_problems(&entries, &ghost, read),
+            "a module listed that is not there",
+        ),
+        (
+            policy_dir_problems(&entries, &lowered, read),
+            "the total lowered",
+        ),
+    ] {
+        assert!(!problems.is_empty(), "{what} passed");
+    }
+    // The list is read as written or refused: a second key, or an entry that is no plain string.
+    let text = fs::read_to_string(root.join(POLICY_DIR).join("modules.json")).unwrap();
+    assert!(policy_list(&text.replacen("\"checks\"", "\"checks\": 1, \"checks\"", 1)).is_err());
+    assert!(policy_list(&text.replacen("\"modules\": [", "\"modules\": [1, ", 1)).is_err());
+    let policy: Vec<String> = list
+        .modules
+        .iter()
+        .chain(&list.libraries)
+        .cloned()
+        .collect();
+    let policy_tests: Vec<&String> = list.modules.iter().collect();
     // No test of the policy's suites is skipped, left to do or singled out.
     for suite in policy.iter().map(String::as_str).chain([
         ".github/scripts/policy-run.test.mjs",

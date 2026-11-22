@@ -1,8 +1,18 @@
 // What the workflow policy pins, and whose the gate files are (README.md in this directory): the
 // scripts and jobs that run the tests, by their digests, and the files CODEOWNERS gives the owner.
 
-import { digest } from "./repo.mjs";
+import { digest, read } from "./repo.mjs";
 import { triggers } from "./workflows.mjs";
+
+/// The policy's own files, listed once in modules.json beside them, which PINNED_FILES pins: the
+/// test modules node runs, the libraries they share, and the checks they hold in all.
+export const POLICY_LIST_FILE = ".github/scripts/policy/modules.json";
+export const POLICY_LIST = JSON.parse(read(POLICY_LIST_FILE));
+/// The policy's own scripts, exactly those listed, which cannot hold their own digests: CODEOWNERS
+/// gives them to their owner, and every other script a pinned job runs is pinned, wherever it lies
+/// (the review of f217d1e: a directory prefix exempted any script under it).
+export const POLICY_FILES = new Set([...POLICY_LIST.modules, ...POLICY_LIST.libraries]);
+export const isPolicy = (f) => POLICY_FILES.has(f);
 /// A job as its pin reads it: the workflow's env and defaults with the whole job, keys in order,
 /// each action named without the commit its pin names, which Dependabot moves and the check of
 /// pins holds.
@@ -24,6 +34,9 @@ export function jobDigest(doc, job) {
 /// change to any of them changes this file too, where review sees that a gate changed; the
 /// failure names the digest to write here.
 export const PINNED_FILES = new Map([
+  // The policy's list of its own files: a module dropped from it, or the total of checks lowered,
+  // changes this digest too.
+  [".github/scripts/policy/modules.json", "669af665092a33c2ea782dfeecfaf3b6c47b3318bee0627f1f1aef0be18a368f"],
   [".github/scripts/limits.sh", "40747e4a7344895ce42dd902adb28dd669809d4dd6821d3c1e01921552669ed0"],
   [".github/scripts/memory-guard.sh", "c3c629010f58d39682fa06353305181cf7d1064d2b07abefd6885033045630d1"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
