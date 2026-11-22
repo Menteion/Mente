@@ -84,7 +84,7 @@ pub fn check_source_listed(src: &str) -> SourceChecked {
             listings: Listings::default(),
         },
         Ok(module) => {
-            let (verdict, listings) = check_module_listed(src, &module);
+            let (verdict, listings) = verdict_listed(&module, bodies(src, &module, true));
             SourceChecked {
                 verdict: verdict.map(|report| (module, report)),
                 listings,
@@ -93,21 +93,15 @@ pub fn check_source_listed(src: &str) -> SourceChecked {
     }
 }
 
-/// Checks a parsed module: the declaration checks of [`verify_module`], then every function
-/// with a body, under M1's grammar (`spec/grammar.md`), its names and types and Tier 1
-/// (`spec/core-calculus.md`). The diagnostics come in the order of the source.
-pub fn check_module(
-    src: &str,
+/// The verdict on a parsed module and its [`Listings`], from its bodies checked once with Tier 1:
+/// the declaration checks of [`verify_module`], then every function with a body, under M1's
+/// grammar (`spec/grammar.md`), its names and types and Tier 1 (`spec/core-calculus.md`), the
+/// diagnostics in the order of the source; and the todos and trusted clauses, moved out of the run.
+/// It takes the one run's bodies and no source, so it cannot run the checker a second time for
+/// either half, as `mn check` once did for the listings.
+fn verdict_listed(
     module: &ModuleFile,
-) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
-    check_module_listed(src, module).0
-}
-
-/// [`check_module`]'s verdict on a parsed module and its [`Listings`], from one run of the
-/// checker, Tier 1 included, each moved out of the run.
-fn check_module_listed(
-    src: &str,
-    module: &ModuleFile,
+    checked: Bodies,
 ) -> (Result<ModuleVerificationReport, Vec<Diagnostic>>, Listings) {
     let Bodies {
         errors,
@@ -115,7 +109,7 @@ fn check_module_listed(
         todos,
         structs,
         ..
-    } = bodies(src, module, true);
+    } = checked;
     let mut axioms: Vec<(Span, String)> = reports.into_iter().flat_map(|(_, r)| r.axioms).collect();
     axioms.sort_by_key(|t| t.0.start);
     (
