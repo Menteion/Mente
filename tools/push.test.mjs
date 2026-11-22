@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PASSED } from "./local-limits.mjs";
-import { QUICK, prePush } from "./push.mjs";
+import { QUICK, TREE_RUNNER, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
 const GUARD = fileURLToPath(new URL("./push-guard.mjs", import.meta.url));
@@ -233,6 +233,9 @@ test("the hook asks the remote git pushes to, never one an insteadOf rewrites to
   const server = net.createServer((socket) => {
     connected++;
     sockets.add(socket);
+    // Read what the transport sent: a peer's orderly close is reported only once its data is read,
+    // and on Linux a killed client closes so (the ninth review: Windows resets, Linux does not).
+    socket.resume();
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
   });
@@ -252,14 +255,25 @@ test("the hook asks the remote git pushes to, never one an insteadOf rewrites to
     git("add", ".");
     git("commit", "-q", "-m", "x");
     const sha = git("rev-parse", "HEAD");
+    const url = `http://127.0.0.1:${server.address().port}/stalled.git`;
+    const settle = () => new Promise((done) => setTimeout(done, 500));
+    // A positive control, on every platform this runs on: git alone killed at its time, as round 8
+    // did, leaves its transport holding a connection, which the check below must see. Without it,
+    // a check that sees nothing would pass whatever survived.
+    spawnSync("git", ["ls-remote", "--", url, "refs/heads/main"], { cwd: work, env: { ...env, GIT_TERMINAL_PROMPT: "0" }, timeout: 3000 });
+    await settle();
+    assert.ok(sockets.size > 0, "killing git alone left no connection open, so the check below could not see a survivor");
+    for (const socket of sockets) socket.destroy();
+    await settle();
+    connected = 0;
     const started = Date.now();
-    const answer = prePush(`refs/heads/stalled ${sha} refs/heads/stalled ${"0".repeat(40)}\n`, work, `http://127.0.0.1:${server.address().port}/stalled.git`, { timeoutMs: 3000 });
+    const answer = prePush(`refs/heads/stalled ${sha} refs/heads/stalled ${"0".repeat(40)}\n`, work, url, { timeoutMs: 3000 });
     assert.equal(answer.status, 1, answer.words);
     assert.match(answer.words, /did not say which commit is its main within 3 s/);
     assert.ok(Date.now() - started < 30000, "the hook waited past its time");
     // The server learns of a connection only once this process's loop turns, after the hook has
     // returned: a check at once would see none and pass whatever survived.
-    await new Promise((done) => setTimeout(done, 500));
+    await settle();
     assert.ok(connected > 0, "the transport never connected, so this case tested nothing");
     // Every connection the transport opened is closed within moments: none of its processes lives.
     const deadline = Date.now() + 5000;
@@ -274,6 +288,17 @@ test("the hook asks the remote git pushes to, never one an insteadOf rewrites to
       // A surviving process holds it; the check above has said so.
     }
   }
+});
+
+test("the runner reports once, as one JSON, even when its command cannot start", () => {
+  // A command that cannot start makes Node report both an error and a close; the runner answers the
+  // first and only that one (the ninth review), so the hook reads its answer, not a parse error.
+  const r = spawnSync(process.execPath, ["-e", TREE_RUNNER], { encoding: "utf8", env: { ...process.env, TREE_ARGS: JSON.stringify(["no-such-program-of-mente"]), TREE_TIMEOUT: "5000" } });
+  assert.equal(r.status, 0, r.stderr);
+  const answer = JSON.parse(r.stdout);
+  assert.equal(answer.code, -1);
+  assert.match(answer.err, /ENOENT|not recognized|cannot find/i);
+  assert.equal(answer.timedOut, false);
 });
 
 test("a merge in progress refuses, and each worktree is held to its own record", () => {
