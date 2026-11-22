@@ -26,13 +26,14 @@ When this round is done, the gates run from a copy of the files of a commit the 
 - a buggy refresher;
 - an environment a process inherits, since git runs hooks with `GIT_DIR` set;
 - a fetch that moves refs;
-- a refresh killed or refused partway, by the job's time limit, by Ctrl-C, by a reset of the machine, or by Windows refusing to replace a file in use.
+- a refresh killed or refused partway, by the job's time limit, by Ctrl-C, by a reset of the machine, or by Windows refusing to replace a file in use;
+- a refresh that hangs while it holds the lock.
 
 Every path a slip can reach is closed. So is every deliberate path that costs only a flag or a check:
 - a local ref moved by `update-ref`;
 - a URL rewritten by `insteadOf`, or any other setting of the system or user git configuration;
 - a replace ref;
-- a `GIT_` variable;
+- a `GIT_` variable, or a variable that picks the git binary, preloads node code or names certificate files;
 - an argument handed to a refresher;
 - a refresher run by hand, or imported by a script.
 
@@ -50,20 +51,24 @@ A process with full shell access can still rewrite anything local, and no local 
 
 A test reads every module of the set, its imports and the files it loads by path. It fails when one lies outside the set, and it lists the refresher's own closure.
 
-**How git is run.** Every git command of the refresher and the entries runs:
-- with every inherited `GIT_` variable removed (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` and `GIT_CONFIG_*` among them);
-- with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL` naming an empty file of the refresher's own, so that no system or user configuration reaches it, wherever `HOME` or `XDG_CONFIG_HOME` points;
-- with `--no-replace-objects`, so that `git replace` changes nothing it reads.
+**How the refresher's processes are run.** Every process the refresher starts, and every git command of the entries' checks, runs with an environment of their own making:
+- every inherited `GIT_` and `NODE_` variable removed (`GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CONFIG_*` and `NODE_OPTIONS` among them), and so are `SSL_CERT_FILE`, `SSL_CERT_DIR` and `CURL_CA_BUNDLE`;
+- `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`, which Git for Windows accepts when node starts it. So no system or user configuration reaches git, wherever `HOME` or `XDG_CONFIG_HOME` points, and no file is left for a command to fill.
 
-Further:
-- `git ls-remote` runs outside any repository, so no repository's configuration reaches it either.
+The binaries are not found on `PATH`:
+- git runs by its absolute path, from a constant list of the system's locations (`C:/Program Files/Git/cmd/git.exe` on Windows, `/usr/bin/git` on Linux). When none is found, the refresher refuses and says where it looked.
+- node runs by `process.execPath`.
+
+Every git command runs with `--no-replace-objects`, so that `git replace` changes nothing it reads. Further:
+- `git ls-remote` runs in an empty directory the refresher creates for it, by an exclusive create, outside the common git directory. The refresher sets `GIT_CEILING_DIRECTORIES` to that directory's parent itself. So git finds no repository, and no repository's configuration reaches it, wherever the refresher was started from.
 - Every other command names its repository by `--git-dir`: the common git directory that holds `mente-gates/`, found from the running file's own path, never from the current directory or the caller.
 - `git hash-object` runs with `--no-filters`, so no attribute or filter changes what it hashes.
-- Where Git for Windows needs a setting of its system file for https, such as its TLS backend, the refresher passes that one setting with `-c`, as a constant of its own code. A local proof on Windows shows `ls-remote` over https working so.
+- On Windows, `ls-remote` runs with `-c http.sslBackend=schannel`, a constant, so the system's certificate store decides what https trusts. A local proof on Windows shows `ls-remote` over https working with the system and user configuration closed.
 
 **Which commit is main.** The remote says, as #203's pre-push hook asks it. The URL is the one the running copy's `gate-set.json` declares, so a refresher takes it from its own verified copy, never from the working tree, from `git remote get-url`, or from its caller. A refresh:
 - asks only when the local `refs/remotes/origin/main` names a commit other than `current`; otherwise it uses no network, and an offline start does not wait;
 - refuses a URL that is not `https://`;
+- runs `git ls-remote --get-url -- <url>` and goes on only if it gives back `<url>` itself. This one local process holds against an `insteadOf` that the closed configuration should already exclude;
 - asks `git ls-remote -- <url> refs/heads/main`, within a time, with no prompt for credentials, its whole process tree killed when the time passes, as #203's hook does;
 - installs that commit's set only when the local `refs/remotes/origin/main` names that same commit.
 
@@ -93,11 +98,11 @@ A refusal names the one command that clears it:
 - a stale entry, or a copy behind the local `origin/main`, names the refresh;
 - a bad current copy names the bootstrap, since the refresh entry refuses it too. A bad copy is a drifted file, from antivirus or a stray edit, a manifest that disagrees with the commit, or a commit that is not `origin/main` or its ancestor.
 
-The runner line of `~/.cargo/config.toml` names `mente-gates/entry/capped.mjs`, and `core.hooksPath` names `mente-gates/entry/hooks`. Both paths are stable, so Norman writes his two lines once.
+The runner line of `~/.cargo/config.toml` names `mente-gates/entry/capped.mjs`, and `core.hooksPath` names `mente-gates/entry/hooks`. Both paths are stable, so Norman writes his two lines once. The hook's sh entry removes `NODE_OPTIONS` before it starts node.
 
 **Who writes it.** Only the refresher of the commit being installed, never the branch's own `tools/gates.mjs`.
 - The refresher starts only from a copy under `mente-gates/`, and refuses when run from a working tree. It takes no argument and refuses any.
-- quick.mjs, cargo.mjs and mn.mjs, when they start, run `mente-gates/entry/refresh.mjs`. This happens before `requireRunner` and `requireHooks`, since the runner line and the hooks name entries a first refresh writes. The entry checks the current copy as every entry does, then runs that copy's refresher.
+- quick.mjs, cargo.mjs and mn.mjs, when they start, run `mente-gates/entry/refresh.mjs`, by `process.execPath` and with the environment cleaned as above. This happens before `requireRunner` and `requireHooks`, since the runner line and the hooks name entries a first refresh writes. The entry checks the current copy as every entry does, then runs that copy's refresher.
 - When the remote confirms a commit other than `current`, the refresher takes the lock and readies that commit's set:
   - an existing `<commit>/` that matches `git ls-tree` of the commit, manifest included, stands as the new set;
   - otherwise, it moves any `<commit>/` aside and writes the set, read from the commit's objects, into a staging directory.
@@ -109,8 +114,8 @@ The runner line of `~/.cargo/config.toml` names `mente-gates/entry/capped.mjs`, 
 So, of the copy a refresh replaces, only the refresher and its closure run, and they do only two things: confirm the commit, and start the new refresher. A broken installed refresher is recovered by running the bootstrap again.
 
 **The seam, for the tests alone.** The fixtures' remotes are local paths. So the refresher's exported functions take a URL policy and a repository, and only these use them:
-- A module whose file lies under a `mente-gates/` directory honours no policy, URL or repository argument at all: it refuses them.
-- A working-tree module honours them only against a repository other than its own, which is where the fixtures live.
+- A module whose file lies under a `mente-gates/` directory, or outside any repository, honours no policy, URL or repository argument at all: it refuses them.
+- A working-tree module honours them only against a repository whose common git directory differs from its own, which is where the fixtures live. Every worktree of the same repository, the main checkout included, counts as its own.
 
 The command admits only https however it is started, and a test holds that no argument or variable changes that.
 
@@ -123,7 +128,12 @@ The command admits only https however it is started, and a test holds that no ar
 - **The lock.** It is an open handle that the operating system releases when its holder ends, however it ends, so a kill, Ctrl-C or a reset leaves it free.
   - On Windows it is a lock file opened with no sharing, as local-limits' slots are (`UV_FS_O_EXLOCK`). On Linux, where the gates' tests run in CI, it is a socket in the abstract namespace named from the common git directory. Both are defined once, in `local-limits.mjs`.
   - The lock spans both refreshers. The old refresher takes it before it readies the new set, and hands its open handle to the new set's refresher, so it stays held, with no gap, until both have ended.
-  - The bootstrap's staged refresher inherits no handle, so it takes the lock itself. A second refresh waits while another holds the lock.
+  - The bootstrap's staged refresher inherits no handle, so it takes the lock itself.
+- **The time limit.** A refresh runs under a time limit with a tree kill, as `ls-remote` does.
+  - `tools/gates.mjs` does its work in a child process of its own, started under the tree runner with fixed code and no argument, and that child holds the lock.
+  - The new set's refresher is a descendant of that child, so the time covers both refreshers.
+  - When the time passes, the tree dies, and the operating system releases the lock.
+- **Waiting.** A start of quick, cargo or mn that finds the lock held waits at most a short bound. It then runs the current verified copy and says which process has held the lock, and since when. The bootstrap waits at most the refresh's time limit, by which any holder has been killed.
 - **The order.** A staged set is renamed whole to its commit's name. Then the entries are replaced, each by a new file renamed over it, from the new set's `gate-entries/`. `current` is switched last, and only once every entry has been replaced.
   - A shell already reading the old hook keeps its open file.
   - Where Windows refuses to rename over a file in use, the refresh stops before switching `current` and says it will try again. The next start of quick, cargo or mn retries through the refresh entry, which the version check exempts. Until then, an entry already replaced reports itself as stale against the old copy.
@@ -151,14 +161,15 @@ They are the branch's own tools, which its own changes test. What judges every b
 **Limits.** These the local gates do not hold; CI does:
 - **Full shell access.** A process with it can rewrite together everything the entries trust:
   - any file of the common git directory: its `config`, `objects/info/alternates`, `info/grafts`, `shallow` or the commit-graph files, any of which can change what `ls-tree` or `merge-base --is-ancestor` answer;
-  - the copy, its manifest, and a commit object written to match, with `current` and the local `refs/remotes/origin/main` at once, by a script of its own, whether or not it borrows the refresher's code from a working tree;
+  - the copy, its manifest, and a commit object written to match, with `current` and the local `refs/remotes/origin/main` at once, by a script of its own, whether or not it borrows the refresher's code copied into a repository of its own;
   - the entries;
   - the runner line of `~/.cargo/config.toml`, or `core.hooksPath`.
 - **Rollback.** Writing `current` alone to name the copy kept before it passes every entry, since that commit is an ancestor of `origin/main`. The next refresh restores the newest confirmed commit.
 - **Lag.** The stable entries never refresh, and quick, cargo and mn install only what the local `origin/main` names. A merge to main after the last fetch holds the gates back until the next fetch, and the next start of one of those tools.
 - **Proxies.** Proxy variables such as `HTTPS_PROXY` stay. A proxy cannot change what https verifies; at most it keeps the current copy.
+- **node.** The runner line's node, and the node the hook's sh entry starts, are found on `PATH`. Cargo starts the runner line's node with whatever `NODE_OPTIONS` holds, which can preload code into it before the entry runs.
 - **The bootstrap** runs in Norman's own terminal, with that terminal's environment.
-- **https.** The remote is trusted through https and its certificate.
+- **https.** The remote is trusted through https and its certificate, as the system's certificate store (on Windows) or the system's default certificate files (on Linux) decide.
 
 **CLAUDE.md.** The line that the main checkout stays on main, from #203's body and the manager's planned proposal, goes away. The Verification section says:
 - where the gates run from;
@@ -188,10 +199,12 @@ They are the branch's own tools, which its own changes test. What judges every b
   - a `gates.mjs` run from a working tree refuses to start;
   - an edited `gates.mjs` placed in a staging directory under `mente-gates/` confirms the commit and writes nothing, since its blob differs from that commit's;
   - the installed `gates.mjs`, imported by a script and called with a local-path policy and URL, writes nothing;
-  - a working-tree `gates.mjs`, called through the seam against its own repository, writes nothing.
+  - a working-tree `gates.mjs`, called through the seam against its own repository, writes nothing;
+  - one worktree's `gates.mjs`, called through the seam against the main checkout, writes nothing, since they share a common git directory;
+  - a `gates.mjs` copied outside any repository honours no seam argument.
 - [ ] A refresher started with an argument (a commit, a URL or a path) refuses it, planted. One started with `GIT_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES` or `GIT_CONFIG_*` naming another repository or configuration reads only the repository that holds its copy, planted.
 - [ ] `refs/remotes/origin/main` moved locally by `update-ref` to a commit whose `capped.mjs` differs installs nothing, planted. So do these, each planted:
-  - an `insteadOf` that rewrites the remote's URL, in the user's configuration and in the repository's;
+  - an `insteadOf` that rewrites the remote's URL, in the user's configuration and in the repository's, with the refresher started from a checkout and from `mente-gates/`;
   - a URL that is not https;
   - a remote that cannot be reached;
   - a remote that does not answer in time.
@@ -200,7 +213,9 @@ They are the branch's own tools, which its own changes test. What judges every b
 - [ ] A copy whose commit is not the local `origin/main` or an ancestor of it, written by hand from a branch's commit, is refused by every entry, planted.
 - [ ] Drift of the copy, one byte of one file, is refused on each path: quick's refresh, the hook's entry and the runner's entry. The refusal names the bootstrap, and running it clears the refusal. A manifest edited to match the drifted file is refused too, by `git ls-tree` of the commit. Each is planted.
 - [ ] A module of the set that imports or loads a file outside the set fails the closure test, planted.
+- [ ] A refresher started with `PATH` naming another git first, with `NODE_OPTIONS` set, or with `SSL_CERT_FILE`, `SSL_CERT_DIR` or `CURL_CA_BUNDLE` set, does three things, planted: it runs the system's git, it preloads nothing into the processes it starts, and it trusts only the system's certificates. The hook's entry started with `NODE_OPTIONS` set preloads nothing, planted.
 - [ ] Two refreshes at once leave one valid copy, planted.
+- [ ] A refresher that hangs while it holds the lock is killed with its tree at its time limit, and the lock is then free. Meanwhile a start of quick, cargo or mn runs the current verified copy after the short bound and says so. Each is planted.
 - [ ] A refresh killed at each step leaves the lock free and a state the next refresh completes, each planted. The steps are: while it readies the new set; after the new set's refresher has started; after the rename; after each entry; after `current` switches, before the sweep.
 - [ ] A refresh while a file of the old copy is in use succeeds and leaves that file alone. Windows alone refuses to replace a file in use, so this is a local proof that the quick map runs, skipped on Linux. So is the proof that an entry whose rename Windows refuses leaves `current` unswitched, and that the next start's refresh completes it.
 - [ ] Of the copy a refresh replaces, only the refresher and its closure run: a module committed in the old set outside that closure, which writes a file when imported, writes none during a refresh to a newer commit, planted.
