@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 16;
+const FLOOR = 17;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1080,3 +1080,77 @@ check("the fuzz summary stays under GitHub's limit for a step's summary, reads b
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+check("the body CLI gives the verdict the Commits check gives, on the same pull request's text", async () => {
+  // A session runs .github/scripts/commits-body.mjs on a pull request's text before it sends it
+  // (the escape pull-request-body-unchecked-locally: #213's body quoted Norman's words in Chinese,
+  // which only the required check on GitHub found). It must refuse exactly what the Commits job
+  // refuses, line for line: both read the text through bodyProblems in lib/commits.mjs.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-commits-body-"));
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const body = url.pathname === "/repos/o/r/actions/runs" ? { workflow_runs: [{ created_at: "2026-11-22T10:00:00Z" }] } : url.pathname.startsWith("/repos/o/r/issues/7/") ? [] : null;
+    res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
+    res.end(JSON.stringify(body ?? {}));
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  try {
+    const sh = testGit(dir);
+    sh("init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(dir, "a"), "a\n");
+    sh("add", "-A");
+    sh("commit", "-q", "-m", "Base");
+    const base = sh("rev-parse", "HEAD");
+    fs.writeFileSync(path.join(dir, "a"), "b\n");
+    sh("commit", "-q", "-am", "Change a");
+    const head = sh("rev-parse", "HEAD");
+    const env = Object.fromEntries(Object.entries(GIT_TEST_ENV).filter(([k]) => !k.startsWith("GITHUB_")));
+    const event = path.join(dir, "event.json");
+    fs.writeFileSync(event, JSON.stringify({ action: "edited", pull_request: { number: 7, base: { sha: base }, head: { sha: head }, user: { login: "menteion-agent[bot]" } } }));
+    const job = (title, body) =>
+      new Promise((done) => {
+        const child = spawn(process.execPath, [path.join(HERE, "commits.mjs")], {
+          cwd: dir,
+          env: { ...env, GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: event, GITHUB_REPOSITORY: "o/r", GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_TOKEN: "t", PR_TITLE: title, PR_BODY: body },
+        });
+        let stdout = "";
+        child.stdout.on("data", (d) => (stdout += d));
+        child.on("close", (status) => done({ status, said: stdout.split("\n").filter((l) => l.startsWith("::error::the pull request's")).map((l) => l.slice("::error::".length)) }));
+      });
+    const local = (title, body) => {
+      const file = path.join(dir, "body.md");
+      fs.writeFileSync(file, body);
+      const r = spawnSync(process.execPath, [path.join(HERE, "commits-body.mjs"), file, "--title", title], { encoding: "utf8", timeout: 30000 });
+      return { status: r.status, said: r.stdout.split("\n").filter((l) => l.startsWith("the pull request's")) };
+    };
+    const han = String.fromCodePoint(0x4e2d, 0x6587);
+    const cases = [
+      ["T", "Root cause: x.\nRemoved at the root: y."],
+      ["T", "Root cause: x.\nNot removable at the root: y.\nGuard: policy check \"z\""],
+      ["T", "Not a fix: a brief."],
+      ["T", "A summary, and no declaration."],
+      ["T", "Root cause: x\nRemoved at the root: y\nNot a fix: z"],
+      ["T", "Root cause:\nRemoved at the root: y"],
+      ["T", "**Root cause:** x\nRemoved at the root: y"],
+      ["T", `Not a fix: a brief.\nNorman: ${han}`],
+      [`A title ${han}`, "Not a fix: a brief."],
+      ["T", "```\nNot a fix: quoted\n```"],
+      ["T", ""],
+    ];
+    let refused = 0;
+    for (const [title, body] of cases) {
+      const [onGitHub, here] = [await job(title, body), local(title, body)];
+      assert.equal(here.status, onGitHub.status, `the verdicts differ on ${JSON.stringify([title, body])}: here ${here.status}, on GitHub ${onGitHub.status}`);
+      assert.deepEqual(here.said, onGitHub.said, `the messages differ on ${JSON.stringify([title, body])}`);
+      if (onGitHub.status === 1) refused++;
+    }
+    assert.equal(refused, cases.length - 3, "the cases refused are not those that break a rule");
+    // A call the CLI cannot read is no verdict.
+    assert.equal(spawnSync(process.execPath, [path.join(HERE, "commits-body.mjs")], { encoding: "utf8" }).status, 2);
+    assert.equal(spawnSync(process.execPath, [path.join(HERE, "commits-body.mjs"), "a", "b"], { encoding: "utf8" }).status, 2);
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+

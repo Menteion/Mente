@@ -149,6 +149,23 @@ export function declarationProblems(body, author) {
   return found;
 }
 
+/// Every problem in a pull request's text, one line each: CJK text in its title or body, and a body
+/// that does not declare what the pull request is. The Commits check and .github/scripts/commits-body.mjs,
+/// which a session runs on a body before it sends it, both read a pull request's text here alone,
+/// so the two cannot disagree on one.
+export function bodyProblems(pullRequest) {
+  const found = [];
+  for (const [what, text] of [
+    ["title", pullRequest.title],
+    ["body", pullRequest.body],
+  ]) {
+    const lines = cjkLines(text ?? "");
+    if (lines.length > 0) found.push(`the pull request's ${what}: CJK text, line ${lines.join(", ")}`);
+  }
+  for (const p of declarationProblems(pullRequest.body, pullRequest.author)) found.push(`the pull request's body: ${p}`);
+  return found;
+}
+
 /// Every problem in the commits, the pull request's text and its base, one line each.
 export function problems(commits, pullRequest, baseChanged = false) {
   const found = [];
@@ -160,17 +177,28 @@ export function problems(commits, pullRequest, baseChanged = false) {
     const lines = cjkLines(c.message);
     if (lines.length > 0) found.push(`commit ${short} ${JSON.stringify(c.subject)}: CJK text in its message, line ${lines.join(", ")}`);
   }
-  if (pullRequest) {
-    for (const [what, text] of [
-      ["title", pullRequest.title],
-      ["body", pullRequest.body],
-    ]) {
-      const lines = cjkLines(text ?? "");
-      if (lines.length > 0) found.push(`the pull request's ${what}: CJK text, line ${lines.join(", ")}`);
-    }
-    for (const p of declarationProblems(pullRequest.body, pullRequest.author)) found.push(`the pull request's body: ${p}`);
-  }
+  if (pullRequest) found.push(...bodyProblems(pullRequest));
   return found;
+}
+
+/// The local check of a pull request's text, before a session creates or edits one:
+/// `node .github/scripts/commits-body.mjs <body file> [--title <title>]`. It reads the body from the
+/// file and runs bodyProblems on it, as the Commits check does on GitHub, with no author, so no
+/// author's exemption. Returns the lines to print and the exit code: 0 for none, 1 for problems, 2
+/// for a call it cannot read.
+export function bodyMain(args, readFile) {
+  const usage = "usage: node .github/scripts/commits-body.mjs <body file> [--title <title>]";
+  const files = [];
+  let title = "";
+  for (let k = 0; k < args.length; k++) {
+    if (args[k] === "--title" && k + 1 < args.length) title = args[++k];
+    else if (args[k].startsWith("-")) return { lines: [usage], code: 2 };
+    else files.push(args[k]);
+  }
+  if (files.length !== 1) return { lines: [usage], code: 2 };
+  const found = bodyProblems({ title, body: readFile(files[0]), author: "" });
+  if (found.length === 0) return { lines: ["The pull request's text passes the Commits check's rules: English, and a declaration of what it is."], code: 0 };
+  return { lines: [...found, "Edit the text and run this again; the Commits check runs the same rules on GitHub."], code: 1 };
 }
 
 /// The commits of git's log in the form .github/scripts/commits.mjs asks for, oldest first: each
