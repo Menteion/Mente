@@ -1,0 +1,7 @@
+module m
+
+struct P {
+  a: P
+}
+
+fn e(p: P) -> u8 = 0

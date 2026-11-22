@@ -7,6 +7,7 @@
 //! columns are in DWARF only.
 
 use cranelift_codegen::isa::unwind::UnwindInfo;
+use cranelift_object::object;
 use object::pe::{
     RelocationType, IMAGE_REL_AMD64_ADDR32NB, IMAGE_REL_AMD64_SECREL, IMAGE_REL_AMD64_SECTION,
 };

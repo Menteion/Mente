@@ -16,6 +16,11 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Claude Code's own on each machine: the worktrees the desktop app makes for its sessions, and each
+# person's local settings. The project's settings, .claude/settings.json, are tracked.
+.claude/worktrees/
+.claude/settings.local.json
+
 # Node tooling for the documentation checks
 node_modules/
 mutants.out/

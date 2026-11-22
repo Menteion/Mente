@@ -1,0 +1,48 @@
+
+module conformance
+//
+
+struct S0{
+  
+  
+}
+
+struct S1{
+  
+  
+}
+
+struct S2{
+  l:S1
+   
+}
+
+struct S3{
+  l:S2
+  r
+}
+
+struct S4{
+  l: S3
+  
+}
+
+pub struct S5 {
+  l: S4
+  r: S4
+}
+
+pub struct S6 {
+  l: S5
+  r
+}
+
+struct S7 {
+  l: S6
+  rS6
+}
+
+fn f(mut s: S7) -> u8[0..1] {
+  s.l.l.l.l.a = 0
+  s.l.l.l.l.a
+}

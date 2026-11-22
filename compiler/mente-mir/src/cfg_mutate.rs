@@ -889,6 +889,7 @@ mod tests {
         let m = Module {
             functions: vec![b.finish()],
             budget: 1 << 20,
+            mems: cfg::Mems::default(),
         };
         cfg::verify(&m).unwrap();
         m
@@ -944,6 +945,7 @@ mod tests {
         let m = Module {
             functions: vec![callee, id, b.finish()],
             budget: 1 << 20,
+            mems: cfg::Mems::default(),
         };
         cfg::verify(&m).unwrap();
         m
@@ -1001,6 +1003,7 @@ mod tests {
         let m = Module {
             functions: vec![id, b.finish()],
             budget: 1 << 20,
+            mems: cfg::Mems::default(),
         };
         cfg::verify(&m).unwrap();
         m
@@ -1309,7 +1312,7 @@ mod tests {
     fn test_each_operator_family_makes_mutants_that_verify() {
         let mut b = Builder::new(
             "all",
-            &[Ty::Int(I64), Ty::Int(I64), Ty::Addr],
+            &[Ty::Int(I64), Ty::Int(I64), Ty::Addr(cfg::MemId(0))],
             Some(Ty::Int(I64)),
         );
         let [x, y, out] = b.params(BlockId(0))[..] else {
@@ -1360,7 +1363,7 @@ mod tests {
         let both = b.inst(Op::Bits(BitOp::And), Ty::Bool, &[conds[0], yes]);
         b.inst(Op::Check { trap: failed }, Ty::Unit, &[both, x]);
         b.inst(Op::Store, Ty::Unit, &[out, flipped]);
-        let copy = b.inst(Op::Slot { bytes: 8 }, Ty::Addr, &[]);
+        let copy = b.inst(Op::Slot { bytes: 8 }, Ty::Addr(cfg::MemId(0)), &[]);
         b.inst(Op::Copy { bytes: 8 }, Ty::Unit, &[copy, out]);
         let then = b.block(&[Ty::Int(I64)]);
         let otherwise = b.block(&[Ty::Int(I64)]);
@@ -1370,9 +1373,12 @@ mod tests {
             let p = b.params(t)[0];
             b.ret(Some(p));
         }
+        let mut mems = cfg::Mems::default();
+        mems.of(cfg::Mem::Int(I64));
         let m = Module {
             functions: vec![b.finish()],
             budget: 1 << 20,
+            mems,
         };
         cfg::verify(&m).unwrap();
 
@@ -1456,6 +1462,7 @@ mod tests {
         let m = Module {
             functions: vec![b.finish()],
             budget: 1 << 20,
+            mems: cfg::Mems::default(),
         };
         cfg::verify(&m).unwrap();
         let removed = named(&m, &mutants(&m), "halt/b0.i0/check-removed").apply(&m);
@@ -1505,6 +1512,7 @@ mod tests {
             let m = Module {
                 functions: vec![b.finish()],
                 budget: 1 << 20,
+                mems: cfg::Mems::default(),
             };
             mutants(&m)
                 .iter()
@@ -1558,6 +1566,7 @@ mod tests {
         let m = Module {
             functions: vec![b.finish()],
             budget: 1 << 20,
+            mems: cfg::Mems::default(),
         };
         let all = mutants(&m);
         let id = named(&m, &all, "n/b0.i0/neg>id").apply(&m);
@@ -1589,6 +1598,7 @@ mod tests {
         let flip = Module {
             functions: vec![b.finish()],
             budget: 1 << 20,
+            mems: cfg::Mems::default(),
         };
         let id = named(&flip, &mutants(&flip), "flip/b0.i0/not>id").apply(&flip);
         assert_eq!(cfg::verify(&id), Ok(()));

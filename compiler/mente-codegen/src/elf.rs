@@ -4,7 +4,9 @@
 
 use std::collections::HashMap;
 
+use cranelift_codegen::gimli;
 use cranelift_codegen::isa::unwind::UnwindInfo;
+use cranelift_object::object;
 use gimli::write::{
     Address, AttributeValue, CommonInformationEntry, DwarfUnit, EhFrame, EndianVec, Expression,
     FrameTable, LineProgram, LineString, Range, RangeList, RelocateWriter, Relocation,
@@ -281,6 +283,8 @@ mod tests {
     use crate::test_program::{self, decl_of, FUNCTIONS};
     use crate::tests::fits;
     use crate::{SourcePos, Target};
+    use cranelift_codegen::gimli;
+    use cranelift_object::object;
     use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
     use std::collections::BTreeSet;
 
