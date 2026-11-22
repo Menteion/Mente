@@ -1,0 +1,20 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (core-calculus.md, item 10): a conjunct of this loop's
+// condition assigns `x`, which a conjunct before it read, so `x < 5` held before `x = 200` ran
+// and not in the body.
+pub fn f(p: i64) -> u8 {
+  var x: u8 = 0
+  var c: u8 = 0
+  while c < 3 and x < 5 and (if p > 8 {
+    x = 200
+    0
+  } else {
+    0
+  }) == 0 {
+    val y: u8[0..5] = x
+    c += 1
+    x = y
+  }
+  x
+}

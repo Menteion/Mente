@@ -1,0 +1,22 @@
+// expect: pass
+module conformance
+// Each array literal narrows its integers by itself, one nested in another included
+// (core-calculus.md, item 4, Norman's decision of 2026-11-21): a row whose elements have one
+// integer type narrows them into it, whatever the rows beside it hold, and is then kept until the
+// literal around it lands. The nightly runs found MIR building such a row in the outer literal's
+// type, where the reference interpreter trapped.
+
+// The row of `i64`s narrows 18446744073709551615 into `i64`, which traps on every path.
+pub fn wide() -> [2][2]u128 = [[1_i64, 18446744073709551615], [0, 1_u128]]
+
+// The row of `i32`s narrows `2147483647 * p0` into `i32`, which traps for every `p0` here.
+pub fn product(p0: i32[10..=15]) -> usize {
+  val v2: [2][2]usize = [[p0, 2147483647 * p0], [16_u128 & 1_u128, p0]]
+  v2[0][1]
+}
+
+// Rows of one type each whose values their types hold, a negative one among them.
+pub fn rows(a: i8, b: u32) -> [2][2]i64 = [[a, -1_i8], [b, 70000_u32]]
+
+// A row that narrows only where its value leaves its type: `a + 1` of an `i8` at 127.
+pub fn edge(a: i8, c: u128[0..=9]) -> [2][2]i128 = [[a + 1, a], [c, 1_u128]]

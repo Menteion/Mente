@@ -1,0 +1,5 @@
+mn fuzz found
+phase: incremental
+edit seed: unknown
+found by: mn fuzz, before its records named the edit seed in a form the replay reads back; the seed was not kept
+replay: mn fuzz --replay incremental-position-in-a-message.mn

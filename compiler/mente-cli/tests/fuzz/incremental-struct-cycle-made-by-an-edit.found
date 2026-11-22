@@ -1,0 +1,10 @@
+mn fuzz found
+phase: incremental
+kind: crash
+edit seed: 15478290269455336106
+found by: mn fuzz --seed 3 --jobs 4 --phase-seconds 10 --stack-kib 262144, job 0, run 6475
+compiler: 965cfb5c951ee2a55c1968c6d7ca2ce9883df6d6
+input: 567 bytes, minimized to 297 bytes
+replay: mn fuzz --replay incremental-struct-cycle-made-by-an-edit.mn
+key: crash in incremental: stack overflow
+message: stack overflow

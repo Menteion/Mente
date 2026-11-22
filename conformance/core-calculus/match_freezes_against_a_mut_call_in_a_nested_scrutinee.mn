@@ -7,15 +7,15 @@ pub enum Cell {
   Small(n: u8[0..10])
 }
 
-fn spoil(mut c: Cell) -> bool {
+fn spoil(mut c: Cell) -> u8 {
   c = Cell.Big(v: 200)
-  true
+  1
 }
 
 pub fn t(mut c: Cell) -> u8[0..10] = match c {
   Cell.Small(n: n) => match spoil(mut c) {
-    true => n
-    false => 0
+    1 => n
+    _ => 0
   }
   Cell.Big(v: _) => 0
 }

@@ -1,0 +1,13 @@
+// expect: E0235 E0235 E0235
+module conformance
+// A refinement's literal bound lies within i128..=u128, where its bounds are kept exactly
+// (refinement-and-fixed-point.md, item 1). Below i128 a lower bound bounds nothing the type does
+// not, here in a signature and a struct's field, and an upper bound leaves the refinement no
+// value. The fuzzer found such a module checking and then refused by the lowering.
+pub fn t(y: u8[-170141183460469231731687303715884105729..=3]) -> u8 = y
+
+pub struct S {
+  a: i16[-170141183460469231731687303715884105729..9]
+}
+
+pub fn empty(y: i8[-1..-170141183460469231731687303715884105729]) -> u8 = 0

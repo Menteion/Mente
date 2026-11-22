@@ -108,3 +108,9 @@ harness.yml#fixtures: node benchmark/harness/fixtures.ts --languages mente,rust,
 harness.yml#fixtures: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/document"
 harness.yml#fixtures: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
 harness.yml#fixtures: npm run test:harness
+pages.yml#build: node .github/scripts/build-time-code.mjs --before-toolchain
+pages.yml#build: node .github/scripts/build-time-code.mjs
+pages.yml#build: npm run test:site
+pages.yml#build: bash .github/scripts/install-mdbook.sh
+pages.yml#build: cargo build --locked --bin mn
+pages.yml#build: node site/build.mjs --mn target/debug/mn --mdbook "$HOME/.local/mdbook/mdbook"

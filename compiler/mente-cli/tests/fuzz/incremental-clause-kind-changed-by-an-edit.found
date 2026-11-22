@@ -1,0 +1,10 @@
+mn fuzz found
+phase: incremental
+kind: disagrees
+edit seed: 5110719622173470269
+found by: mn fuzz --seed 5 --jobs 4 --phase-seconds 10 --stack-kib 262144, job 3, run 4433
+compiler: 12958345d8628415a8e3e88e5a18f76b79b92240
+input: 313 bytes, minimized to 108 bytes
+replay: mn fuzz --replay incremental-clause-kind-changed-by-an-edit.mn
+key: disagrees in incremental: the re-check after an edit differs from a whole check
+message: the re-check after an edit differs from a whole check: the session reports E0502 at 311..312: Tier 1 cannot rule out `x = 9, y = 0`, outside `u8[9..=9]`, the type of the result of `f`; a whole check E0507 at 297..308: Tier 1 cannot rule out `x = 0`, where the measure `result == 0` of `bump` is negative at this call: a `decreases` measure is never negative; at this call it is `result == 0`, which reads a value Tier 1 does not follow, so no `guard` it can use states it

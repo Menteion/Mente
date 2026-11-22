@@ -1,0 +1,19 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (core-calculus.md, item 10): a conjunct of this loop's
+// condition assigns `x`. Tier 1 once forgot the whole left side of it, `c < 1` too, and reported
+// the measure `1 - c` as one that could be negative (E0507).
+pub fn f(p: i64, q: u8) -> u8 {
+  var x: u8 = 0
+  var c: u32 = 0
+  while c < 1 and x + 124 > 0 and (if p > 8 {
+    x = 0
+    0
+  } else {
+    0
+  }) == 0 decreases 1 - c {
+    c += 1
+    x = q
+  }
+  x
+}

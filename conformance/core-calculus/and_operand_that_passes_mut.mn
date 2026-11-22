@@ -1,0 +1,18 @@
+// expect: E0236
+module conformance
+// An operand of `and` or `or` changes nothing, in a value as much as in a condition (item 10):
+// the right one runs only where the left one holds, so what it changed would hold after the
+// `and` only sometimes.
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+pub fn f() -> u8[0..=0] {
+  var x: u8 = 0
+  _ = x == 0 and bump(mut x) == 0
+  x
+}

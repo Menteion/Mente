@@ -1,0 +1,18 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (item 10): an `else if`'s too, which runs only where
+// the conditions before it fail, so no fix moves it before the statement.
+fn next(mut i: u8) -> u8 {
+  i = i / 2
+  i
+}
+
+pub fn f(n: u8) -> u8 {
+  var i = n
+  if n > 9 {
+    return 1
+  } else if next(mut i) > 3 {
+    return 2
+  }
+  i
+}
