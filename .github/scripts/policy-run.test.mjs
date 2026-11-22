@@ -1350,6 +1350,13 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
   const listing = job.steps.find((s) => s.name === "This shard's mutants, as the plan dealt them, before any code of the change runs");
   const mutate = job.steps.find((s) => s.name === "Mutate this shard's mutants");
   assert.ok(listing && mutate, "mutants.yml's shard has no listing step or no step that mutates, by those names");
+  // Where the shard downloads the plan, read from its own download step, so that the steps below
+  // find the plan only where the workflow puts it (the review of 996aea6: a download moved, and the
+  // reads not, would deal no shard of its own pull request and break every shard after it).
+  const download = job.steps.find((s) => /download-artifact@/i.test(String(s.uses ?? "")) && s.with?.name === "mutants-plan");
+  const RUNNER = "${{ runner.temp }}/";
+  assert.ok(String(download?.with?.path).startsWith(RUNNER), "mutants.yml's shard downloads the plan elsewhere than under the runner's temporary directory");
+  const planUnder = String(download.with.path).slice(RUNNER.length);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mutants-shard-"));
   try {
     const put = (file, text) => {
@@ -1406,10 +1413,10 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
       put("tested.json", JSON.stringify((lists.tested ?? both).map((x) => x.name)));
       fs.rmSync(path.join(dir, "runner"), { recursive: true, force: true });
       fs.mkdirSync(path.join(dir, "runner"));
-      // The plan stands where the shard downloads it, under the runner's temporary directory, outside
-      // the tree (the escape plan-downloaded-into-the-checkout): the plan made beside it has another
-      // name, so that a step reading the plan from the tree finds nothing.
-      fs.cpSync(path.join(dir, "plan-made"), path.join(dir, "runner", "mutants-plan"), { recursive: true });
+      // The plan stands where the shard's download step puts it, under the runner's temporary
+      // directory, outside the tree (the escape plan-downloaded-into-the-checkout): the plan made
+      // beside it has another name, so that a step reading the plan from the tree finds nothing.
+      fs.cpSync(path.join(dir, "plan-made"), path.join(dir, "runner", ...planUnder.split("/")), { recursive: true });
       const env = {
         ...process.env,
         PATH: `${path.join(dir, "bin")}${path.delimiter}${process.env.PATH}`,
