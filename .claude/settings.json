@@ -2,8 +2,11 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|PowerShell",
-        "hooks": [{ "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/raw-build-guard.mjs\" || exit 2" }]
+        "matcher": "Bash|PowerShell|Monitor|mcp__terminal__run_in_terminal",
+        "hooks": [
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/raw-build-guard.mjs\" || exit 2" },
+          { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/tools/push-guard.mjs\" || exit 2" }
+        ]
       }
     ]
   }

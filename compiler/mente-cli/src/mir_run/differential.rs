@@ -319,11 +319,7 @@ fn guarded(f: impl FnOnce() -> Outcome) -> Outcome {
     match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(o) => o,
         Err(e) => {
-            let message = e
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
-                .unwrap_or_default();
+            let message = generate::panic_message(&*e);
             Outcome {
                 findings: vec![Finding {
                     kind: Kind::Crash,
@@ -537,6 +533,84 @@ fn group(mode: Mode) -> &'static str {
         Mode::Guarded => "guarded",
         Mode::Refined => "refined",
     }
+}
+
+/// The programs of the seeds a pull request's comparison checks without running, from 400 to
+/// 4399, that the checker refuses for the type it gives a literal, each with the code: root cause
+/// 8 of the nightly triage of 2026-11-21, a generator that types a literal by its neighbour alone
+/// where the checker types it by every operand of its expression. The checker's refusal stands
+/// for these alone, and only for their code; a listed program that checks is a problem too, so
+/// that the list does not outlive its cause. The generator's rework (pull request 204) removes
+/// it. Generation is deterministic per seed, so the list holds while the generator stays.
+pub(crate) const ROOT_CAUSE_8: &[(u64, &str)] = &[
+    (1551, "E0212"),
+    (1706, "E0212"),
+    (1901, "E0212"),
+    (2907, "E0212"),
+    (2984, "E0212"),
+    (3047, "E0212"),
+    (3618, "E0222"),
+    (3661, "E0222"),
+    (3901, "E0212"),
+];
+
+/// The problems of the program of `seed` that `list` does not excuse: the refusals of a code it
+/// lists for the seed are excused, and none other; a listed program that checks is a problem
+/// of its own, so that the list does not outlive its cause.
+fn unexcused(seed: u64, checks: bool, problems: Vec<String>, list: &[(u64, &str)]) -> Vec<String> {
+    let listed: Vec<&str> = list
+        .iter()
+        .filter(|(s, _)| *s == seed)
+        .map(|(_, code)| *code)
+        .collect();
+    let mut out = Vec::new();
+    if checks && !listed.is_empty() {
+        out.push(format!(
+            "seed {}: listed in ROOT_CAUSE_8 as refused, but it checks: remove it from the list",
+            seed
+        ));
+    }
+    let excused = |p: &String| {
+        listed
+            .iter()
+            .any(|code| p.starts_with(&format!("seed {}: {} at ", seed, code)))
+    };
+    out.extend(problems.into_iter().filter(|p| !excused(p)));
+    out
+}
+
+/// The programs of the `count` seeds from `first`, generated and checked, Tier 1 included, but
+/// not run: a line of what they show, and what no generated program may show
+/// (`generate::Checked::problems`, but the refusals of [`ROOT_CAUSE_8`]), with the bars of
+/// every run of `count` programs.
+fn check_generated(first: u64, count: u64) -> (String, Vec<String>) {
+    let outcomes = parallel((first..first + count).collect(), generate::checked);
+    let (mut accepted, mut regenerated) = (0, 0);
+    let mut claims = Vec::new();
+    let mut problems = Vec::new();
+    for c in outcomes {
+        let seed = c.program.seed;
+        accepted += usize::from(c.module.is_some());
+        regenerated += c.regenerated;
+        problems.extend(unexcused(
+            seed,
+            c.module.is_some(),
+            c.problems,
+            ROOT_CAUSE_8,
+        ));
+        claims.extend(c.claims.into_iter().map(|a| (seed, a)));
+    }
+    problems.extend(generate::beyond_the_bars(count, regenerated, &claims));
+    let line = format!(
+        "{} more programs generated and checked, not run, seeds {} ..= {}: {} pass every check; \
+         {} functions generated again for a narrowing that always traps (E0508) or their depth",
+        count,
+        first,
+        (first + count).saturating_sub(1),
+        accepted,
+        regenerated
+    );
+    (line, problems)
 }
 
 /// Generates the programs of seeds `first .. first + count`, each made to pass every check
@@ -1092,10 +1166,50 @@ mod tests {
         );
     }
 
+    /// The list of expected refusals excuses exactly what it names (`unexcused`): a refusal of
+    /// a listed code at a listed seed, and nothing else; and a listed program that checks is a
+    /// problem.
+    #[test]
+    fn test_the_expected_refusals_excuse_only_what_they_name() {
+        let list = [(7, "E0212"), (9, "E0222")];
+        let refused = |seed: u64, code: &str| format!("seed {}: {} at 3:4: no type", seed, code);
+        assert_eq!(
+            unexcused(
+                7,
+                false,
+                vec![refused(7, "E0212"), refused(7, "E0212")],
+                &list
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unexcused(7, false, vec![refused(7, "E0222")], &list),
+            [refused(7, "E0222")]
+        );
+        assert_eq!(
+            unexcused(8, false, vec![refused(8, "E0212")], &list),
+            [refused(8, "E0212")]
+        );
+        assert_eq!(
+            unexcused(9, true, Vec::new(), &list),
+            ["seed 9: listed in ROOT_CAUSE_8 as refused, but it checks: remove it from the list"]
+        );
+        assert_eq!(unexcused(8, true, Vec::new(), &list), Vec::<String>::new());
+        // A refusal for another reason at a listed seed stands, a panic among them.
+        let panicked = "seed 7: the checker panicked: internal error".to_string();
+        assert_eq!(
+            unexcused(7, false, vec![panicked.clone()], &list),
+            [panicked]
+        );
+    }
+
     /// Many generated programs, from the seeds `MENTE_GEN_FIRST_SEED` (0) to
     /// `MENTE_GEN_PROGRAMS` (300) later, each public function called `MENTE_GEN_CALLS` (12)
     /// times, or exhaustively where at most `MENTE_GEN_EXHAUSTIVE` (256) calls cover it; native
-    /// code unless `MENTE_GEN_NATIVE` is 0.
+    /// code unless `MENTE_GEN_NATIVE` is 0. Then the `MENTE_GEN_CHECKED` seeds after them, ten
+    /// times as many and at most 4000 unless it says otherwise, generated and checked but not run;
+    /// 0 checks none, as a replay of one seed wants. A nightly run, whose ranges follow each other,
+    /// so checks seeds the next night's run runs again.
     #[test]
     #[ignore = "generates and runs many programs; CI runs it in release (generated.yml)"]
     fn generated_programs_run_alike_on_the_three_paths() {
@@ -1122,10 +1236,31 @@ mod tests {
         let start = std::time::Instant::now();
         let report = run_generated(first, count, plan, natively);
         println!("{}\nin {:.1?}", report.summary(), start.elapsed());
+        // Then the seeds after them, ten times as many and at most 4000, generated and checked
+        // but not run: the generator's and Tier 1's self-test at a volume the comparison cannot
+        // afford. Pull request 197 merged checking 400 programs, and Tier 1 stopped the compile
+        // on one generated program in about 220 (the compound remainder by a site value); from
+        // 2026-11-16 the nightly met a program the checker refused in one of 250 to 500.
+        let wide = env_or("MENTE_GEN_CHECKED", (10 * count).min(4000));
+        let (checked, wrong) = if wide == 0 {
+            ("no programs checked beyond them".to_string(), Vec::new())
+        } else {
+            let start = std::time::Instant::now();
+            let (line, wrong) = check_generated(first + count, wide);
+            (format!("{}\nin {:.1?}", line, start.elapsed()), wrong)
+        };
+        println!("{}", checked);
+        // Each part is shown whichever fails: a run that differs and a program that does not
+        // check are each one's own finding.
         assert!(
-            report.failures.is_empty(),
-            "replay one with MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1\n{}",
-            report.failures()
+            report.failures.is_empty() && wrong.is_empty(),
+            "replay one with MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1 MENTE_GEN_CHECKED=0\n{}{}",
+            report.failures(),
+            if wrong.is_empty() {
+                String::new()
+            } else {
+                format!("\na generated program does not check:\n{}", wrong.join("\n"))
+            }
         );
         // No program is left out: each passes every check, a function Tier 1 refused for a
         // narrowing that always traps having been generated again, and nothing else refuses
