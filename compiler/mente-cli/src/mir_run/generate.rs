@@ -1300,6 +1300,9 @@ struct Gen {
     helpers: Vec<String>,
     /// The bindings those conjuncts declare so far, which name each.
     helper_bindings: usize,
+    /// Whether what is being generated stands in an arm of a match of more arms than
+    /// [`MAX_FULL_ARMS`], where no such match is written again ([`Gen::wide_arms`]).
+    wide_arm: bool,
 }
 
 impl Gen {
@@ -1335,6 +1338,7 @@ impl Gen {
             no_candidates: Rng::new(seed),
             helpers: Vec::new(),
             helper_bindings: 0,
+            wide_arm: false,
         }
     }
 
@@ -1625,7 +1629,7 @@ impl Gen {
                 // A small range covered by its literals alone, now and then, and an 8-bit type
                 // too, which a scrutinee is narrowed into ([`match-scrutinee-narrowing`]).
                 if (span < 4 && self.rng.chance(60))
-                    || (span == 255 && !self.relates() && self.rng.chance(whole))
+                    || (span == 255 && !self.relates() && !self.wide_arm && self.rng.chance(whole))
                 {
                     let mut out = Vec::new();
                     let mut n = r.lo;
@@ -1981,17 +1985,31 @@ impl Gen {
     /// a default value instead. `None` when no such `match` comes of it.
     fn match_value(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
         // Now and then an 8-bit type, which literals alone can cover: here each arm is one
-        // value, where a statement's 256 arms would each be a block.
-        let read = if self.rng.chance(12) {
+        // value, where a statement's 256 arms would each be a block. Its arms no longer hold
+        // such a match again (`Gen::wide_arms`), so a value writes one where those did. Half the
+        // time it reads an arithmetic value, which it narrows into its type and covers whole
+        // without `_` ([`match-scrutinee-narrowing`]), as the matches nested in arms mostly did.
+        let eight = self.rng.chance(25);
+        let read = if eight {
             Ty::Int(*self.rng.pick(&[INTS[0], INTS[6]]))
         } else {
             self.read_ty()
         };
-        let (s, range) = self.scrutinee(&read, depth)?;
+        let arithmetic = match &read {
+            Ty::Int(t) if eight && self.rng.chance(50) => self
+                .int_scrutinee(*t, depth + 1)
+                .map(|(e, u)| (self.declared_range(&e).unwrap_or(u.range()), e)),
+            _ => None,
+        };
+        let (s, range) = match arithmetic {
+            Some((r, e)) => (e, Some(r)),
+            None => self.scrutinee(&read, depth)?,
+        };
         let pats = self.patterns(&read, range, 75)?;
         let root = self.root(&s);
         let mut arms = Vec::new();
         let mut hull: Option<R> = None;
+        let wide = self.wide_arms(&s, pats.len());
         for p in &pats {
             self.scopes.push(Vec::new());
             let ids = self.bind_pattern(p);
@@ -2031,10 +2049,40 @@ impl Gen {
             }
             arms.push((self.pattern_text(p, &ids), v));
         }
+        self.end_wide_arms(wide);
         if hull.is_some_and(|h| !h.fits()) {
             return None;
         }
         Some((E::Match(Box::new(s), arms), hull))
+    }
+
+    /// Before the arms of a match on `s` of `arms` arms: past [`MAX_FULL_ARMS`], as only a match that
+    /// covers an 8-bit type by its literals has, its arms read no binding `s` reads, and hold no such
+    /// match again. Such an arm is one of 256 that a call takes one of: a binding the scrutinee reads,
+    /// which the arm's pattern bounds, narrowed in an arm, is a narrowing Tier 1 proves always traps
+    /// where few calls reach, and a match of 256 arms in each of 256 multiplies a function's text.
+    /// What [`Gen::end_wide_arms`] is given back.
+    fn wide_arms(&mut self, s: &E, arms: usize) -> Option<(bool, usize)> {
+        if arms <= MAX_FULL_ARMS {
+            return None;
+        }
+        let read: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| names(s, &|n| n == self.binds[id].name))
+            .collect();
+        let saved = (self.wide_arm, self.exclude.len());
+        self.wide_arm = true;
+        self.exclude.extend(read);
+        Some(saved)
+    }
+
+    /// After the arms [`Gen::wide_arms`] began.
+    fn end_wide_arms(&mut self, saved: Option<(bool, usize)>) {
+        if let Some((wide, excluded)) = saved {
+            self.wide_arm = wide;
+            self.exclude.truncate(excluded);
+        }
     }
 
     /// A binding of a small refined range, `val q: u8[0..k] = x % k` for a name `x` that is never
@@ -2078,6 +2126,7 @@ impl Gen {
         out.extend(first);
         let root = self.root(&s);
         let mut arms = Vec::new();
+        let wide = self.wide_arms(&s, pats.len());
         for p in &pats {
             self.scopes.push(Vec::new());
             let ids = self.bind_pattern(p);
@@ -2090,6 +2139,7 @@ impl Gen {
             self.scopes.pop();
             arms.push((self.pattern_text(p, &ids), body));
         }
+        self.end_wide_arms(wide);
         out.push(S::Match(s, arms));
         out
     }
@@ -2906,7 +2956,7 @@ impl Gen {
         let zero = b.r == R::point(Num::ZERO)
             || b.k == Some(Num::ZERO)
             || self.fact(&b.e) == Some(R::point(Num::ZERO));
-        if zero && !(alone && b.cls == Cls::Lit) && !self.rng.chance(90) {
+        if zero && !(alone && b.cls == Cls::Lit) && !self.rng.chance(80) {
             self.zero_divisor = true;
             self.doomed = true;
             return b;
@@ -5375,6 +5425,7 @@ impl Gen {
     fn function(&mut self, index: usize, public: bool) -> String {
         self.binds.clear();
         self.exclude.clear();
+        self.wide_arm = false;
         self.pending.clear();
         self.scopes = vec![Vec::new()];
         self.names = 0;
@@ -6223,6 +6274,9 @@ pub struct Checked {
     /// Tier 1; a program that still has one after [`MAX_ROUNDS`]; and a loop Tier 1 replays
     /// from its memo other than analysing it again gives (`mente_sema::tier1_loop_replays`).
     pub problems: Vec<String>,
+    /// The most expressions and statements a function of any attempt held, and which function
+    /// that was, by its seed and name ([`too_large`]).
+    pub largest: (usize, String),
 }
 
 /// A narrowing Tier 1 proved always traps where it is reached (`E0508`), in a generated
@@ -6255,6 +6309,48 @@ const EDGE_OPERAND: u128 = 1 << 61;
 /// ([`Gen::relates`]): with its calls' arguments and its fields they stay well within the
 /// variables Tier 1 relates.
 const RELATED: usize = 30;
+
+/// The most arms a `match` writes with no rule of its own. Past them, as only a match that covers
+/// an 8-bit type by its literals has, 256, its arms read no binding its scrutinee reads and hold no
+/// such match again ([`Gen::wide_arms`]): arms that held one multiplied a function's text 256 times
+/// a level, to 201880 expressions and statements over seeds 0 to 2999, and an arm that narrowed a
+/// binding of the scrutinee, which its pattern bounds, held a narrowing Tier 1 proves always traps
+/// where no call of a few hundred reaches (the nightly of 2026-11-22, whose claims never reached sat
+/// in four such functions, 1219 of them in one).
+const MAX_FULL_ARMS: usize = 16;
+
+/// The most expressions and statements a generated function holds, of every attempt the
+/// generator writes. Of the 11670 functions of seeds 0 to 2999 the largest holds 17414; while
+/// the arms of a match of 256 arms could hold another such match (`MAX_FULL_ARMS`), one held
+/// 201880, multiplied 256 times a level. Past the bound, a function's text multiplies again.
+pub const MAX_FUNCTION_NODES: usize = 50_000;
+
+/// Each function of `program` that holds more expressions and statements than `most`, as a
+/// problem, and the most any of them holds, with which function that is.
+fn too_large(program: &Program, most: usize) -> (Vec<String>, (usize, String)) {
+    let mut over = Vec::new();
+    let mut largest = (0, String::new());
+    let Ok(module) = mente_syntax::parse_module(&program.text) else {
+        return (over, largest);
+    };
+    for f in mente_sema::parse_qualified(&program.text, &module)
+        .into_iter()
+        .filter_map(|p| p.syntax)
+    {
+        let size = f.tree.exprs.len() + f.tree.stmts.len();
+        if size > largest.0 {
+            largest = (size, format!("seed {} `{}`", program.seed, f.name));
+        }
+        if size > most {
+            over.push(format!(
+                "seed {}: `{}` holds {} expressions and statements, above the {} a generated \
+                 function may hold: its text multiplies",
+                program.seed, f.name, size, most
+            ));
+        }
+    }
+    (over, largest)
+}
 
 /// How many times a program's functions are generated again before it is given up.
 const MAX_ROUNDS: usize = 12;
@@ -6348,9 +6444,22 @@ pub fn checked(seed: u64) -> Checked {
     let mut claims = Vec::new();
     let mut regenerated = 0;
     let mut problems = Vec::new();
+    let mut largest = (0, String::new());
     for round in 0.. {
         let program = generated(seed, &attempts);
+        // Every attempt the generator writes is held to the bound of a function's size, those
+        // Tier 1 refuses among them, whose claims the reference interpreter checks.
+        let (over, most) = too_large(&program, MAX_FUNCTION_NODES);
+        for p in over {
+            if !problems.contains(&p) {
+                problems.push(p);
+            }
+        }
+        if most.0 > largest.0 {
+            largest = most;
+        }
         let tried = attempts.clone();
+        let held = largest.clone();
         let refused = move |program, claims, problems| Checked {
             program,
             module: None,
@@ -6358,6 +6467,7 @@ pub fn checked(seed: u64) -> Checked {
             regenerated,
             problems,
             attempts: tried,
+            largest: held,
         };
         let diagnostics = match panic::catch_unwind(|| mente_sema::check_program(&program.text)) {
             Ok(Ok(module)) => {
@@ -6388,6 +6498,7 @@ pub fn checked(seed: u64) -> Checked {
                         regenerated,
                         problems,
                         attempts,
+                        largest,
                     };
                 }
                 if round == MAX_ROUNDS {
@@ -8295,6 +8406,28 @@ mod tests {
             literals_as_written(&written(start..start + 1, "u16"), &module),
             ["seed 7: `~` at byte 46 was written in u16, and no expression of the checked program spans it"]
         );
+    }
+
+    /// A function of more expressions and statements than its bound is a problem, named with its
+    /// size (`too_large`), and the largest is reported whatever its size: `f` holds the name `a`,
+    /// the literal `1`, their sum and the `return`, four, and `g` one, its literal.
+    #[test]
+    fn test_a_function_past_the_bound_of_its_size_is_a_problem() {
+        let text = "module m\npub fn f(a: u8) -> u16 {\n  return a + 1\n}\npub fn g() -> u8 = 0\n";
+        let program = Program {
+            seed: 9,
+            mode: Mode::Plain,
+            functions: Vec::new(),
+            text: text.to_string(),
+            bits: Vec::new(),
+        };
+        let (over, largest) = too_large(&program, 3);
+        assert_eq!(
+            over,
+            ["seed 9: `f` holds 4 expressions and statements, above the 3 a generated function may hold: its text multiplies"]
+        );
+        assert_eq!(largest, (4, "seed 9 `f`".to_string()));
+        assert_eq!(too_large(&program, 4).0, Vec::<String>::new());
     }
 
     /// A generated program keeps where each bit operation of literals alone lies and the type it
