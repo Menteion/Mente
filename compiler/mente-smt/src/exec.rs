@@ -105,6 +105,8 @@ struct Exec<'m> {
     callers: Vec<Frame<'m>>,
     sites: Vec<Site>,
     unencoded: Vec<(Span, &'static str)>,
+    /// Each place where a path ends past the stack budget.
+    overflowed: Vec<Span>,
     /// Whether checks are sites: not on the entry, whose checks the inputs are taken to pass.
     recording: bool,
     /// The paths cut off past the bounds.
@@ -305,6 +307,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             params: Vec::new(),
             sites: Vec::new(),
             unencoded: Vec::new(),
+            overflowed: Vec::new(),
             admitted: fals,
             cut: tru,
             cut_past_bound: false,
@@ -331,6 +334,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
         callers: Vec::new(),
         sites: Vec::new(),
         unencoded: Vec::new(),
+        overflowed: Vec::new(),
         recording: false,
         cut: Vec::new(),
         lacked: Vec::new(),
@@ -371,6 +375,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             params,
             sites: Vec::new(),
             unencoded: x.unencoded,
+            overflowed: x.overflowed,
             admitted: fals,
             cut: tru,
             cut_past_bound: false,
@@ -387,7 +392,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
     let admitted = x.active;
     // A call from outside the program counts the function's own frame against an empty stack:
     // a frame past the budget traps at the function's name, whatever the arguments (item 25).
-    x.overflows(entry, false);
+    x.overflows(entry, false, f.syntax.name_span);
     x.run_body();
     let mut cuts = x.cut.clone();
     cuts.extend(x.lacked.iter().copied());
@@ -422,6 +427,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
         params,
         sites: x.sites,
         unencoded: x.unencoded,
+        overflowed: x.overflowed,
         admitted,
         cut,
         cut_past_bound,
@@ -581,8 +587,9 @@ impl<'m> Exec<'m> {
     /// Whether a call of `callee` runs out of stack (`spec/core-calculus.md`, item 25): the
     /// frames of the calls begun and not returned, if `nested`, and the callee's together exceed
     /// the budget. The frames are the checker's and a path's calls are known, so where they do,
-    /// every run that reaches the call traps there: the path ends, neither a site nor a cut.
-    fn overflows(&mut self, callee: usize, nested: bool) -> bool {
+    /// every run that reaches the call traps there: the path ends, neither a site nor a cut, and
+    /// `at`, the call or the function's name, is listed.
+    fn overflows(&mut self, callee: usize, nested: bool, at: Span) -> bool {
         let frame = |i: usize| {
             self.module
                 .functions
@@ -600,6 +607,9 @@ impl<'m> Exec<'m> {
             0
         };
         if in_use.saturating_add(frame(callee)) > self.module.budget {
+            if !self.overflowed.contains(&at) {
+                self.overflowed.push(at);
+            }
             self.active = self.t.bool(false);
             return true;
         }
@@ -1092,7 +1102,7 @@ impl<'m> Exec<'m> {
             }
         }
         // The call is counted against the stack budget before its arguments are narrowed.
-        if self.overflows(func, true) {
+        if self.overflows(func, true, span) {
             return self.default(&shape);
         }
         let depth = self

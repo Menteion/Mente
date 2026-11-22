@@ -232,6 +232,8 @@ pub struct Written {
     pub no_site: usize,
     /// Places of constructs the encoding lacks.
     pub unencoded: usize,
+    /// Places where a path ends past the stack budget.
+    pub overflowed: usize,
     /// Files whose module does not check.
     pub unchecked: usize,
     /// Obligations of Tier 1 with no site.
@@ -325,6 +327,13 @@ fn independent_with(
                     shown, span.line, span.col, what, cf.syntax.name
                 );
                 w.unencoded += 1;
+            }
+            for span in &enc.overflowed {
+                println!(
+                    "past the stack budget: {}:{}:{}: a path of `{}` ends here, as its runs trap",
+                    shown, span.line, span.col, cf.syntax.name
+                );
+                w.overflowed += 1;
             }
             // What the encoding made of each trap of each erased check, in Tier 1's order.
             let mut classes: Vec<(Key, Vec<Class>)> =
@@ -1435,7 +1444,7 @@ pub fn cmd_independent(args: &[String]) {
     match independent(&files, &out) {
         Ok(w) => {
             println!(
-                "Wrote {} independent queries for {} functions of {} files to `{}`. Of the checks Tier 1 erased that no input reaches, {} are unreachable, {} lie past the bounds and {} past a construct the encoding lacks; {} have no site, lying within such a construct. {} places hold a construct the encoding lacks, {} files do not check, {} obligations have no site where they should.",
+                "Wrote {} independent queries for {} functions of {} files to `{}`. Of the checks Tier 1 erased that no input reaches, {} are unreachable, {} lie past the bounds and {} past a construct the encoding lacks; {} have no site, lying within such a construct. {} places hold a construct the encoding lacks, {} places end a path past the stack budget, {} files do not check, {} obligations have no site where they should.",
                 w.queries,
                 w.functions,
                 w.files,
@@ -1445,6 +1454,7 @@ pub fn cmd_independent(args: &[String]) {
                 w.beyond_lacked,
                 w.no_site,
                 w.unencoded,
+                w.overflowed,
                 w.unchecked,
                 w.unmatched
             );
@@ -3023,6 +3033,27 @@ mod tests {
         let runs = agreement(src, &[]);
         assert!(runs.wrong.is_empty(), "{:#?}", runs.wrong);
         assert!(runs.compared > 0, "no input was compared");
+        // Each place a path ends past the budget is listed, and the export counts them: huge's
+        // name and past's, each of whose frames passes it, and call's call of huge.
+        let module = module_of(&checked);
+        let places =
+            |name: &str| mente_smt::encode(&module, checked.index(name).unwrap()).overflowed;
+        assert_eq!(places("call").len(), 1);
+        assert_eq!(
+            places("past"),
+            vec![
+                checked.functions[checked.index("past").unwrap()]
+                    .as_ref()
+                    .unwrap()
+                    .syntax
+                    .name_span
+            ]
+        );
+        let dir = scratch("budget");
+        let file = dir.join("budget.mn");
+        fs::write(&file, src).unwrap();
+        let w = independent(&[file], &dir.join("out")).unwrap();
+        assert_eq!(w.overflowed, 3);
     }
 
     /// A check none of whose sites fails is unreachable only where no path of its function is

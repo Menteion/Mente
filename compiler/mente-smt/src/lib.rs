@@ -327,6 +327,11 @@ pub struct Encoding {
     pub sites: Vec<Site>,
     /// Each construct the encoding lacks where a path reaches it, with its place.
     pub unencoded: Vec<(Span, &'static str)>,
+    /// Each place where a path ends past the stack budget (`spec/core-calculus.md`, item 25): a
+    /// call whose frames exceed it, or the function's name, where its own frame does. A path
+    /// ended there is neither a site nor a cut, so that checks past it are no query; the export
+    /// lists each place, so that a wrong count shows.
+    pub overflowed: Vec<Span>,
     /// The inputs lie in their parameters' types and refinements, and the function's `requires`
     /// and measures hold of them.
     pub admitted: T,
