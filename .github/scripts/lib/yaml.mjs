@@ -1,5 +1,5 @@
 // A reader for the subset of YAML the workflows of .github/workflows use, so that the workflow
-// policy test (policy.test.mjs) reads them as data and not line by line, with no dependency
+// policy (.github/scripts/policy/) reads them as data and not line by line, with no dependency
 // added. It reads block mappings and sequences, plain, quoted and block scalars (`|`, `>` and
 // their chomping indicators), flow sequences of scalars, and comments. Anything else (anchors,
 // aliases, tags, flow mappings, several documents, a plain scalar continued on the next line)

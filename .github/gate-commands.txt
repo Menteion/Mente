@@ -2,7 +2,7 @@
 # `<workflow file>#<job id>: <command>`. Each is a whole logical line of a run: script of its job,
 # its continuation lines joined by one space, with nothing added: no argument, no redirection, no
 # `|| true`. The one suffix allowed is ` || status=$?` before an `exit "$status"` later in the script.
-# The workflow policy test (.github/scripts/policy.test.mjs) requires each line in a step of its job
+# The workflow policy (.github/scripts/policy/) requires each line in a step of its job
 # that runs whenever the job does, with no condition in a job without a watch and with the watch's
 # own in an instrument job, and that may not fail quietly: deleting the step, skipping it, changing
 # the line or letting it continue on error fails the policy. Every job that builds in release proves
@@ -45,7 +45,7 @@ ci.yml#tier1-latency: node .github/scripts/build-time-code.mjs
 ci.yml#tier1-latency: MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
 ci.yml#tier1-latency: bash .github/scripts/overflow-proof.sh
 ci.yml#docs: node .github/scripts/policy-collect.mjs
-ci.yml#docs: node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs
+ci.yml#docs: node --test ".github/scripts/policy/*.test.mjs" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs
 ci.yml#docs: node .github/scripts/action-pins.mjs
 ci.yml#docs: node .github/scripts/build-time-code.mjs --before-toolchain
 ci.yml#docs: node .github/scripts/build-time-code.mjs
