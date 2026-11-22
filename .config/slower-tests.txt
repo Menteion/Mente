@@ -1,0 +1,8 @@
+# The tests whose longer time a change accepts, one a line as `<binary id> <test name> <seconds>`,
+# with the test as nextest prints it and the time it now takes on the slower Linux runner. The
+# required Rust jobs judge each test's time against main's own green runs on the same runner, and
+# fail a change under which a test takes more than 1.5 times its time there, at the run's speed,
+# past 10 s (.github/scripts/lib/test-times.mjs). A test listed here is judged against at least the
+# time it lists. Name the reason in a comment, and the change that made the test slower; review sees
+# every line, since CODEOWNERS gives the file to its owner. A line can go once main's runs take the
+# listed time anyway.

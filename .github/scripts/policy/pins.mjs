@@ -36,7 +36,7 @@ export function jobDigest(doc, job) {
 export const PINNED_FILES = new Map([
   // The policy's list of its own files: a module dropped from it, or the total of checks lowered,
   // changes this digest too.
-  [".github/scripts/policy/modules.json", "669af665092a33c2ea782dfeecfaf3b6c47b3318bee0627f1f1aef0be18a368f"],
+  [".github/scripts/policy/modules.json", "d9273d06591457eb3a1bc6c2461aa3f4df6d0556f34df58d2a259fff17d9bec7"],
   [".github/scripts/limits.sh", "40747e4a7344895ce42dd902adb28dd669809d4dd6821d3c1e01921552669ed0"],
   [".github/scripts/memory-guard.sh", "c3c629010f58d39682fa06353305181cf7d1064d2b07abefd6885033045630d1"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
@@ -50,6 +50,8 @@ export const PINNED_FILES = new Map([
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
+  [".github/scripts/lib/test-times.mjs", "dfc1c16358104f39dd7a36c7ebb80eae2d71e9f90b6aa63971c9bdc69dce96b8"],
+  [".github/scripts/test-times.mjs", "d7b8735fb1d59902d72fae9d2acb91a8e8c0e5d8e0e1b5dd49411bd6d792f75a"],
   [".github/scripts/tools.sh", "dee23b6f996a8b6772446056aa448ad2a35e60563a3e0320e1855b6a420e90d0"],
   [".github/scripts/test-sandbox.sh", "9ac640fe36800bc80902151031552ff8f218c104f03c85a3a79951df880a7bbd"],
   // The sandbox's one program, cargo's runner and the namespace's first process, which
@@ -110,7 +112,7 @@ export const PINNED_FILES = new Map([
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 export const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
+  ["ci.yml#rust", "772f48f9c94ef55b0b7e6ba80832863efb86fe4fd4131a01f86a5b8b56576649"],
   ["mutants.yml#in-diff", "6b54eaf7d853b04bf84a06306bee5d6d0195bf17477bd7e2c6be4ceeaf9526ad"],
   ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],

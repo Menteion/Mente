@@ -3,7 +3,9 @@
 
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import zlib from "node:zlib";
 import { doctestProblems, problems as testListProblems, overrideTests } from "../lib/test-list.mjs";
+import * as times from "../lib/test-times.mjs";
 import { PINNED_JOBS } from "./pins.mjs";
 import { filesUnder, read, tomlSubset, workspace } from "./repo.mjs";
 import { TESTING_JOBS } from "./sandbox.mjs";
@@ -13,7 +15,7 @@ import { logicalLines, stepKey, steps, workflows } from "./workflows.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 3;
+const FLOOR = 4;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -41,6 +43,7 @@ const NEXTEST_TABLES = new Map([
     },
   ],
   ["profile.ci", { array: false, keys: ["fail-fast"] }],
+  ["profile.ci.junit", { array: false, keys: ["path"] }],
   ["profile.mutants", { array: false, keys: ["fail-fast"] }],
   ["test-groups", { array: false, keys: ["all-cores"] }],
 ]);
@@ -52,6 +55,7 @@ const NEXTEST_VALUES = new Map([
   ["profile.default/leak-timeout", '{ period = "100ms", result = "fail" }'],
   ["profile.default.overrides/slow-timeout", '{ period = "60s", terminate-after = 3 }'],
   ["profile.ci/fail-fast", "false"],
+  ["profile.ci.junit/path", '"junit.xml"'],
   ["profile.mutants/fail-fast", "true"],
   ["profile.default.overrides/test-group", '"all-cores"'],
   ["profile.default.overrides/threads-required", '"num-test-threads"'],
@@ -314,4 +318,196 @@ check("the list of tests is read as nextest writes it", () => {
   assert.equal(doctestProblems(`${none}   Doc-tests mente_sema\ncompiler/mente-sema/src/lib.rs - f (line 3): test\n1 test, 0 benchmarks\n`).length, 1, "a library with a doctest");
   assert.equal(doctestProblems("   Doc-tests mente_ast\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n").length, 1, "a library without its count");
   assert.equal(doctestProblems("   Compiling mente-ast\n").length, 1, "no library at all");
+});
+
+/// A zip archive of one file, stored or deflated, as upload-artifact writes one.
+function zipOf(name, text, deflate) {
+  const raw = Buffer.from(text, "utf8");
+  const data = deflate ? zlib.deflateRawSync(raw) : raw;
+  const nameBytes = Buffer.from(name, "utf8");
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(deflate ? 8 : 0, 8);
+  local.writeUInt32LE(data.length, 18);
+  local.writeUInt32LE(raw.length, 22);
+  local.writeUInt16LE(nameBytes.length, 26);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(deflate ? 8 : 0, 10);
+  central.writeUInt32LE(data.length, 20);
+  central.writeUInt32LE(raw.length, 24);
+  central.writeUInt16LE(nameBytes.length, 28);
+  central.writeUInt32LE(0, 42);
+  const dirAt = local.length + nameBytes.length + data.length;
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + nameBytes.length, 12);
+  end.writeUInt32LE(dirAt, 16);
+  return Buffer.concat([local, nameBytes, data, central, nameBytes, end]);
+}
+
+/// A JUnit report as nextest writes one, of the times given by `<binary id> <test name>`.
+function junitOf(timesById) {
+  const suites = new Map();
+  for (const [id, secs] of Object.entries(timesById)) {
+    const [binary, name] = id.split(" ");
+    suites.set(binary, [...(suites.get(binary) ?? []), `    <testcase name="${name}" classname="${binary}" timestamp="2026-11-22T06:20:00.000+00:00" time="${secs}">\n    </testcase>`]);
+  }
+  const body = [...suites].map(([binary, cases]) => `  <testsuite name="${binary}" tests="${cases.length}" disabled="0" errors="0" failures="0">\n${cases.join("\n")}\n  </testsuite>`);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="nextest-run" tests="1" failures="0" errors="0" uuid="u" timestamp="t" time="1">\n${body.join("\n")}\n</testsuites>\n`;
+}
+
+check("each test's time is judged against main's own green runs on its runner, at the run's speed", async () => {
+  // The report nextest writes is the one the check reads, and the Rust jobs record it, then judge it,
+  // right after their tests, with read access to the actions alone added to the job.
+  const junitPath = /"([^"]*)"/.exec(NEXTEST_VALUES.get("profile.ci.junit/path"))[1];
+  assert.equal(times.REPORT, `target/nextest/ci/${junitPath}`, "lib/test-times.mjs reads another report than the ci profile's");
+  const ci = workflows().find((w) => w.file === times.WORKFLOW);
+  const rust = ci.doc.jobs.rust;
+  const all = steps(rust);
+  const testsAt = all.findIndex((s) => s.run === NEXTEST_STEP);
+  const record = all[testsAt + 1];
+  const judgeStep = all[testsAt + 2];
+  assert.equal(record?.name, times.RECORD_STEP, `the step right after the Rust jobs' tests is not ${times.RECORD_STEP}`);
+  assert.match(String(record.uses), /^actions\/upload-artifact@[0-9a-f]{40}$/, "the times are recorded other than by upload-artifact");
+  assert.deepEqual(record.with, { name: times.artifactName("${{ matrix.os }}"), path: times.REPORT, "if-no-files-found": "error" }, "the times are recorded under another name, from another file, or not always");
+  assert.equal(judgeStep?.run, "node .github/scripts/test-times.mjs\n/usr/bin/bash .github/scripts/tools.sh verify\n", "the step after the record does not judge the times as test-times.mjs does");
+  assert.deepEqual(judgeStep.env, { GH_TOKEN: "${{ github.token }}", TEST_TIMES_RUNNER: "${{ matrix.os }}" }, "the step that judges the times has another environment than its token and its runner");
+  assert.deepEqual(Object.keys(judgeStep).sort(), ["env", "name", "run"], "the step that judges the times carries more than its name, environment and script");
+  assert.deepEqual(rust.permissions, { contents: "read", actions: "read" }, "the Rust jobs hold other permissions than reading the contents and the actions");
+  // Every runner of the Rust jobs is judged or recorded alone, never both.
+  const runners = rust.strategy.matrix.include.map((m) => m.os);
+  for (const r of runners) assert.ok(times.JUDGED_RUNNERS.includes(r) !== times.RECORDED_RUNNERS.includes(r), `${r}, a runner of the Rust jobs, is neither judged nor recorded alone, or both`);
+  assert.ok(times.JUDGED_RUNNERS.length > 0 && times.JUDGED_RUNNERS.every((r) => runners.includes(r)), "a judged runner that no Rust job runs on");
+  assert.ok(times.recordsTimes(read(`.github/workflows/${times.WORKFLOW}`)), "ci.yml's step that records the times is not one recordsTimes reads");
+  assert.ok(!times.recordsTimes(read(`.github/workflows/${times.WORKFLOW}`).replace(times.RECORD_STEP, "Upload the tests")), "recordsTimes reads a workflow without the step as one with it");
+  assert.deepEqual(times.acceptedTimes(read(".config/slower-tests.txt")).size >= 0, true);
+
+  // The report as nextest writes it: a failed, errored or skipped test has no time of its own.
+  const xml = '<testsuites><testsuite name="mente-cli::reproducible" tests="3">\n<testcase name="a&lt;b" classname="mente-cli::reproducible" time="30.101">\n</testcase>\n<testcase name="failed" classname="mente-cli::reproducible" time="2"><failure message="x"/></testcase>\n<testcase name="skipped" classname="mente-cli::reproducible" time="0"><skipped/></testcase>\n</testsuite><testsuite name="mente-sema"><testcase name="t" time="1.5"/></testsuite></testsuites>';
+  assert.deepEqual([...times.junitTimes(xml)], [["mente-cli::reproducible a<b", 30.101], ["mente-sema t", 1.5]]);
+  assert.throws(() => times.junitTimes('<testsuite><testcase name="t" time="1"/></testsuite>'), /binary, name and time/);
+  assert.deepEqual([...times.acceptedTimes("# why\nmente-cli::reproducible test_mir_is_reproducible 30 # pull request 183\n\n")], [["mente-cli::reproducible test_mir_is_reproducible", 30]]);
+  for (const bad of ["a b\n", "a b 0\n", "a b c\n", "a b 3 4\n"]) assert.throws(() => times.acceptedTimes(bad), /slower-tests\.txt:1/, bad);
+
+  // Planted: the run's speed taken out, a test three times slower beside it fails; one under the
+  // floor does not; a test main has no time for fails past NEW_LIMIT; an accepted time holds.
+  const base = new Map(Array.from({ length: 30 }, (_, k) => [`b t${k}`, 2 + k]));
+  base.set("b slow", 12);
+  const at = (speed, changes = {}) => new Map([...base].map(([id, s]) => [id, (changes[id] ?? 1) * s * speed]));
+  assert.deepEqual(times.judge(at(2), base).failed, [], "a runner twice as slow, every test with it, fails a test");
+  assert.deepEqual(times.judge(at(0.5), base).failed, [], "a runner twice as fast, every test with it, fails a test");
+  assert.deepEqual(times.judge(at(0.5, { "b slow": 2 }), base).failed.map((r) => r.id), ["b slow"], "a test twice as slow on a runner twice as fast passes");
+  assert.deepEqual(times.judge(at(1.8, { "b slow": 3 }), base).failed.map((r) => r.id), ["b slow"], "a test three times slower at the run's speed passes");
+  assert.deepEqual(times.judge(at(1, { "b t1": 3 }), base).failed, [], "a test under the floor fails");
+  assert.ok(Math.abs(times.judge(at(1.8), base).speed - 1.8) < 1e-9);
+  const fresh = (secs) => new Map([...at(1), ["b new", secs]]);
+  assert.deepEqual(times.judge(fresh(times.NEW_LIMIT - 1), base).failed, [], "a new test under NEW_LIMIT fails");
+  assert.deepEqual(times.judge(fresh(times.NEW_LIMIT + 1), base).failed.map((r) => r.id), ["b new"], "a new test past NEW_LIMIT passes");
+  assert.deepEqual(times.judge(fresh(30), base, new Map([["b new", 25]])).failed, [], "an accepted new test fails");
+  assert.deepEqual(times.judge(at(1, { "b slow": 3 }), base, new Map([["b slow", 30]])).failed, [], "an accepted time fails");
+  assert.deepEqual(times.judge(at(1, { "b slow": 3 }), base, new Map([["b slow", 20]])).failed.map((r) => r.id), ["b slow"], "a time past what is accepted passes");
+  // With fewer than MIN_COMMON tests to read the run's speed from, it is 1.
+  assert.equal(times.speedOf(new Map([["b a", 4]]), new Map([["b a", 2]])).speed, 1);
+  // A baseline is the median of main's runs: one slow run of three moves it not at all.
+  assert.deepEqual([...times.baselineTimes([new Map([["b x", 10]]), new Map([["b x", 30]]), new Map([["b x", 11]])])], [["b x", 11]]);
+
+  // Pull request 183, against main before it, from the Rust jobs' logs: it fails on both Linux
+  // runners, by the tests the corpus program it added made slower; and two pairs of main's own runs,
+  // with nothing changed but the runner's speed, pass.
+  const runs = JSON.parse(read(".github/scripts/fixtures/test-times/runs.json"));
+  const map = (o) => new Map(Object.entries(o));
+  const failedOf = (p) => times.judge(map(p.current), map(p.baseline)).failed.map((r) => r.id).sort();
+  assert.deepEqual(failedOf(runs.pr183["x86-64 Linux"]), [
+    "mente-cli::bin/mn tests::test_every_loop_replayed_from_the_memo_gives_what_its_analysis_gives",
+    "mente-cli::reproducible test_diagnostics_are_reproducible",
+    "mente-cli::reproducible test_mir_is_reproducible",
+  ]);
+  assert.deepEqual(failedOf(runs.pr183["AArch64 Linux"]), [
+    "mente-cli::bin/mn tests::test_every_loop_replayed_from_the_memo_gives_what_its_analysis_gives",
+    "mente-cli::conformance test_conformance_suite",
+    "mente-cli::reproducible test_diagnostics_are_reproducible",
+    "mente-cli::reproducible test_mir_is_reproducible",
+  ]);
+  for (const [what, p] of Object.entries(runs.noise)) assert.deepEqual(failedOf(p), [], `main's own runs, ${what}`);
+
+  // The runs a baseline may come from: green pushes to main of this repository alone, newest first,
+  // never the run judged, one of its commit, a pull request's, the queue's or a fork's.
+  const repository = "o/r";
+  const run = (id, more) => ({ id, event: "push", head_branch: "main", status: "completed", conclusion: "success", head_sha: `s${id}`, created_at: `2026-11-2${id}`, head_repository: { full_name: repository }, repository: { full_name: repository }, ...more });
+  const listed = [
+    run(1),
+    run(5),
+    run(2, { event: "pull_request" }),
+    run(3, { head_branch: "gh-readonly-queue/main/pr-1-x" }),
+    run(4, { conclusion: "failure" }),
+    run(6, { head_repository: { full_name: "fork/r" } }),
+    run(7),
+    run(8, { head_sha: "judged" }),
+  ];
+  assert.deepEqual(times.baselineRuns(listed, { runId: 7, sha: "judged", repository }).map((r) => r.id), [5, 1]);
+
+  // The archive upload-artifact writes, stored or deflated; one of two files is refused.
+  for (const deflate of [false, true]) assert.equal(times.unzipOne(zipOf("junit.xml", xml, deflate), zlib.inflateRawSync), xml);
+  const two = zipOf("junit.xml", xml, false);
+  two.writeUInt16LE(2, two.length - 22 + 10);
+  assert.throws(() => times.unzipOne(two, zlib.inflateRawSync), /2 files/);
+
+  // The whole check over a fake GitHub: the Windows runner recorded alone; a runner neither judged
+  // nor recorded refused; main's first run with the guard, whose workflow had no record, passes
+  // once; a main that records times but left none fails; a slower test fails, and the judged
+  // run's own artifact, which would hide it, is never read; a run within its times passes.
+  const guarded = read(`.github/workflows/${times.WORKFLOW}`);
+  const unguarded = guarded.replace(times.RECORD_STEP, "Upload nothing");
+  const base183 = runs.pr183["x86-64 Linux"];
+  const fake = ({ current, workflow = guarded, artifacts = {}, runsListed = [run(1), run(5), run(7)] }) => {
+    const out = [];
+    const err = [];
+    const io = {
+      read: (f) => (f === times.REPORT ? junitOf(current) : read(f)),
+      exists: (f) => f === ".config/slower-tests.txt",
+      out: (s) => out.push(s),
+      err: (s) => err.push(s),
+      summary: () => {},
+      sleep: async () => {},
+      inflateRaw: zlib.inflateRawSync,
+      fetch: async (url) => {
+        const p = url.replace("https://api.github.com/", "");
+        const ok = (body) => ({ ok: true, status: 200, json: async () => body, arrayBuffer: async () => body });
+        if (p.startsWith(`repos/${repository}/actions/workflows/${times.WORKFLOW}/runs?`)) return ok({ workflow_runs: runsListed });
+        const arts = /^repos\/o\/r\/actions\/runs\/(\d+)\/artifacts\?name=(.*)$/.exec(p);
+        if (arts) return ok({ artifacts: artifacts[arts[1]] ? [{ id: Number(arts[1]) * 100, name: arts[2], expired: false }] : [] });
+        const zip = /^repos\/o\/r\/actions\/artifacts\/(\d+)\/zip$/.exec(p);
+        if (zip) {
+          const bytes = zipOf("junit.xml", junitOf(artifacts[String(Number(zip[1]) / 100)]), true);
+          return ok(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
+        }
+        if (p.startsWith(`repos/${repository}/contents/.github/workflows/${times.WORKFLOW}?ref=`)) return ok({ content: Buffer.from(workflow).toString("base64") });
+        return { ok: false, status: 404 };
+      },
+    };
+    return { io, out, err };
+  };
+  const env = (runner) => ({ TEST_TIMES_RUNNER: runner, GITHUB_REPOSITORY: repository, GITHUB_RUN_ID: "7", GITHUB_SHA: "judged", GH_TOKEN: "t" });
+  const verdict = async (runner, setup) => {
+    const f = fake(setup);
+    return { code: await times.main([], env(runner), f.io), out: f.out.join("\n"), err: f.err.join("\n") };
+  };
+  assert.equal((await verdict("windows-2025", { current: base183.current })).code, 0, "the Windows runner fails");
+  assert.equal((await verdict("macos-15", { current: base183.current })).code, 1, "a runner neither judged nor recorded passes");
+  const first = await verdict("ubuntu-24.04", { current: base183.current, workflow: unguarded });
+  assert.equal(first.code, 0, `main's first run with the guard fails: ${first.err}`);
+  assert.match(first.out, /records no test times yet/);
+  const lost = await verdict("ubuntu-24.04", { current: base183.current });
+  assert.equal(lost.code, 1, "a main that records times but left none passes");
+  assert.match(lost.err, /expired or failed to upload/);
+  const slower = await verdict("ubuntu-24.04", { current: base183.current, artifacts: { 1: base183.baseline, 5: base183.baseline, 7: base183.current } });
+  assert.equal(slower.code, 1, "pull request 183's times pass against main's");
+  assert.match(slower.out, /test_diagnostics_are_reproducible: [\d.]+ s, [\d.]+ times its baseline/);
+  assert.match(slower.out, /main's runs 5 \(s5\), 1 \(s1\)/, "the baseline is read from other runs than main's green ones");
+  const within = await verdict("ubuntu-24.04", { current: base183.baseline, artifacts: { 1: base183.baseline, 5: base183.baseline } });
+  assert.equal(within.code, 0, `main's own times fail against main's: ${within.out}`);
+  assert.equal((await times.main(["extra"], env("ubuntu-24.04"), fake({ current: {} }).io)), 2, "an argument passes");
 });
