@@ -4,7 +4,7 @@ status: deferred
 trigger: when pressure-report, which also changes records.rs, test-isolation's rewrite of mutants.yml (#202) and the quick checks' report of their tree (#203) have merged
 type: chore
 awaits: [docs/design-review.md#records-one-per-file]
-affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, tools/quick.mjs, tools/quick.test.mjs, .github/workflows/ci.yml, .github/workflows/mutants.yml, .github/workflows/mutants-full.yml, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .gitignore, CLAUDE.md, docs/design-review.md, docs/escapes/undeclared-record-directory.md, docs/escapes/undeclared-record-other-markup.md, briefs/goldens-one-per-program.md, briefs/records-every-file.md, briefs/archive/records-every-file.md]
+affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, tools/quick.mjs, tools/quick.test.mjs, tools/cargo.mjs, tools/local-limits.mjs, tools/quick-checks.json, .github/scripts/policy/local-tools.test.mjs, .github/workflows/ci.yml, .github/workflows/mutants.yml, .github/workflows/mutants-full.yml, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .gitignore, CLAUDE.md, docs/design-review.md, docs/escapes/undeclared-record-directory.md, docs/escapes/undeclared-record-other-markup.md, briefs/goldens-one-per-program.md, briefs/records-every-file.md, briefs/archive/records-every-file.md]
 protectedFiles: [spec/**, compiler/mente-cli/tests/gates.rs, compiler/mente-cli/tests/lints.rs]
 ---
 
@@ -20,13 +20,15 @@ The records' closed world (`records::undeclared`) reads Markdown files alone. A 
   - The tests read that file in their sandbox, whose `.git` is empty.
   - A missing or empty list fails, with no fallback. CI is told apart by GitHub's `CI` variable, which the sandbox lets through.
   - The step stands in every job that runs the records' tests: ci.yml's Rust and Coverage jobs, mutants.yml and mutants-full.yml. `.github/gate-commands.txt` pins it in the required ones.
-- **Elsewhere**, `tools/quick.mjs` writes the same list into the same file at the start of its run, so that one place runs git and the tests read its output. No test runs git, so no program that a repository's git configuration names (`core.fsmonitor`, say) runs inside a test, the principle `pressure-report` holds. A test run outside quick that finds no list fails, saying to run quick; one that finds an old list reads the files as quick last listed them, keeping those that still exist.
+- **Elsewhere**, the two sanctioned local routes, `tools/quick.mjs` and `tools/cargo.mjs`, each write the same list into the same file before they run anything, through one function of `tools/local-limits.mjs`, so that one place runs git and the tests read its output. No test runs git, so no program that a repository's git configuration names (`core.fsmonitor`, say) runs inside a test, the principle `pressure-report` holds. A test run by neither route that finds no list fails, naming both; one that finds an old list reads the files as it lists them, keeping those that still exist.
 
 Over that list:
 - every document-like file (Markdown in each usual spelling, plain text, reStructuredText, AsciiDoc and Org in any case, or a file with no extension; a dotfile is none) belongs to exactly one declaration;
 - every file inside a declared record directory, of any extension, is a record of its kind, by the rule `records::entries` reads the directory with, written once for both.
 
 Code, fixtures of code, benchmark runs and configuration in other formats stay out.
+
+Since any file can break the closure, a quick check for every file runs `cargo test -p mente-cli --test records --test escapes`, and a check of the workflow policy (`.github/scripts/policy/local-tools.test.mjs`) holds that entry, as it holds the gates' and the policy's own. That also closes a gap #175 leaves: there, `test_every_markdown_file_is_declared_once` runs in no quick check, so a change of documents alone that adds an undeclared `.md` passes quick and fails only on CI. That repeats the class of the recorded escape `quick-map-skipped-test-ci`, which the change names.
 
 ## Negative Scope
 
@@ -40,6 +42,7 @@ Code, fixtures of code, benchmark runs and configuration in other formats stay o
 - [ ] A stray file of any extension in a kind's directory is refused by the list, as `entries` refuses it.
 - [ ] In CI, a job that runs the records' tests without the step fails them, saying which step to add.
 - [ ] The list holds a known tracked file and nothing `.gitignore` excludes.
-- [ ] No test runs git: off CI, the list is the one `tools/quick.mjs` wrote.
+- [ ] No test runs git: off CI, the list is the one `tools/quick.mjs` or `tools/cargo.mjs` wrote.
+- [ ] A change to any file runs the records' and escapes' tests in quick, and the workflow policy fails if the quick map stops doing so.
 - [ ] The `.github` changes go to Norman.
 - [ ] `node tools/quick.mjs` passes before the push.
