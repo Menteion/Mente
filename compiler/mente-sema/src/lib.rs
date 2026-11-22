@@ -70,8 +70,23 @@ pub fn check_module(
     src: &str,
     module: &ModuleFile,
 ) -> Result<ModuleVerificationReport, Vec<Diagnostic>> {
+    check_module_listed(src, module).0
+}
+
+/// [`check_module`]'s verdict on a parsed module and its [`Listings`], from one run of the
+/// checker, Tier 1 included: what `mn check` reports and lists for a module. Taking them apart,
+/// each ran the checker on its own, so `mn check` proved every module twice; a large function
+/// whose proof takes seconds made the corpus's diagnostics test twice as slow as its proofs.
+pub fn check_module_listed(
+    src: &str,
+    module: &ModuleFile,
+) -> (Result<ModuleVerificationReport, Vec<Diagnostic>>, Listings) {
     let b = bodies(src, module, true);
-    combine(verify_module_with(module, &b.structs), b.errors)
+    let listed = listed(&b);
+    (
+        combine(verify_module_with(module, &b.structs), b.errors),
+        listed,
+    )
 }
 
 /// The declaration checks' verdict and the bodies' diagnostics, in the order of the source.
@@ -159,12 +174,19 @@ pub fn listings(src: &str) -> Listings {
     let Ok(module) = parse_module(src) else {
         return Listings::default();
     };
-    let b = bodies(src, &module, true);
-    let mut axioms: Vec<(Span, String)> =
-        b.reports.into_iter().flat_map(|(_, r)| r.axioms).collect();
+    listed(&bodies(src, &module, true))
+}
+
+/// The [`Listings`] of a module's checked bodies.
+fn listed(b: &Bodies) -> Listings {
+    let mut axioms: Vec<(Span, String)> = b
+        .reports
+        .iter()
+        .flat_map(|(_, r)| r.axioms.iter().cloned())
+        .collect();
     axioms.sort_by_key(|t| t.0.start);
     Listings {
-        todos: b.todos,
+        todos: b.todos.clone(),
         axioms,
     }
 }

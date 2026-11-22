@@ -1,0 +1,73 @@
+// expect: pass
+module conformance
+// Variables of one byte, each in a slot: rounded up to 16 bytes, five took 80 bytes for a frame of
+// 73 (the review of pull request 183, 2026-11-22). Each slot now takes the alignment its size
+// implies.
+
+pub fn six(x: u8) -> u8 {
+  var a: u8 = x
+  var b: u8 = x
+  var c: u8 = x
+  var d: u8 = x
+  var e: u8 = x
+  var g: u8 = x
+  a = a / 2
+  b = b / 2
+  c = c / 2
+  d = d / 2
+  e = e / 2
+  g = g / 2
+  a + b + c + d + e + g
+}
+
+pub fn four(x: u8) -> u8 {
+  var a: u8 = x
+  var b: u8 = x
+  var c: u8 = x
+  var d: u8 = x
+  a = a / 2
+  b = b / 2
+  c = c / 2
+  d = d / 2
+  a + b + c + d
+}
+
+pub fn five(x: u8) -> u8 {
+  var a: u8 = x
+  var b: u8 = x
+  var c: u8 = x
+  var d: u8 = x
+  var e: u8 = x
+  a = a / 2
+  b = b / 2
+  c = c / 2
+  d = d / 2
+  e = e / 2
+  a + b + c + d + e
+}
+
+pub fn flags(x: bool) -> bool {
+  var a: bool = x
+  var b: bool = not x
+  var c: bool = x
+  var d: bool = not x
+  var e: bool = x
+  a = not a
+  b = not b
+  c = not c
+  d = not d
+  e = not e
+  (a and b) or (c and d) or e
+}
+
+pub struct B {
+  a: u8
+}
+
+pub fn bytes(x: u8) -> u8 {
+  val p = B(a: x)
+  val q = B(a: x)
+  val r = B(a: x)
+  val s = B(a: x)
+  p.a / 4 + q.a / 4 + r.a / 4 + s.a / 4
+}
