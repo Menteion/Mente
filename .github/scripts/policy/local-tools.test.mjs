@@ -15,7 +15,7 @@ import { read, strings, tracked } from "./repo.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 4;
+const FLOOR = 5;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -429,4 +429,37 @@ check("tools/quick.mjs runs the program generator's own tests for a change to it
   assert.equal(generatorQuickProblems({ ...map, checks: map.checks.filter((c) => c !== generator) }, files, main).length, 1, "a map without the generator's check passed");
   assert.equal(generatorQuickProblems(map, files, main.replace(/^mod mir_run;$/m, "")).length, 1, "mir_run outside mn's binary passed");
   assert.deepEqual(generatorQuickProblems(withRun([...GENERATOR_RUN, "mir_run::"]), files, main), [], "one filter that every module's tests contain was refused");
+});
+
+/// What makes two checks of the quick map (`map`, as parsed) one: the same name, or the same
+/// command. A merge that kept both sides of a check, as two pull requests that each add the same
+/// one leave it to, would run its command twice, or show two lines under one name, and nothing
+/// else would say so.
+export function duplicateQuickProblems(map) {
+  const problems = [];
+  const seen = new Map();
+  for (const c of map.checks ?? []) {
+    for (const [what, key] of [
+      ["name", `name ${JSON.stringify(c.name)}`],
+      ["command", `command ${JSON.stringify(Array.isArray(c.run) ? c.run.join(" ") : c.run)}`],
+    ]) {
+      if (seen.has(key)) problems.push(`${QUICK_MAP} has two checks of the ${what} ${key.slice(what.length + 1)}`);
+      else seen.set(key, true);
+    }
+  }
+  return problems;
+}
+
+check("no two quick checks share a name or a command", () => {
+  // Pull requests 214 and 215 each added the check "records", byte for byte, so that whichever
+  // merged second would resolve to one entry; a resolution that kept both would have run the
+  // records' tests twice before every push, unnoticed.
+  const map = JSON.parse(read(QUICK_MAP));
+  assert.deepEqual(duplicateQuickProblems(map), []);
+  // Planted: a check kept twice, one renamed beside its twin, and two of one name and other
+  // commands.
+  const first = map.checks[0];
+  assert.equal(duplicateQuickProblems({ ...map, checks: [...map.checks, first] }).length, 2, "a check kept twice passed");
+  assert.equal(duplicateQuickProblems({ ...map, checks: [...map.checks, { ...first, name: `${first.name} again` }] }).length, 1, "one command under two names passed");
+  assert.equal(duplicateQuickProblems({ ...map, checks: [...map.checks, { ...first, run: ["true"] }] }).length, 1, "one name over two commands passed");
 });

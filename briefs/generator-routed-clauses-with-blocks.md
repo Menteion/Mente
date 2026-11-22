@@ -1,7 +1,6 @@
 ---
 id: generator-routed-clauses-with-blocks
-status: deferred
-trigger: when the pull request that brings the program generator into step with the checker merges
+status: active
 type: chore
 affectedFiles: [compiler/mente-cli/src/mir_run/generate.rs, compiler/mente-cli/src/mir_run/coverage.rs, briefs/generator-routed-clauses-with-blocks.md, briefs/archive/generator-routed-clauses-with-blocks.md]
 protectedFiles: [.github/**, CLAUDE.md, spec/**, compiler/mente-sema/**]
@@ -11,7 +10,7 @@ protectedFiles: [.github/**, CLAUDE.md, spec/**, compiler/mente-sema/**]
 
 ## Intent
 
-The containment oracle ([`tier1-containment`](../docs/design-review.md#tier1-containment)) makes no claim inside a clause Tier 1 walks nowhere: an `ensures` routed by `@checked` or `@prove`, which a run evaluates all the same. Its first version reported a false alarm in such a clause when it held a block, an `if` or a `match` with a block arm, and nothing had caught it: no conformance program and no generated program held one. Its fix added a conformance program, `routed_clauses_holding_blocks.mn`, and the oracle's unit test; the program generator still writes none. When this round is done, it writes `@checked` and `@prove` functions whose `ensures`, `requires`, written invariants outside the fragment and measures hold an `if`, a `match` with an expression arm and one with a block arm, each a clause that holds on every call the comparison makes, so that the comparison of the three paths and the oracle run on them at every seed. It waits on the pull request that brings the generator into step with the checker, which changes `generate.rs`.
+The containment oracle ([`tier1-containment`](../docs/design-review.md#tier1-containment)) makes no claim inside a clause Tier 1 walks nowhere: an `ensures` routed by `@checked` or `@prove`, which a run evaluates all the same. Its first version reported a false alarm in such a clause when it held a block, an `if` or a `match` with a block arm, and nothing had caught it: no conformance program and no generated program held one. Its fix added a conformance program, `routed_clauses_holding_blocks.mn`, and the oracle's unit test; the program generator still writes none. When this round is done, it writes `@checked` and `@prove` functions whose `ensures`, `requires`, written invariants outside the fragment and measures hold an `if`, a `match` with an expression arm and one with a block arm, each a clause that holds on every call the comparison makes, so that the comparison of the three paths and the oracle run on them at every seed. The pull request that brought the generator into step with the checker, which changed `generate.rs`, has merged (pull request 204, 2e404cc), so the round can start.
 
 ## Negative Scope
 

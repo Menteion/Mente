@@ -736,8 +736,22 @@ fn claims_of(src: &str, module: &CheckedModule) -> Vec<Option<Claims>> {
     claims
 }
 
+/// What a run that panicked prints, as one run on a thread of its own does (`mente_interp::call`).
+const UNEXPECTED: &str = "the interpreter stopped unexpectedly";
+
+/// The message a panic carries, when it carries one.
+fn panic_message(e: &(dyn std::any::Any + Send)) -> String {
+    e.downcast_ref::<String>()
+        .cloned()
+        .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_default()
+}
+
 /// Runs each call of `calls` traced, watched by `watch`, and keeps its outcome, printed, which
-/// is the reference outcome the comparison of the paths judges.
+/// is the reference outcome the comparison of the paths judges. The calls share one thread of
+/// the interpreter's, so a panic there, the interpreter's or the oracle's own, ends its call
+/// alone: it prints what a run that panicked on a thread of its own prints, and a problem names
+/// the call and what the panic said.
 fn watch_calls(watch: &mut Watch<'_>, calls: &[CallArgs], limits: Limits) {
     let ran = mente_interp::with_calls(watch.module, limits, |interp| {
         let mut all = Vec::new();
@@ -745,8 +759,20 @@ fn watch_calls(watch: &mut Watch<'_>, calls: &[CallArgs], limits: Limits) {
             watch.call = k;
             let marked: Vec<bool> = args.iter().map(|(m, _)| *m).collect();
             let values = args.iter().map(|(_, v)| v.clone()).collect();
-            let outcome = interp.traced(f, values, &mut |e| watch.event(e));
-            all.push(printed(&marked, outcome));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                interp.traced(f, values, &mut |e| watch.event(e))
+            }));
+            all.push(match outcome {
+                Ok(outcome) => printed(&marked, outcome),
+                Err(e) => {
+                    let why = panic_message(&*e);
+                    watch
+                        .out
+                        .problems
+                        .push((k, format!("the traced run panicked: {}", why)));
+                    Err(UNEXPECTED.to_string())
+                }
+            });
         }
         all
     });
@@ -1024,6 +1050,42 @@ mod tests {
         // An expression with no record is no claim.
         let none = claims_changed(src, |st| st.values.clear());
         assert!(against(src, none, &[call("sum", &[3])]).problems.is_empty());
+    }
+
+    /// A panic in one call of a program, the oracle's own here, ends that call alone, on the
+    /// thread all the calls share: it prints what a run that panicked prints, a problem names
+    /// the call, and the calls before and after it run as ever.
+    #[test]
+    fn test_a_panic_ends_its_call_alone_and_names_it() {
+        let src = "module m\npub fn a(x: u8) -> u8 {\n  val y: u8 = x\n  y\n}\npub fn b(x: u8) -> u8 {\n  val y: u8 = x\n  y\n}\n";
+        let m = module(src);
+        let mut claims = claims_changed(src, |_| {});
+        // Each of `b`'s states names a position past its point's variables, which the check
+        // indexes: the first point `b` reaches panics.
+        let b = m.index("b").unwrap();
+        for at in &mut claims[b].as_mut().unwrap().before {
+            let past = at.vars.len() + 5;
+            for r in &mut at.records {
+                r.bounds.push((past, None, Some(Exact::from_i128(0))));
+                r.fast = Fast::of(r);
+            }
+        }
+        let calls = [call("a", &[1]), call("b", &[2]), call("a", &[3])];
+        let mut watch = Watch::new(src, &m, &claims);
+        watch_calls(&mut watch, &calls, LIMITS);
+        let printed = &watch.out.printed;
+        assert_eq!(printed[0], Ok(vec!["1".to_string()]));
+        assert_eq!(printed[1], Err(UNEXPECTED.to_string()));
+        assert_eq!(printed[2], Ok(vec!["3".to_string()]));
+        assert!(
+            watch
+                .out
+                .problems
+                .iter()
+                .any(|(k, t)| *k == 1 && t.starts_with("the traced run panicked: ")),
+            "{:?}",
+            watch.out.problems
+        );
     }
 
     /// A generator of the test's choices, the same at every run.
