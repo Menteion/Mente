@@ -682,6 +682,22 @@ async function withGates(body) {
   }
 }
 
+/**
+ * Writes `commit`'s set into `dir` by hand, as a refresher stages one: each file with its blob's
+ * bytes and the mode the tree records, so that a check of the set refuses only what a case plants.
+ * Returns the files, as their manifest names them.
+ */
+function stageByHand(gitDir, commit, dir) {
+  const files = filesOf(execFileSync(systemGit(), ["--git-dir", gitDir, "ls-tree", "-r", "-z", "--full-tree", commit, "--", ...SET.set], { env: gateEnv(), encoding: "utf8" }), SET.set);
+  for (const f of files) {
+    const at = path.join(dir, ...f.path.split("/"));
+    fs.mkdirSync(path.dirname(at), { recursive: true });
+    fs.writeFileSync(at, execFileSync(systemGit(), ["--git-dir", gitDir, "--no-replace-objects", "cat-file", "blob", f.id], { env: gateEnv() }));
+    fs.chmodSync(at, f.mode === "100755" ? 0o755 : 0o644);
+  }
+  return files;
+}
+
 /** Writes `rel` of the copy in use with one byte changed. */
 function drift(gates, rel) {
   const at = path.join(gates, fs.readFileSync(path.join(gates, "current"), "utf8").trim(), ...rel.split("/"));
@@ -747,10 +763,7 @@ test("a refresher run by hand installs nothing", async () => {
     // An edited refresher in a staging directory, for main's next commit.
     const next = commit("next");
     const staging = path.join(gates, `staging-${next}-0a`);
-    for (const rel of SET.set) {
-      fs.mkdirSync(path.dirname(path.join(staging, rel)), { recursive: true });
-      fs.writeFileSync(path.join(staging, rel), blob(next, rel));
-    }
+    stageByHand(gitDir, next, staging);
     fs.appendFileSync(path.join(staging, "tools", "gates.mjs"), "\n// edited\n");
     r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { encoding: "utf8" });
     assert.equal(r.status, 1, r.stderr);
@@ -881,10 +894,7 @@ test("a moved origin/main whose gate-set.json names a local-path remote installs
     assert.equal(current(), base);
     // The bootstrap's staged refresher of that commit: the command admits only https.
     const staging = path.join(gates, `staging-${moved}-0b`);
-    for (const rel of SET.set) {
-      fs.mkdirSync(path.dirname(path.join(staging, rel)), { recursive: true });
-      fs.writeFileSync(path.join(staging, rel), blob(moved, rel));
-    }
+    stageByHand(repo(work), moved, staging);
     const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { encoding: "utf8" });
     assert.equal(r.status, 1, r.stderr);
     assert.match(r.stderr, /writes nothing: the remote's URL .* is not https/);
@@ -913,12 +923,7 @@ test("a copy of a commit that is not origin/main or one of its ancestors is refu
     const branch = commit("a branch", { "tools/capped.mjs": (old) => `${old}\n// branch\n` }, { push: false });
     git(work, "reset", "-q", "--hard", base);
     const copy = path.join(gates, branch);
-    const listing = execFileSync(systemGit(), ["--git-dir", repo(work), "ls-tree", "-r", "-z", "--full-tree", branch, "--", ...SET.set], { env: gateEnv(), encoding: "utf8" });
-    const files = filesOf(listing, SET.set);
-    for (const f of files) {
-      fs.mkdirSync(path.dirname(path.join(copy, f.path)), { recursive: true });
-      fs.writeFileSync(path.join(copy, f.path), blob(branch, f.path), { mode: f.mode === "100755" ? 0o755 : 0o644 });
-    }
+    const files = stageByHand(repo(work), branch, copy);
     fs.writeFileSync(path.join(copy, "manifest"), manifestText(files));
     fs.writeFileSync(path.join(gates, "current"), `${branch}\n`);
     for (const [name, status] of [["capped.mjs", 2], ["hook.mjs", 1], ["refresh.mjs", 2]]) {
