@@ -1,0 +1,114 @@
+// expect: pass
+module conformance
+// A program of the review's generator, seed 35, whose slots took 304 bytes for a frame of 276 under
+// the layout that rounded each slot up to 16 bytes (the review of pull request 183, 2026-11-22).
+
+fn touch(mut xs: [16]u8, k: u8) -> u8 {
+  val t: [16]u8 = [k ^ xs[3]; 16]
+  xs[k % 16] = xs[(k + 1) % 16] ^ t[5]
+  xs[15] = xs[0] ^ k
+  xs[7]
+}
+
+fn peek(xs: [16]u8, ys: [16]u8) -> u8 = (xs[3] ^ ys[7]) ^ (xs[15] ^ ys[0])
+
+pub fn f(c: u8, x: u8) -> u8 {
+var acc: u8 = c
+acc = acc ^ peek([100; 16], if acc > 190 { [(x ^ 220); 16] } else { [(x ^ 56); 16] })
+var i0: usize = 0
+while i0 < 2 {
+i0 = i0 + 1
+acc = acc ^ peek(if c > 247 { [172, 255, 35, 243, 29, 145, 191, 83, (x ^ 145), 141, 52, (x ^ 36), (x ^ 54), 135, (x ^ 41), 161] } else { [221; 16] }, [50; 16])
+acc = acc ^ peek(if acc > 0 { [(x ^ 124); 16] } else { 
+val t1: [16]u8 = [(x ^ 143); 16]
+acc = acc ^ t1[7]
+[t1[14] ^ t1[7]; 16]
+ }, if acc > 105 { [(x ^ 251), 143, 191, 108, 153, 72, 248, 248, 239, (x ^ 17), 39, 88, (x ^ 202), 50, 82, 151] } else { [acc; 16] })
+acc = acc ^ (x ^ 123)
+acc = acc ^ peek([101, 227, (x ^ 57), (x ^ 117), (x ^ 138), 149, 66, 149, 248, 16, 162, 96, (x ^ 32), acc, 168, (x ^ 76)], [(x ^ 113); 16])
+acc = acc ^ peek(if acc > 85 { [70, 207, (x ^ 176), 215, 164, 81, 126, 35, 53, 134, 87, 116, 239, 248, 69, (x ^ 82)] } else { 
+val t2: [16]u8 = [(x ^ 203); 16]
+acc = acc ^ t2[13]
+[t2[9] ^ 3; 16]
+ }, if c > 238 { 
+val t3: [16]u8 = [57; 16]
+acc = acc ^ t3[11]
+[t3[0] ^ t3[i0]; 16]
+ } else { 
+val t4: [16]u8 = [(x ^ 29); 16]
+acc = acc ^ t4[13]
+[t4[4] ^ t4[i0]; 16]
+ })
+}
+acc = acc ^ peek(if acc > 4 { [35; 16] } else { [(x ^ 136); 16] }, [146; 16])
+val a5: [16]u8 = [81, 17, 22, 127, 248, (x ^ 92), 178, 180, 23, 131, 113, 110, 172, 7, 197, 159]
+acc = acc ^ peek(if a5[0] > 225 { 
+val t6: [16]u8 = [acc; 16]
+acc = acc ^ t6[2]
+t6
+ } else { 
+val t7: [16]u8 = a5
+acc = acc ^ t7[15]
+[t7[7] ^ (x ^ 90); 16]
+ }, a5)
+if x == 41 {
+if c > 156 {
+var v8: [16]u8 = if a5[2] > 16 { [(x ^ 166); 16] } else { if x == 213 { a5 } else { [a5[13]; 16] } }
+v8[7] = v8[15]
+v8 = [v8[1]; 16]
+acc = acc ^ v8[15]
+} else {
+val a9: [16]u8 = a5
+if c > 64 {
+var v10: [16]u8 = if acc > 48 { a5 } else { if x == 153 { [96, a5[15], a9[8], 192, (x ^ 150), 100, 187, 119, 146, 175, a9[13], 182, 162, 177, a5[15], 92] } else { a5 } }
+v10[12] = acc
+acc = acc ^ (a5[6] ^ (x ^ 230))
+acc = acc ^ v10[3]
+} else {
+val a11: [16]u8 = a9
+acc = acc ^ a11[14]
+}
+var v12: [16]u8 = if c > 248 { [a5[13]; 16] } else { [a5[0]; 16] }
+v12[11] = 95
+acc = acc ^ a9[15]
+acc = acc ^ v12[13]
+}
+} else {
+var i13: usize = 0
+while i13 < 1 {
+i13 = i13 + 1
+if a5[1] > 53 {
+acc = acc ^ (x ^ 95)
+continue
+}
+acc = acc ^ peek([255, 227, 109, a5[i13], 136, 78, 58, acc, 57, 192, 189, 33, a5[5], a5[6], 122, 37], a5)
+var i14: usize = 0
+while i14 < 3 {
+i14 = i14 + 1
+acc = acc ^ peek(if a5[4] > 186 { [64, 93, 187, 181, 251, 69, 110, 247, 44, acc, 131, 195, 6, a5[1], 129, 113] } else { 
+val t15: [16]u8 = a5
+acc = acc ^ t15[11]
+t15
+ }, [(x ^ 198); 16])
+acc = acc ^ peek([a5[8], 33, a5[8], 31, 135, a5[i13], a5[5], a5[i14], (x ^ 65), (x ^ 109), 107, 84, a5[12], acc, 22, a5[i13]], [137, 237, 73, a5[i14], a5[i14], 215, 188, 194, 167, (x ^ 141), a5[i14], 92, 70, acc, a5[9], 205])
+acc = acc ^ peek([(x ^ 100); 16], if c > 217 { [(x ^ 148); 16] } else { [acc; 16] })
+}
+}
+acc = acc ^ a5[10]
+acc = acc ^ peek(if x == 200 { 
+val t16: [16]u8 = [142, acc, a5[9], 23, a5[5], 62, a5[4], 196, acc, 86, 239, a5[1], a5[1], acc, 224, 247]
+acc = acc ^ t16[1]
+[t16[10] ^ t16[7]; 16]
+ } else { 
+val t17: [16]u8 = [a5[7], 56, 153, 177, 186, 0, a5[8], a5[12], 85, 78, 79, (x ^ 132), 165, a5[1], 87, 85]
+acc = acc ^ t17[11]
+[t17[0] ^ a5[11]; 16]
+ }, a5)
+}
+var z18: usize = 0
+while z18 < 16 {
+acc = acc ^ a5[z18]
+z18 = z18 + 1
+}
+acc
+}
