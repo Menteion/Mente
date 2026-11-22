@@ -31,6 +31,7 @@ use mente_interp::{Limits, Stop};
 use mente_sema::tier1::ObligationKind;
 use mente_sema::CheckedModule;
 
+use super::containment;
 use super::generate::{self, CallPlan, Mode};
 use super::{native_within, reference_within, run_lowered, CallArgs, Printed};
 
@@ -57,6 +58,10 @@ enum Kind {
     /// Leaving out the checks Tier 1 proved changed a result without the reference
     /// interpreter trapping.
     Erasure,
+    /// The reference interpreter reached a value outside Tier 1's state at that point, or a
+    /// point Tier 1 holds empty or unreachable, whether or not a check it proved failed there
+    /// (`containment`).
+    Containment,
     /// The MIR with every check differs from the reference interpreter, or did not lower.
     Lowering,
     /// Native code differs from the MIR it was built from, or did not build.
@@ -81,6 +86,11 @@ struct Outcome {
     unfinished: u64,
     proven: u64,
     unproven: u64,
+    /// The points and the values of expressions the containment oracle held against Tier 1's
+    /// claims.
+    contained: (u64, u64),
+    /// How long the paths took to compare, and the containment oracle after them.
+    timing: (std::time::Duration, std::time::Duration),
     findings: Vec<Finding>,
 }
 
@@ -383,7 +393,21 @@ fn compare_proved(
             }
         };
         let calls = generate::calls(src, proved, seed, plan);
-        compare_module(proved, &kept, &calls, scratch)
+        let started = std::time::Instant::now();
+        let mut out = compare_module(proved, &kept, &calls, scratch);
+        let compared = started.elapsed();
+        let held = containment::check(src, proved, &calls, STEPS);
+        out.contained = (held.points, held.values);
+        out.timing = (compared, started.elapsed() - compared);
+        for (k, detail) in held.problems {
+            let call = calls.get(k).map_or(String::new(), |(f, a)| show_call(f, a));
+            out.findings.push(Finding {
+                kind: Kind::Containment,
+                call,
+                detail,
+            });
+        }
+        out
     })
 }
 
@@ -409,6 +433,10 @@ struct Report {
     unfinished_in: BTreeMap<String, u64>,
     proven: u64,
     unproven: u64,
+    /// The points and the values of expressions the containment oracle checked.
+    contained: (u64, u64),
+    /// How long the comparisons of the paths took together, and the containment oracle.
+    timing: (std::time::Duration, std::time::Duration),
     /// Each program with findings: its name, its text and what was found.
     failures: Vec<(String, String, Vec<Finding>)>,
     /// How many functions were generated again for a narrowing Tier 1 proved always traps
@@ -441,6 +469,10 @@ impl Report {
                 }
                 self.proven += o.proven;
                 self.unproven += o.unproven;
+                self.contained.0 += o.contained.0;
+                self.contained.1 += o.contained.1;
+                self.timing.0 += o.timing.0;
+                self.timing.1 += o.timing.1;
                 if !o.findings.is_empty() {
                     self.failures.push((name, src.to_string(), o.findings));
                 }
@@ -489,12 +521,19 @@ impl Report {
             "\n{} calls compared on the reference interpreter, MIR with every check, MIR without \
              the checks Tier 1 proved, and native code; {} of them trap; {} more left out, \
              unfinished within the reference interpreter's steps\n{} obligations proven by Tier \
-             1, {} left to run time\n{} programs with differences",
+             1, {} left to run time\n{} points and {} values of expressions the reference \
+             interpreter reached, held against Tier 1's states there, in {:.1} s beside the \
+             paths' {:.1} s\n{} programs with \
+             differences",
             self.calls,
             self.traps,
             self.unfinished,
             self.proven,
             self.unproven,
+            self.contained.0,
+            self.contained.1,
+            self.timing.1.as_secs_f64(),
+            self.timing.0.as_secs_f64(),
             self.failures.len()
         ));
         if !self.unfinished_in.is_empty() {

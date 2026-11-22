@@ -1989,3 +1989,110 @@ fn test_a_recursion_through_nested_ifs_runs_to_the_budget() {
         over
     );
 }
+
+/// A traced run shows its tracer, in the order of the run, each statement before it runs, each
+/// block that runs to its end, and each round's head once its invariants hold, with the values
+/// of the function's bindings then, and each value an expression gives, keyed by the function
+/// and the node of its tree (`Event`); a traced run gives the same result as one nobody traces.
+#[test]
+fn test_a_tracer_sees_each_point_and_value_of_the_walk() {
+    let src = "pub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  while i < n invariant i <= n {\n    i = i + 1\n  }\n  i\n}";
+    let text = format!("module m\n{}\n", src);
+    let m = module(src);
+    let f = m.functions[0].as_ref().unwrap();
+    let tree = &f.syntax.tree;
+    let at = |s: Span| text[s.start..s.end].to_string();
+    let mut seen: Vec<String> = Vec::new();
+    let traced = with_calls(&m, Limits::default(), |calls| {
+        calls.traced("f", vec![Value::Int(Int::from_i128(2))], &mut |e: Event<
+            '_,
+        >| {
+            let i = |slots: &[Option<Value>]| match slots.get(1) {
+                Some(Some(v)) => v.to_string(),
+                _ => "-".to_string(),
+            };
+            seen.push(match e {
+                Event::Before {
+                    function,
+                    stmt,
+                    slots,
+                } => format!(
+                    "{} before `{}` i={}",
+                    function,
+                    at(tree.stmt(stmt).span).lines().next().unwrap_or(""),
+                    i(slots)
+                ),
+                Event::End {
+                    function,
+                    block,
+                    slots,
+                } => format!(
+                    "{} end {}:{} i={}",
+                    function,
+                    tree.block(block).span.line,
+                    tree.block(block).span.col,
+                    i(slots)
+                ),
+                Event::Head {
+                    function,
+                    stmt,
+                    slots,
+                } => format!(
+                    "{} head {} i={}",
+                    function,
+                    tree.stmt(stmt).span.line,
+                    i(slots)
+                ),
+                Event::Given {
+                    function,
+                    expr,
+                    value,
+                } => format!("{} `{}` = {}", function, at(tree.expr(expr).span), value),
+            })
+        })
+    })
+    .unwrap();
+    assert_eq!(traced.map(|(v, _)| v.to_string()).unwrap(), "2");
+    let points: Vec<&String> = seen
+        .iter()
+        .filter(|s| !s.contains('`') || s.contains("before"))
+        .collect();
+    assert_eq!(
+        points,
+        [
+            "0 before `var i: u8 = 0` i=-",
+            "0 before `while i < n invariant i <= n {` i=0",
+            "0 head 4 i=0",
+            "0 before `i = i + 1` i=0",
+            "0 end 4:32 i=1",
+            "0 head 4 i=1",
+            "0 before `i = i + 1` i=1",
+            "0 end 4:32 i=2",
+            "0 head 4 i=2",
+            "0 before `i` i=2",
+            "0 end 2:23 i=2",
+        ]
+    );
+    // The invariant is evaluated before the head, the condition after it; a `bool` is given too.
+    let round: Vec<&str> = seen
+        .iter()
+        .skip_while(|s| !s.starts_with("0 before `while"))
+        .take(9)
+        .map(|s| s.as_str())
+        .collect();
+    assert_eq!(
+        round,
+        [
+            "0 before `while i < n invariant i <= n {` i=0",
+            "0 `i` = 0",
+            "0 `n` = 2",
+            "0 `i <= n` = true",
+            "0 head 4 i=0",
+            "0 `i` = 0",
+            "0 `n` = 2",
+            "0 `i < n` = true",
+            "0 before `i = i + 1` i=0",
+        ]
+    );
+    assert!(seen.contains(&"0 `i + 1` = 1".to_string()), "{:?}", seen);
+}
