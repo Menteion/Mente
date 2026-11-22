@@ -1397,7 +1397,7 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
     const both = [m("a.rs:1:1: replace f -> bool with true"), m("a.rs:2:1: replace g (x|y) with ()")];
     put("diff.json", JSON.stringify(both));
     put("none.json", "");
-    const planned = spawnSync(process.execPath, [".github/scripts/mutants-floor.mjs", "plan", "diff.json", "none.json", "100", "mutants-plan/plan"], { cwd: dir, encoding: "utf8", timeout: 30000 });
+    const planned = spawnSync(process.execPath, [".github/scripts/mutants-floor.mjs", "plan", "diff.json", "none.json", "100", "plan-made/plan"], { cwd: dir, encoding: "utf8", timeout: 30000 });
     assert.equal(planned.status, 0, planned.stderr);
     assert.match(planned.stdout, /^count=1$/m);
     const posix = (p) => p.replace(/\\/g, "/");
@@ -1406,6 +1406,10 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
       put("tested.json", JSON.stringify((lists.tested ?? both).map((x) => x.name)));
       fs.rmSync(path.join(dir, "runner"), { recursive: true, force: true });
       fs.mkdirSync(path.join(dir, "runner"));
+      // The plan stands where the shard downloads it, under the runner's temporary directory, outside
+      // the tree (the escape plan-downloaded-into-the-checkout): the plan made beside it has another
+      // name, so that a step reading the plan from the tree finds nothing.
+      fs.cpSync(path.join(dir, "plan-made"), path.join(dir, "runner", "mutants-plan"), { recursive: true });
       const env = {
         ...process.env,
         PATH: `${path.join(dir, "bin")}${path.delimiter}${process.env.PATH}`,

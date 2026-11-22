@@ -14,7 +14,7 @@ import { logicalLines, stepKey, steps, workflows } from "./workflows.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 4;
+const FLOOR = 5;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -457,4 +457,43 @@ check("every test's share of its stop is reported on every runner, and only a br
   assert.match(missing.err, /^::error title=No report of the tests' times::target\/nextest\/ci\/junit\.xml could not be read in full: ENOENT/);
   assert.equal(run("ubuntu-24.04", junitOf({ "mente-sema t": 1 }, 2)).code, 1, "a report whose count is not the count read passes");
   assert.equal(run("ubuntu-24.04", junitOf({ "mente-sema t": 1 }), ["extra"]).code, 2, "an argument passes");
+});
+
+/// Where a step that downloads an artifact may put it: under the runner's temporary directory, as
+/// `${{ runner.temp }}` or a path below it with no `..` segment. Its default, with no `path`, is the
+/// workspace, and so is every relative path, `${{ github.workspace }}` and a shell variable, which an
+/// action's input never expands.
+const DOWNLOAD_PATH = /^\$\{\{ runner\.temp \}\}(\/(?!\.\.(\/|$))[^\s/]+)*\/?$/;
+
+/// Every step of `docs`, each { file, doc } as workflows() reads them, that downloads an artifact
+/// into the checkout: the tree the tests judge is then not the commit's tree (the escape
+/// plan-downloaded-into-the-checkout: the plan's summary.md, downloaded into every Mutants shard's
+/// checkout, failed test_every_markdown_file_is_declared_once in each before any mutant ran).
+export function downloadProblems(docs) {
+  const out = [];
+  for (const { file, doc } of docs) {
+    for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+      for (const s of steps(job)) {
+        if (!String(s.uses ?? "").startsWith("actions/download-artifact@")) continue;
+        const where = s.with?.path;
+        if (typeof where !== "string" || !DOWNLOAD_PATH.test(where)) out.push(`${file}#${id}: "${s.name ?? s.uses}" downloads an artifact to ${where === undefined ? "the workspace, its default" : JSON.stringify(where)}, inside the checkout: put it under \${{ runner.temp }}`);
+      }
+    }
+  }
+  return out;
+}
+
+check("every artifact a workflow downloads lands outside the checkout, so the tree the tests judge is the commit's", () => {
+  assert.deepEqual(downloadProblems(workflows()), []);
+  const at = (path) => [{ file: "x.yml", doc: { jobs: { j: { steps: [{ name: "get", uses: `actions/download-artifact@${"a".repeat(40)}`, with: path === undefined ? { name: "n" } : { name: "n", path } }] } } } }];
+  for (const ok of ["${{ runner.temp }}", "${{ runner.temp }}/", "${{ runner.temp }}/mutants-plan", "${{ runner.temp }}/a/b.c"]) assert.deepEqual(downloadProblems(at(ok)), [], `${ok} is refused`);
+  // Planted: the escape's own path, the default, and every other way into the workspace or out of
+  // the temporary directory.
+  for (const bad of [undefined, "mutants-plan", "./mutants-plan", ".", "${{ github.workspace }}/x", "$RUNNER_TEMP/x", "${{ runner.temp }}/../x", "${{ runner.temp }}/a/../../x", "${{ runner.temp }}x", "${{runner.temp}}/x", "~/x", "/tmp/x", "${{ runner.temp }}/a\n${{ github.workspace }}"]) {
+    assert.equal(downloadProblems(at(bad)).length, 1, `${JSON.stringify(bad)} passes`);
+  }
+  assert.match(downloadProblems(at(undefined))[0], /to the workspace, its default, inside the checkout/);
+  // Any version of the action, and only it: an upload's path is read, not written.
+  assert.equal(downloadProblems([{ file: "x.yml", doc: { jobs: { j: { steps: [{ uses: "actions/upload-artifact@v7", with: { path: "x" } }] } } } }]).length, 0);
+  assert.equal(downloadProblems([{ file: "x.yml", doc: { jobs: { j: { steps: [{ uses: "actions/download-artifact@v8", with: { path: "x" } }] } } } }]).length, 1);
 });

@@ -36,7 +36,7 @@ export function jobDigest(doc, job) {
 export const PINNED_FILES = new Map([
   // The policy's list of its own files: a module dropped from it, or the total of checks lowered,
   // changes this digest too.
-  [".github/scripts/policy/modules.json", "55a7c4d6dc61b57de8ca226b3c965ea4b1a90bb71722ad1f687a6c8a7c2b308c"],
+  [".github/scripts/policy/modules.json", "97cd476f4185e30fbfffa9dfc6277436ad8776172007475c36bdaa73d468462b"],
   [".github/scripts/limits.sh", "40747e4a7344895ce42dd902adb28dd669809d4dd6821d3c1e01921552669ed0"],
   [".github/scripts/memory-guard.sh", "c3c629010f58d39682fa06353305181cf7d1064d2b07abefd6885033045630d1"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
@@ -62,7 +62,7 @@ export const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "8594d53e73f3b014fff01ee9cc1014fa5575a9b3ee9b102fae33c03754b0f6af"],
-  [".github/scripts/policy-run.test.mjs", "89959bd177cf3e2123ac0b0e16db5135829da7adf4256e9c345043d670eb755b"],
+  [".github/scripts/policy-run.test.mjs", "0489749f17ef503fea2e85c2a6d530eb090fe83189727b200ebf6816778aeb8f"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -116,7 +116,7 @@ export const PINNED_FILES = new Map([
 export const PINNED_JOBS = new Map([
   ["ci.yml#rust", "3105565a83bb93bb4fbee08ec79b936931500637dc51afce73ddb51cc5dec303"],
   ["mutants.yml#plan", "a13a733683622b5149435a55f9f7b5f334383df878d1006b0a4093ee06a5b3bc"],
-  ["mutants.yml#shard", "24a84a703e6e775e8d00c984accc1e708c8de93f7eff7e2f2eef6157c116f681"],
+  ["mutants.yml#shard", "17c2d55473d78fad9ca5fa76de14a74417f0ce17b1ca7c534a57f69aba63c885"],
   ["mutants.yml#aggregate", "579f212be0eb40ba5b554285629ca1d61b5cc8f78d8e5aa56db6f8e26fa73ac4"],
   ["mutants-full.yml#build", "2c983a54519f8d1007516cc85819127a66bba1008c017d70a6fbf9bb5a4d437a"],
   ["mutants-full.yml#full", "e1d21246b9c6b8e0bb849381d7f7a56fe717718ec3a0245f2fb13fb707aac996"],
