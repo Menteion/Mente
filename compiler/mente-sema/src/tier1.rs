@@ -2805,7 +2805,9 @@ impl<'a> Fx<'a> {
             .collect();
         // A compound remainder `p %= e` is no expression's, so its value has a variable of its
         // own, which no expression's value is held in (`Fx::binary`). Tier 1 reads only a
-        // program the checker accepted, where its place is an integer.
+        // program the checker accepted, where its place is an integer, or the `Any` of `todo` or
+        // `unreachable`, which Tier 1 meets only in an empty state, since evaluating either
+        // empties it first.
         let compounds = tree
             .stmts
             .iter()
@@ -8461,6 +8463,25 @@ mod tests {
             .map(|(k, _, proven)| (k, proven))
             .collect();
         assert_eq!(unproven, Vec::new());
+    }
+
+    /// A compound remainder's place is an integer, or the `Any` of `todo` or `unreachable`, which
+    /// the checker accepts too (`Fx::rest`): Tier 1 meets such a place only where no run
+    /// reaches, since evaluating `todo` empties the state first. The program checks, and the
+    /// statement after the `todo` is reached in an empty state.
+    #[test]
+    fn test_a_compound_remainder_of_a_todo_place_is_met_only_where_no_run_reaches() {
+        let src = "pub fn f(a: [2]u8[1..=9]) -> u8 {\n  var y = todo(\"later\")\n  y %= a[1]\n  _ = y\n  0\n}";
+        assert_eq!(codes(src), NONE);
+        with_fx(src, |fx, st| {
+            let Some(Body::Block(b)) = fx.syntax.body else {
+                panic!("a block body");
+            };
+            let stmts = fx.tree.block(b).stmts.clone();
+            let mut at = st.clone();
+            fx.stmt_eval(&mut at, stmts[0], None);
+            assert!(at.is_empty(), "the state after `todo` is reached");
+        });
     }
 
     /// Every compound operator, after a site value on its right side, proves only what holds:
