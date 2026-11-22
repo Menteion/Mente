@@ -1,7 +1,7 @@
 ---
 id: records-every-file
 status: deferred
-trigger: when pressure-report, which also changes records.rs, test-isolation's rewrite of mutants.yml (#202), the quick checks' report of their tree (#203) and gate-tools-from-main, which shares six of its files, have merged
+trigger: when pressure-report, which also changes records.rs, test-isolation's rewrite of mutants.yml (#202), the quick checks' report of their tree (#203) and gate-tools-from-main, which shares files with this round, have merged
 type: chore
 awaits: [docs/design-review.md#records-one-per-file]
 affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, tools/quick.mjs, tools/quick.test.mjs, tools/cargo.mjs, tools/local-limits.mjs, tools/quick-checks.json, .github/scripts/policy/local-tools.test.mjs, .github/workflows/ci.yml, .github/workflows/mutants.yml, .github/workflows/mutants-full.yml, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .gitignore, CLAUDE.md, docs/design-review.md, docs/escapes/undeclared-record-directory.md, docs/escapes/undeclared-record-other-markup.md, briefs/goldens-one-per-program.md, briefs/records-every-file.md, briefs/archive/records-every-file.md]
