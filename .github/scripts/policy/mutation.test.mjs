@@ -5,7 +5,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "../lib/commits.mjs";
-import { SANDBOX_PROGRAM, deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "../lib/mutants-floor.mjs";
+import { BUILD_SECONDS, MAX_SHARDS, PLAN_REASONS, SANDBOX_PROGRAM, SHARD_MINUTES, deletedRegexes, evidence, exactRegex, expected, missing, nameProblems, parseDiff, planShards, readList, runList, touched } from "../lib/mutants-floor.mjs";
 import { read, strings, tracked, workspace } from "./repo.mjs";
 import { steps, workflows } from "./workflows.mjs";
 
@@ -13,7 +13,7 @@ import { steps, workflows } from "./workflows.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 3;
+const FLOOR = 4;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -276,12 +276,14 @@ export function rustTokensText(text) {
 /// each for a space between tokens; JavaScript's \s knows only the last two. None may stand in a
 /// Rust source or in a file under compiler/ or spikes/.
 const RUST_SPACE_BEYOND_ASCII = new RegExp(`[${String.fromCharCode(0x85, 0x200e, 0x200f, 0x2028, 0x2029)}]`);
-/// `mutants::skip` as cargo-mutants 27.1.0 reads it, in its tokens: path segments `mutants` and
-/// `skip`, a leading `::` or not, alone or under a cfg_attr, with any space, line or comment
-/// between them, and raw identifiers. cargo-mutants has no option that disregards it, so the rule
-/// is here. It takes a function out of every mutation run, the floor included.
+/// cargo-mutants' attributes as the pinned build reads them (CARGO_MUTANTS_REV), in its tokens:
+/// path segments `mutants` and `skip` or `exclude_re`, a leading `::` or not, alone or under a
+/// cfg_attr, with any space, line or comment between them, and raw identifiers. `skip` takes an
+/// item out of every mutation run, and `exclude_re` the mutants its pattern names, the floor's
+/// included; cargo-mutants has no option that disregards either, so the rule is here. The build
+/// after 27.1.0 reads `exclude_re`, and `skip` on constants and statics too.
 const RUST_SPACE = `\\s${String.fromCharCode(0x85, 0x200e, 0x200f)}`;
-const MUTANTS_SKIP = new RegExp(`\\b(?:r#)?mutants[${RUST_SPACE}]*::[${RUST_SPACE}]*(?:r#)?skip\\b`);
+const MUTANTS_SKIP = new RegExp(`\\b(?:r#)?mutants[${RUST_SPACE}]*::[${RUST_SPACE}]*(?:r#)?(?:skip|exclude_re)\\b`);
 const namesMutantsSkip = (text) => MUTANTS_SKIP.test(rustTokensText(text));
 /// The attributes of a Rust source, each the text between `#[` or `#![` and its closing bracket, in
 /// the source's tokens (so no bracket in a string or a comment counts), in one pass.
@@ -303,7 +305,7 @@ export function rustAttributes(text) {
   return found;
 }
 /// A `path = ...` in an attribute, alone or under a cfg_attr: the module it names is read from a
-/// file of any name, wherever it lies (cargo-mutants 27.1.0 refuses only a leading `/`), so a
+/// file of any name, wherever it lies (cargo-mutants refuses only a leading `/`), so a
 /// function put there escapes every rule that reads the sources by their names.
 const PATH_ATTRIBUTE = /(?<![\w#])(?:r#)?path\s*=/;
 const readsModuleFromPath = (text) => rustAttributes(text).some((a) => PATH_ATTRIBUTE.test(a));
@@ -315,7 +317,7 @@ const readsModuleFromPath = (text) => rustAttributes(text).some((a) => PATH_ATTR
 const INCLUDE_MACRO = new RegExp(`(?<![\\w#])(?:r#)?include[${RUST_SPACE}]*!`);
 const includesSource = (text) => INCLUDE_MACRO.test(rustTokensText(text));
 /// An attribute whose path ends in `test` with segments before it (`rust_analyzer::test`,
-/// `miri::test`, `::test`): cargo-mutants 27.1.0 skips any item whose attribute path ends in `test`
+/// `miri::test`, `::test`): cargo-mutants skips any item whose attribute path ends in `test`
 /// (`attr_is_test`), as it skips `mutants::skip`, and clippy and rustfmt let some of them through (the
 /// fourth review of PR 137: `#[rust_analyzer::test]` took 13 listed mutants to 0). The bare `#[test]`
 /// marks a test, which no non-test code can call.
@@ -333,7 +335,7 @@ check("git reads every change as text, and no source names mutants::skip, an att
   for (const f of [...tracked()].filter((x) => x.endsWith(".rs") || x.startsWith("compiler/") || x.startsWith("spikes/"))) {
     const text = read(f);
     if (RUST_SPACE_BEYOND_ASCII.test(text)) problems.push(`${f}: a space of Rust's beyond ASCII (U+0085, U+200E, U+200F, U+2028 or U+2029)`);
-    if (f.endsWith(".rs") ? namesMutantsSkip(text) : MUTANTS_SKIP.test(text)) problems.push(`${f}: mutants::skip, which takes a function out of every mutation run, the Mutants floor's included`);
+    if (f.endsWith(".rs") ? namesMutantsSkip(text) : MUTANTS_SKIP.test(text)) problems.push(`${f}: mutants::skip or mutants::exclude_re, which takes mutants out of every mutation run, the Mutants floor's included`);
     if (f.endsWith(".rs") && readsModuleFromPath(text)) problems.push(`${f}: a #[path] attribute, whose module could be a file of any name the rules here do not read`);
     if (f.endsWith(".rs") && includesSource(text)) problems.push(`${f}: include!, which compiles another file's text into this one, out of reach of the rules that read a module by its file`);
     if (f.endsWith(".rs") && skipsAsTest(text)) problems.push(`${f}: an attribute whose path ends in ::test, which cargo-mutants reads as a test and skips`);
@@ -431,10 +433,15 @@ check("git reads every change as text, and no source names mutants::skip, an att
     "const A: char = '\"';\n#[mutants::skip]\nconst B: &str = \"\";",
     'const A: &str = r#"/*"#;\n#[mutants::skip]',
     "fn f<'a>(x: &'a str) {}\n#[mutants::skip]",
+    // The attribute the pinned build reads beside skip, which excludes the mutants its pattern names.
+    '#[mutants::exclude_re("replace .* with true")]',
+    '#[cfg_attr(test, mutants::exclude_re("delete !"))]',
+    '#[mutants :: /* c */ exclude_re("x")]',
+    '#[::mutants::r#exclude_re("x")]',
   ]) {
     assert.ok(namesMutantsSkip(`fn f() {}\n${plant}\nfn g() {}\n`), `the mutants::skip rule lets through: ${plant}`);
   }
-  for (const fine of ["mir_mutants::command(&root)", "mutants_skip", "mutants::skipped_count", "// #[mutants::skip]", "/* #[mutants::skip] */", 'const S: &str = "#[mutants::skip]";', 'const S: &str = r##"#[mutants::skip]"##;']) {
+  for (const fine of ["mir_mutants::command(&root)", "mutants_skip", "mutants::skipped_count", "mutants::exclude_regexes()", "// #[mutants::skip]", "/* #[mutants::skip] */", 'const S: &str = "#[mutants::skip]";', 'const S: &str = r##"#[mutants::skip]"##;', '// #[mutants::exclude_re("x")]']) {
     assert.ok(!namesMutantsSkip(fine), `the mutants::skip rule refuses: ${fine}`);
   }
   // In time linear in the text, whatever it holds (CodeQL found the first pattern backtracking on
@@ -457,7 +464,8 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   // the tab git ends it with.
   assert.throws(() => parseDiff('diff --git "a/compiler/a/src/\\303\\251.rs" "b/compiler/a/src/\\303\\251.rs"\n--- "a/compiler/a/src/\\303\\251.rs"\n+++ "b/compiler/a/src/\\303\\251.rs"\n@@ -1,1 +1,2 @@\n x\n+y\n'), /git quoted/);
   assert.deepEqual([...parseDiff("diff --git a/compiler/a/src/a b.rs b/compiler/a/src/a b.rs\n--- a/compiler/a/src/a b.rs\t\n+++ b/compiler/a/src/a b.rs\t\n@@ -1,1 +1,2 @@\n x\n+y\n").added.keys()], ["compiler/a/src/a b.rs"]);
-  const mutantsJob = steps(workflows().find((w) => w.file === "mutants.yml").doc.jobs["in-diff"]).map((s) => String(s.run ?? "")).join("\n");
+  const mutantsDoc = workflows().find((w) => w.file === "mutants.yml").doc;
+  const mutantsJob = ["plan", "shard"].flatMap((id) => steps(mutantsDoc.jobs[id])).map((s) => String(s.run ?? "")).join("\n");
   // With quotePath off, git quotes only a path holding a quote, a backslash or a control character,
   // which the floor refuses; a path in any other script stays as it is (the fourth review).
   assert.match(mutantsJob, /^\s*git -c core\.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > pr\.diff$/m, "the Mutants job reads the diff in a form .gitattributes or the path's characters can change");
@@ -611,4 +619,78 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     assert.equal(evidence({ outcomes: one }, logs(one)).length, c.expect === "refused" ? 1 : 0, `${id}, from real rustc output, is not ${c.expect}: ${c.why}`);
   }
   assert.deepEqual(evidence({ outcomes: stubbed }, logs(stubbed)).map((p) => p.split(":")[0]), stubbed.map((o) => o.scenario.Mutant.name));
+});
+
+check("the plan deals every mutant of the run to one shard, as many shards as the baseline's time needs, and each shard runs its share", () => {
+  const m = (name) => ({ name, file: "compiler/a/src/lib.rs", function: null, span: { start: { line: 1, column: 1 }, end: { line: 1, column: 2 } } });
+  // The run: the diff's list, then each mutant around a deleted line it does not hold.
+  assert.deepEqual(runList([m("a"), m("b")], [m("b"), m("c"), m("c")]).map((x) => x.name), ["a", "b", "c", "c"]);
+  // Nothing to mutate.
+  assert.deepEqual(planShards([], 186), { reason: "no-mutants", needed: 0, shards: [] });
+  // As many shards as the estimate needs: each mutant the baseline's tests and BUILD_SECONDS.
+  const fit = Math.floor((SHARD_MINUTES * 60) / (100 + BUILD_SECONDS));
+  const names = (n) => Array.from({ length: n }, (_, k) => m(`m${k}`));
+  assert.equal(planShards(names(fit), 100).needed, 1, "a shard's worth of mutants takes one shard");
+  assert.equal(planShards(names(fit + 1), 100).needed, 2, "one more takes a second");
+  assert.equal(planShards(names(1), 100).needed, 1);
+  // Dealt round-robin in the list's order, all of a name to one shard: a slice by file put the
+  // slowest files in one shard.
+  const dealt = planShards(names(10), Math.ceil((SHARD_MINUTES * 60 * 3) / 10) - BUILD_SECONDS);
+  assert.equal(dealt.reason, "sharded");
+  assert.deepEqual(dealt.shards.map((s) => s.map((x) => x.name)), [["m0", "m3", "m6", "m9"], ["m1", "m4", "m7"], ["m2", "m5", "m8"]]);
+  const twins = planShards([m("x"), m("y"), m("x"), m("z")], Math.ceil((SHARD_MINUTES * 60 * 2) / 4) - BUILD_SECONDS);
+  assert.deepEqual(twins.shards.map((s) => s.map((x) => x.name)), [["x", "x", "z"], ["y"]], "two mutants of one name in two shards, each listing both by its regex");
+  // More shards than names would leave one empty, since one name's mutants alone outlast a
+  // shard's time: refused (the review of 560ccd9).
+  assert.deepEqual(planShards([m("x"), m("x"), m("x")], 4000), { reason: "too-large", needed: 2, shards: [] }, "three mutants of one name over two shards");
+  assert.deepEqual(planShards([m("a")], SHARD_MINUTES * 60), { reason: "too-large", needed: 2, shards: [] }, "one mutant longer than a shard's time");
+  // More than MAX_SHARDS refuse the run, with the shards it would need; at MAX_SHARDS it runs.
+  const most = Math.floor((MAX_SHARDS * SHARD_MINUTES * 60) / (100 + BUILD_SECONDS));
+  assert.equal(planShards(names(most), 100).needed, MAX_SHARDS);
+  assert.deepEqual(planShards(names(most + 1), 100), { reason: "too-large", needed: MAX_SHARDS + 1, shards: [] });
+  for (const seconds of [0, -1, 1.5, Number.NaN, "100"]) assert.throws(() => planShards(names(3), seconds), /whole number of seconds/, String(seconds));
+  assert.deepEqual(PLAN_REASONS, ["sharded", "no-mutants", "too-large"], "the reasons the aggregate's script knows");
+  // A shard's names against those it ran, each counted as often as it stands.
+  assert.deepEqual(nameProblems(["a", "b", "b"], ["b", "a", "b"]), []);
+  assert.deepEqual(nameProblems(["a", "b"], ["a"]), ["b: dealt 1 more time(s) than it ran"]);
+  assert.deepEqual(nameProblems(["a"], ["a", "c"]), ["c: ran 1 more time(s) than it was dealt"]);
+  assert.deepEqual(nameProblems(["a", "a"], ["a"]), ["a: dealt 1 more time(s) than it ran"], "a twin dealt twice and run once");
+  // The workflow keeps to the plan: no run of cargo-mutants slices the list itself, the shards'
+  // time limit holds twice the plan's time for each, and each shard reads the files the plan wrote.
+  const doc = workflows().find((w) => w.file === "mutants.yml").doc;
+  const scripts = Object.values(doc.jobs).flatMap((j) => steps(j)).map((s) => String(s.run ?? "")).join("\n");
+  assert.doesNotMatch(scripts, /--shard\b/, "a run of cargo-mutants in mutants.yml takes --shard, beside the plan's own dealing");
+  assert.ok(doc.jobs.shard["timeout-minutes"] >= 2 * SHARD_MINUTES, "a shard's time limit is less than twice the plan's time for it");
+  assert.ok(doc.jobs.shard.strategy?.matrix?.shard === "${{ fromJSON(needs.plan.outputs.shards) }}", "the shards are not those the plan made");
+  const planStep = steps(doc.jobs.plan).find((s) => s.id === "plan");
+  assert.match(String(planStep?.run), /mutants-floor\.mjs plan diff-mutants\.json deleted-mutants\.json "\$\(cat baseline-seconds\.txt\)" plan >> "\$GITHUB_OUTPUT"\n/);
+  const upload = steps(doc.jobs.plan).find((s) => String(s.uses ?? "").startsWith("actions/upload-artifact@") && s.with?.name === "mutants-plan");
+  const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@") && s.with?.path === "mutants-plan");
+  assert.equal(upload?.with?.name, download?.with?.name, "the shards download another artifact than the plan keeps");
+  assert.ok(String(upload.with.path).split("\n").includes("plan") && download.with.path === "mutants-plan", "the shards read the plan's files elsewhere than it keeps them");
+  // Every run of cargo-mutants, the full run's too, is the build of the one commit the policy holds
+  // (CARGO_MUTANTS_REV in build-and-toolchain.test.mjs), with its own lock.
+  const installs = workflows().flatMap(({ file, doc: d }) => Object.values(d.jobs ?? {}).flatMap((j) => steps(j)).flatMap((s) => String(s.run ?? "").split("\n").filter((l) => /\bcargo\s+install\b[^\n]*\bmutants\b/.test(l)).map((l) => [file, l.trim()])));
+  assert.ok(installs.length >= 2, "the policy reads the installs of cargo-mutants");
+  // Built once, by the plan and by the full run's build job, and handed to each shard as the binary
+  // whose digest the builder took right after building it, before anything else ran there.
+  const full = workflows().find((w) => w.file === "mutants-full.yml").doc;
+  for (const [where, builder, shard, need] of [
+    ["mutants.yml", doc.jobs.plan, doc.jobs.shard, "plan"],
+    ["mutants-full.yml", full.jobs.build, full.jobs.full, "build"],
+  ]) {
+    const install = steps(builder).find((s) => s.id === "mutants");
+    assert.equal(String(install?.run), 'cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"\necho "digest=$(/usr/bin/sha256sum "$HOME/.cargo/bin/cargo-mutants" | /usr/bin/cut -c1-64)" >> "$GITHUB_OUTPUT"\n', `${where}: the builder does not install cargo-mutants and take its digest, alone, in its step mutants`);
+    assert.equal(builder.outputs?.mutants, "${{ steps.mutants.outputs.digest }}", `${where}: the builder gives another digest than its step's`);
+    const next = steps(builder)[steps(builder).indexOf(install) + 1];
+    assert.ok(String(next?.uses ?? "").startsWith("actions/upload-artifact@") && next.with?.name === "cargo-mutants" && next.with?.path === "~/.cargo/bin/cargo-mutants", `${where}: the builder does not keep the binary it built, right after building it`);
+    assert.ok(!steps(shard).some((s) => /\bcargo\s+install\b[^\n]*\bmutants\b/.test(String(s.run ?? ""))), `${where}: a shard builds cargo-mutants of its own`);
+    const verify = steps(shard).find((s) => /sha256sum -c "\$RUNNER_TEMP\/cargo-mutants\.sha256"/.test(String(s.run ?? "")));
+    assert.equal(verify?.env?.DIGEST, `\${{ needs.${need}.outputs.mutants }}`, `${where}: a shard checks cargo-mutants against another digest than its builder's`);
+    assert.ok([].concat(shard.needs ?? []).includes(need), `${where}: a shard does not need its builder, whose digest it reads`);
+    assert.ok(String(verify.run).trimEnd().endsWith('/usr/bin/install -m 755 "$RUNNER_TEMP/cargo-mutants/cargo-mutants" "$HOME/.cargo/bin/cargo-mutants"'), `${where}: a shard installs cargo-mutants other than after checking it`);
+  }
+  for (const [file, line] of installs) assert.equal(line, 'cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"', `${file} installs cargo-mutants otherwise than from the commit the policy holds`);
+  const shardScripts = steps(doc.jobs.shard).map((s) => String(s.run ?? "")).join("\n");
+  assert.equal(shardScripts.split('< "mutants-plan/plan/shard-$SHARD.re"').length, 3, "the shard's list and its run do not both read its regexes");
 });

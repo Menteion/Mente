@@ -84,9 +84,19 @@ export function requiredChecks() {
     .filter((l) => l !== "" && !l.startsWith("#"));
 }
 
+/// The jobs a job needs, by their ids: `needs:` as a list or a single id.
+export const needsOf = (job) => (Array.isArray(job?.needs) ? job.needs.map(String) : typeof job?.needs === "string" ? [job.needs] : []);
+
+/// The required jobs: each job that reports a check .github/required-checks.txt names, and each job
+/// such a job needs, since a required job that needs others is the aggregate of its workflow (as
+/// "Mutants in the diff" is of its plan and shards), which passes only when they do; each is held
+/// as a required job is. required-checks.test.mjs holds the aggregate's own shape (aggregateProblems).
 export function requiredJobs() {
   const required = new Set(requiredChecks());
-  return allJobs().filter((j) => j.names.some((n) => required.has(n)));
+  const jobs = allJobs();
+  const named = jobs.filter((j) => j.names.some((n) => required.has(n)));
+  const parts = new Set(named.flatMap((j) => needsOf(j.job).map((id) => `${j.file}#${id}`)));
+  return jobs.filter((j) => named.includes(j) || parts.has(`${j.file}#${j.id}`));
 }
 
 export const steps = (job) => (Array.isArray(job.steps) ? job.steps : []);

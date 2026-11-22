@@ -11,7 +11,7 @@ import { pins as actionPins, problems as actionPinProblems, taggedCommit } from 
 import { ROOT, read, tracked } from "./repo.mjs";
 import { RUNNERS, runnersOf } from "./sandbox.mjs";
 import { BROKER_STEP, HELD_OUT_STEP, SECRET_SHELL, isStep } from "./secrets.mjs";
-import { REQUIRED_EVENTS, SHELLS, WORKFLOWS, allJobs, checkNames, isPlain, permissionProblems, requiredChecks, requiredJobs, stepKey, steps, triggers, workflows } from "./workflows.mjs";
+import { REQUIRED_EVENTS, SHELLS, WORKFLOWS, allJobs, checkNames, isPlain, needsOf, permissionProblems, requiredChecks, requiredJobs, stepKey, steps, triggers, workflows } from "./workflows.mjs";
 
 /// Every check of this module counts itself when it runs, and the module fails when fewer ran than
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
@@ -237,6 +237,31 @@ check("the Documentation job lints every workflow with actionlint and shellcheck
 /// literal. Such a job's workflow runs on no pull request, push or queue, and its name's literal
 /// start is the start of no required check.
 const MATRIX_FROM_INPUTS = new Map([["mutants-full.yml#full", "the shards to run are the dispatch's choice"]]);
+/// The jobs whose matrix the plan of their workflow makes, each with its reason, by one key the name
+/// reads: `${{ fromJSON(needs.<plan>.outputs.<key>s) }}` for a plan it needs, every leg run
+/// (fail-fast off). Its name's literal start is the start of no required check, and its name, its
+/// matrix value read as any text, is no required check, so no leg can report one; the aggregate
+/// its plan feeds reads every leg's result.
+const MATRIX_FROM_PLAN = new Map([["mutants.yml#shard", "the shards the plan made, as many as the diff's mutants need, which only the plan can count"]]);
+/// Why a job of MATRIX_FROM_PLAN takes its matrix otherwise than from its plan, or could report a
+/// required check.
+export function planMatrixProblems(key, job, required) {
+  const found = [];
+  const strategy = job?.strategy;
+  const name = String(job?.name ?? "");
+  const refs = [...name.matchAll(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/g)].map((m) => m[1]);
+  const matrixKey = refs[0];
+  if (refs.length !== 1) found.push(`${key}: its name reads ${refs.length} matrix values, not one`);
+  if (!isPlain(strategy) || Object.keys(strategy).some((k) => k !== "fail-fast" && k !== "matrix") || strategy["fail-fast"] !== false) found.push(`${key}: its strategy is more than its matrix with fail-fast: false`);
+  const matrix = strategy?.matrix;
+  const value = isPlain(matrix) && Object.keys(matrix).length === 1 ? matrix[matrixKey] : undefined;
+  const from = /^\$\{\{ fromJSON\(needs\.([\w-]+)\.outputs\.([\w-]+)\) \}\}$/.exec(String(value));
+  if (!from || !needsOf(job).includes(from[1]) || from[2] !== `${matrixKey}s`) found.push(`${key}: its matrix is not \${{ fromJSON(needs.<plan>.outputs.${matrixKey}s) }} for a plan it needs`);
+  const prefix = name.split("${{")[0];
+  const pattern = new RegExp(`^${name.split(/\$\{\{\s*matrix\.[\w-]+\s*\}\}/).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[\\s\\S]*")}$`);
+  if (prefix.trim() === "" || required.some((c) => c.startsWith(prefix) || pattern.test(c))) found.push(`${key}: its name, "${name}", could report a required check`);
+  return found;
+}
 /// Why a workflow's jobs could be named, run or set otherwise than the policy reads them: a name
 /// spelled by an expression other than a matrix value, a runner that is no literal of RUNNERS, a
 /// matrix, strategy or defaults holding an expression, an env or a step's inputs that are an
@@ -271,7 +296,9 @@ export function expressionProblems(file, doc) {
     const key = `${file}#${id}`;
     const name = String(job?.name ?? id);
     if (/\$\{\{/.test(name.replace(/\$\{\{\s*matrix\.[\w-]+\s*\}\}/g, ""))) found.push(`${key}: its name holds an expression other than a matrix value: ${name}`);
-    if (!MATRIX_FROM_INPUTS.has(key)) {
+    const planned = MATRIX_FROM_PLAN.has(key) && runsOnPush;
+    if (planned) found.push(...planMatrixProblems(key, job, requiredChecks()));
+    if (!MATRIX_FROM_INPUTS.has(key) && !planned) {
       const matrix = job?.strategy?.matrix;
       for (const [, ref] of name.matchAll(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/g)) {
         const values = matrixValuesOf(matrix, ref);
@@ -290,7 +317,7 @@ export function expressionProblems(file, doc) {
     }
     if (job?.strategy !== undefined && (!isPlain(job.strategy) || expression(job.strategy))) {
       const prefix = name.split("${{")[0];
-      const allowed = MATRIX_FROM_INPUTS.has(key) && !runsOnPush && prefix.trim() !== "" && ![...requiredChecks()].some((c) => c.startsWith(prefix));
+      const allowed = (MATRIX_FROM_INPUTS.has(key) && !runsOnPush && prefix.trim() !== "" && ![...requiredChecks()].some((c) => c.startsWith(prefix))) || (planned && planMatrixProblems(key, job, requiredChecks()).length === 0);
       if (!allowed) found.push(`${key}: its strategy or matrix is or holds an expression, so the checks it reports and its runners cannot be read`);
     }
     const runners = runnersOf(job);
@@ -331,6 +358,23 @@ check("no workflow names a job, its runners, its matrix, its defaults or a whole
     ["two keys GitHub reads as one", doc({ shadow: job({ name: "Rust (${{ matrix.name }})", strategy: { matrix: { name: ["a"], Name: ["b"] } } }) })],
   ]) {
     assert.ok(expressionProblems("plant.yml", plant).length > 0, `the expression rule lets through ${what}`);
+  }
+  // The shards' matrix, which only the plan can count, and the ways past it: a name that could
+  // report "Mutants in the diff", a matrix from elsewhere or from a job it does not need, a leg that
+  // stops the others, a name with no literal start.
+  const shard = workflows().find((w) => w.file === "mutants.yml").doc.jobs.shard;
+  const required = requiredChecks();
+  assert.deepEqual(planMatrixProblems("mutants.yml#shard", shard, required), []);
+  for (const [what, plant] of [
+    ["a name that could be a required check", { ...shard, name: "Mutants in the diff${{ matrix.shard }}" }],
+    ["a name with no literal start", { ...shard, name: "${{ matrix.shard }}" }],
+    ["a matrix from an input", { ...shard, strategy: { "fail-fast": false, matrix: { shard: "${{ fromJSON(inputs.shards) }}" } } }],
+    ["a matrix from a job it does not need", { ...shard, needs: [], strategy: { "fail-fast": false, matrix: { shard: "${{ fromJSON(needs.plan.outputs.shards) }}" } } }],
+    ["a matrix of another output", { ...shard, strategy: { "fail-fast": false, matrix: { shard: "${{ fromJSON(needs.plan.outputs.count) }}" } } }],
+    ["fail-fast left on", { ...shard, strategy: { matrix: shard.strategy.matrix } }],
+    ["a second matrix key", { ...shard, strategy: { "fail-fast": false, matrix: { ...shard.strategy.matrix, os: ["ubuntu-24.04"] } } }],
+  ]) {
+    assert.ok(planMatrixProblems("mutants.yml#shard", plant, required).length > 0, `the plan's matrix rule lets through ${what}`);
   }
   assert.deepEqual(expressionProblems("fine.yml", doc({ rust: job({ name: "Rust (${{ matrix.name }})", "runs-on": "${{ matrix.os }}", strategy: { matrix: { include: [{ name: "x86-64 Linux", os: "ubuntu-24.04" }] } }, env: { MENTE_X: "${{ matrix.name }}" } }) })), []);
 });

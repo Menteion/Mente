@@ -8,7 +8,7 @@ import path from "node:path";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "../lib/watch.mjs";
 import { SANDBOX_PROGRAM, deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "../lib/mutants-floor.mjs";
 import { ROOT, filesUnder, read, tracked, workspace } from "./repo.mjs";
-import { REPORT_FORMS, WATCH_FORMS, WORKFLOWS, allJobs, hasWatch, isReport, normalize, repoPaths, requiredChecks, requiredJobs, scriptTexts, steps } from "./workflows.mjs";
+import { REPORT_FORMS, WATCH_FORMS, WORKFLOWS, allJobs, hasWatch, isReport, needsOf, normalize, repoPaths, requiredChecks, requiredJobs, scriptTexts, steps } from "./workflows.mjs";
 
 /// Every check of this module counts itself when it runs, and the module fails when fewer ran than
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
@@ -29,30 +29,71 @@ const isDir = (dir) => [...tracked()].some((f) => f.startsWith(`${dir}/`));
 
 // ------------------------------------------------------------------ the watch and its path lists
 
+/// Why a job of a workflow decides otherwise than an instrument must: a job with a watch step
+/// checks out first with the whole history, then runs the watch over its workflow's list, alone,
+/// and every later step obeys the decision; a required job of an instrument workflow with no watch
+/// step is an aggregate, which decides through a job it needs that holds the watch, its plan
+/// (`sections`, the path lists; `required`, the required checks' names; `names`, the job's).
+export function watchProblems(file, doc, id, job, names, sections, required) {
+  const found = [];
+  const all = steps(job);
+  const where = `${file}, job ${id}`;
+  if (!hasWatch(job)) {
+    // It reads the plan's decision, which the plan gives as its watch step's own output.
+    const reads = new Set(steps(job).flatMap((s) => Object.values(s.env ?? {}).map(String)));
+    const planned = needsOf(job).some((need) => hasWatch(doc.jobs?.[need] ?? {}) && doc.jobs[need].outputs?.run === "${{ steps.watch.outputs.run }}" && reads.has(`\${{ needs.${need}.outputs.run }}`));
+    if (sections.has(file) && names.some((n) => required.has(n)) && !planned) found.push(`${where}: a required job of an instrument workflow with no watch step, and no job it needs holds one`);
+    return found;
+  }
+  if (!sections.has(file)) found.push(`${where}: a watch step, but ${PATHS_FILE} has no [${file}]`);
+  if (!/^actions\/checkout@/.test(String(all[0]?.uses ?? ""))) found.push(`${where}: the first step is not the checkout`);
+  if (all[0]?.with?.["fetch-depth"] !== 0) found.push(`${where}: the checkout needs fetch-depth: 0 for the diff`);
+  const watch = all[1];
+  if (watch?.id !== "watch") found.push(`${where}: the step after the checkout is not the watch`);
+  else {
+    if (String(watch.run).trim() !== `node .github/scripts/watch.mjs ${file}`) found.push(`${where}: the watch step reads another list`);
+    if (Object.keys(watch).sort().join(",") !== "id,name,run") found.push(`${where}: the watch step carries more than its name, id and command`);
+  }
+  for (const s of all.slice(2)) {
+    const condition = normalize(s.if ?? "");
+    if (!(WATCH_FORMS.includes(condition) || (REPORT_FORMS.includes(condition) && isReport(file, id, s)))) found.push(`${where}, step "${s.name ?? s.uses ?? s.run}": its if: is not one of the watch's forms`);
+  }
+  return found;
+}
+
 check("every instrument workflow decides at its first step, and every later step obeys", () => {
   const sections = parsePaths(read(PATHS_FILE));
   const required = new Set(requiredChecks());
-  for (const { file, id, job, names } of allJobs()) {
-    const all = steps(job);
-    if (!hasWatch(job)) {
-      assert.ok(!sections.has(file) || !names.some((n) => required.has(n)), `${file}, job ${id}: a required job of an instrument workflow with no watch step`);
-      continue;
-    }
-    const where = `${file}, job ${id}`;
-    assert.ok(sections.has(file), `${where}: a watch step, but ${PATHS_FILE} has no [${file}]`);
-    assert.match(String(all[0].uses ?? ""), /^actions\/checkout@/, `${where}: the first step is not the checkout`);
-    assert.equal(all[0].with?.["fetch-depth"], 0, `${where}: the checkout needs fetch-depth: 0 for the diff`);
-    const watch = all[1];
-    assert.equal(watch?.id, "watch", `${where}: the step after the checkout is not the watch`);
-    assert.equal(String(watch.run).trim(), `node .github/scripts/watch.mjs ${file}`, `${where}: the watch step reads another list`);
-    assert.deepEqual(Object.keys(watch).sort(), ["id", "name", "run"], `${where}: the watch step carries more than its name, id and command`);
-    for (const s of all.slice(2)) {
-      const condition = normalize(s.if ?? "");
-      assert.ok(
-        WATCH_FORMS.includes(condition) || (REPORT_FORMS.includes(condition) && isReport(file, id, s)),
-        `${where}, step "${s.name ?? s.uses ?? s.run}": its if: is not one of the watch's forms`,
-      );
-    }
+  for (const { file, doc, id, job, names } of allJobs()) assert.deepEqual(watchProblems(file, doc, id, job, names, sections, required), []);
+  // Planted, around the aggregate's exception: "Mutants in the diff" decides through its plan, and
+  // fails once no job it needs holds the watch, once it needs nothing, or once what it needs is no
+  // job; a shard, no required check, needs no watch of its own; and a watched job keeps its rules.
+  const mutants = allJobs().filter((j) => j.file === "mutants.yml");
+  const doc = mutants[0].doc;
+  const job = (id) => mutants.find((j) => j.id === id);
+  const aggregate = job("aggregate");
+  const verdict = (d, id, j, names) => watchProblems("mutants.yml", d, id, j, names, sections, required);
+  assert.deepEqual(verdict(doc, "aggregate", aggregate.job, aggregate.names), []);
+  assert.deepEqual(verdict(doc, "shard", job("shard").job, job("shard").names), []);
+  const unwatched = { ...doc, jobs: { ...doc.jobs, plan: { ...doc.jobs.plan, steps: steps(doc.jobs.plan).filter((s) => s.id !== "watch") } } };
+  for (const [what, d, j] of [
+    ["a plan that holds no watch", unwatched, aggregate.job],
+    ["no needs", doc, Object.fromEntries(Object.entries(aggregate.job).filter(([k]) => k !== "needs"))],
+    ["needs that name only the shards", doc, { ...aggregate.job, needs: ["shard"] }],
+    ["a need that is no job", doc, { ...aggregate.job, needs: ["gone"] }],
+    // The review of 560ccd9: the plan's decision read through an output bound elsewhere, or not
+    // read at all.
+    ["a plan whose run output is no watch's", { ...doc, jobs: { ...doc.jobs, plan: { ...doc.jobs.plan, outputs: { ...doc.jobs.plan.outputs, run: "true" } } } }, aggregate.job],
+    ["the plan's decision unread", doc, { ...aggregate.job, steps: steps(aggregate.job).map((s) => ({ ...s, env: Object.fromEntries(Object.entries(s.env ?? {}).filter(([k]) => k !== "RUN")) })) }],
+  ]) {
+    assert.ok(verdict(d, "aggregate", j, aggregate.names).length > 0, `a required job with ${what} passes without a watch`);
+  }
+  const plan = job("plan");
+  for (const [what, j] of [
+    ["the watch after another step", { ...plan.job, steps: [steps(plan.job)[0], steps(plan.job)[2], steps(plan.job)[1], ...steps(plan.job).slice(3)] }],
+    ["a step under another condition", { ...plan.job, steps: [...steps(plan.job).slice(0, 2), { ...steps(plan.job)[2], if: "true" }, ...steps(plan.job).slice(3)] }],
+  ]) {
+    assert.ok(verdict(doc, "plan", j, plan.names).length > 0, `a watched job with ${what} passes`);
   }
   for (const file of sections.keys()) {
     assert.ok(allJobs().some((j) => j.file === file && steps(j.job)[1]?.id === "watch"), `${PATHS_FILE}: no job of ${file} reads [${file}]`);
