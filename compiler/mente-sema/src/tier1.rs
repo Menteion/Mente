@@ -2804,17 +2804,14 @@ impl<'a> Fx<'a> {
             .map(|_| (n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)))
             .collect();
         // A compound remainder `p %= e` is no expression's, so its value has a variable of its
-        // own, which no expression's value is held in (`Fx::binary`).
+        // own, which no expression's value is held in (`Fx::binary`). Tier 1 reads only a
+        // program the checker accepted, where its place is an integer.
         let compounds = tree
             .stmts
             .iter()
             .map(|s| match &s.kind {
-                StmtKind::Assign { place, op, .. } => match op {
-                    AssignOp::Compound(BinaryOp::Rem)
-                        if int_type(&f.typing.exprs[place.0 as usize]).is_some() =>
-                    {
-                        n.alloc(true)
-                    }
+                StmtKind::Assign { op, .. } => match op {
+                    AssignOp::Compound(BinaryOp::Rem) => n.alloc(true),
                     AssignOp::Set | AssignOp::Compound(_) => None,
                 },
                 StmtKind::Binding { .. }
