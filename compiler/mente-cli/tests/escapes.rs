@@ -254,13 +254,22 @@ fn test_a_file_is_refused_for_each_rule_of_its_front_matter() {
             ),
             "not the fields",
         ),
-        (good.replace("root: held", "root: Held"), "a root that is neither"),
-        (good.replace("root: held", "root: partly"), "a root that is neither"),
+        (
+            good.replace("root: held", "root: Held"),
+            "a root that is neither",
+        ),
+        (
+            good.replace("root: held", "root: partly"),
+            "a root that is neither",
+        ),
         (
             good.replace("root: held", "root: removed held"),
             "a root that is neither",
         ),
-        (good.replace("root: held", "root: ''"), "a root that is neither"),
+        (
+            good.replace("root: held", "root: ''"),
+            "a root that is neither",
+        ),
         (good.replace("root: held", "roots: held"), "not the fields"),
     ] {
         let found = escapes::parse("walker-hid", &bad).expect_err(&bad);
