@@ -21,6 +21,8 @@
 //!   `--check` checks each escape as its test does.
 //! - `mn evidence --spec-guard F --nextest F... [--node F]...`: Checks every guard of the escaped bugs
 //!   and every test an `@assert-count` names as evidence against what the runners run.
+//! - `mn pressure [--since D] [--top N]`: Reads `main`'s history from `git log` on its standard input and
+//!   ranks the files by how many merged pull requests changed them, each with what it is among the records.
 
 use std::env;
 use std::fs;
@@ -29,7 +31,7 @@ use std::process;
 use std::time::Instant;
 
 use mente_ast::project_spec_blueprint;
-use mente_cli::{escapes, evidence};
+use mente_cli::{escapes, evidence, pressure, records};
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
 use mente_sema::{Listings, SourceChecked};
 use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
@@ -91,6 +93,7 @@ fn run() {
         "fuzz" => cmd_fuzz(&args[1..]),
         "escapes" => cmd_escapes(&args[1..]),
         "evidence" => cmd_evidence(&args[1..]),
+        "pressure" => cmd_pressure(&args[1..]),
         other => {
             eprintln!("Unknown command `{}`. Run `mn --help` for usage.", other);
             process::exit(1);
@@ -124,6 +127,7 @@ fn print_help() {
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
     println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes/ per week and per area; --check checks each escape");
     println!("  mn evidence --spec-guard F --nextest F... [--node F]...  Check each escape's guard and each test named as evidence against the tests the runners run");
+    println!("  mn pressure [--since D] [--top N]  Rank the files by how many merged pull requests changed them, from git log on stdin");
     println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
     println!("                               Fuzz every phase of the compiler, and minimize each crash found");
 }
@@ -1438,6 +1442,48 @@ fn cmd_evidence(args: &[String]) {
         "[PASS] mn evidence: every guard of {} and every test named as evidence runs",
         escapes::RECORD
     );
+}
+
+/// `mn pressure [--since YYYY-MM-DD] [--top N]`: the pull requests merged in the log on standard
+/// input, as `pressure::LOG` prints it, and the files the most of them changed, the twenty first
+/// unless `--top` says how many (`pressure.rs`). A report, never a gate.
+fn cmd_pressure(args: &[String]) {
+    fn usage() -> ! {
+        eprintln!(
+            "Usage: {} && {} | mn pressure [--since YYYY-MM-DD] [--top N]",
+            pressure::FETCH,
+            pressure::LOG
+        );
+        process::exit(1);
+    }
+    let mut since: Option<&str> = None;
+    let mut top: Option<usize> = None;
+    let mut rest = args.iter();
+    while let Some(flag) = rest.next() {
+        let Some(value) = rest.next() else { usage() };
+        match flag.as_str() {
+            "--since" if since.is_none() && records::is_day(value) => since = Some(value),
+            "--top" if top.is_none() => match value.parse::<usize>() {
+                Ok(n) if n > 0 => top = Some(n),
+                _ => usage(),
+            },
+            _ => usage(),
+        }
+    }
+    let log = match std::io::read_to_string(std::io::stdin()) {
+        Ok(log) => log,
+        Err(e) => {
+            eprintln!("[FAIL] standard input: {}", e);
+            process::exit(1);
+        }
+    };
+    match pressure::merges(&log) {
+        Ok(merges) => print!("{}", pressure::report(&merges, since, top.unwrap_or(20))),
+        Err(e) => {
+            eprintln!("[FAIL] {}", e);
+            process::exit(1);
+        }
+    }
 }
 
 fn cmd_spec(_args: &[String]) {
