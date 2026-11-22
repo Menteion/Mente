@@ -1,0 +1,16 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (item 10), inside an `or` as much as anywhere: the
+// call makes `x` 9 where `x == 0 or x == 1` held before it.
+fn bump(mut x: u8) -> u8 {
+  x = 9
+  0
+}
+
+pub fn f(x0: u8) -> u8[0..=1] {
+  var x: u8 = x0
+  if (x == 0 or x == 1) and bump(mut x) == 0 {
+    return x
+  }
+  0
+}

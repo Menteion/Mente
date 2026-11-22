@@ -316,11 +316,13 @@ fn shapes() -> Vec<Shape> {
             |_| "guard (".into(),
             |_| ") > 0 else {\nreturn 0\n}\n1".into(),
         ),
+        // The next depth stands in the loop's condition, which changes nothing
+        // (`core-calculus.md`, item 10): the loop leaves after one round instead of counting.
         in_blocks(
             "while",
             "",
-            |i| format!("var w{}: u32 = 0\nwhile w{} < (", i, i),
-            |i| format!(") {{\nw{} = w{} + 1\n}}\nw{}", i, i, i),
+            |i| format!("val w{}: u32 = 0\nwhile w{} < (", i, i),
+            |i| format!(") {{\nbreak\n}}\nw{}", i),
         ),
         nested("~x", "", |_| "~(".into(), |_| ")".into()),
         nested(

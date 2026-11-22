@@ -1205,17 +1205,6 @@ fn mentions(v: &Val, var: usize) -> bool {
     }
 }
 
-/// Whether condition `c` reads `var`.
-fn cond_mentions(c: &Cond, var: usize) -> bool {
-    match c {
-        Cond::Cmp(_, l, r) => mentions(l, var) || mentions(r, var),
-        Cond::Far(_, far) => mentions(&far.0, var),
-        Cond::Not(a) => cond_mentions(a, var),
-        Cond::And(a, b) | Cond::Or(a, b) => cond_mentions(a, var) || cond_mentions(b, var),
-        Cond::Const(_) | Cond::Unknown => false,
-    }
-}
-
 /// After `var = terms + c`: the bounds beyond the octagon's reach that a single term carries,
 /// shifted by `c` and negated with the term. A sum of more terms carries none, which is sound.
 fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
@@ -4289,7 +4278,12 @@ impl<'a> Fx<'a> {
             }
             self.scope.push(i);
         }
+        // The function's clauses change nothing (`Fx::changes_nothing`), whether they are
+        // checked at run time or erased.
         let syntax = self.syntax;
+        for c in &syntax.contracts {
+            self.changes_nothing(c.expr, "clause");
+        }
         for c in &syntax.contracts {
             if c.kind == ContractKind::Requires {
                 let k = self.cond(st, c.expr);
@@ -4401,11 +4395,17 @@ impl<'a> Fx<'a> {
             StmtKind::While {
                 cond,
                 invariants,
+                decreases,
                 body,
-                ..
-            } => self.while_loop(st, s, *cond, invariants, *body),
+            } => {
+                // A loop's clauses change nothing, as its condition does (`Fx::decide`).
+                for &e in invariants.iter().chain(decreases) {
+                    self.changes_nothing(e, "clause");
+                }
+                self.while_loop(st, s, *cond, invariants, *body)
+            }
             StmtKind::Guard { cond, otherwise } => {
-                let c = self.cond(st, *cond);
+                let c = self.decide(st, *cond);
                 let mut o = st.clone();
                 self.assume(&mut o, &c, false);
                 self.block(&mut o, *otherwise, None);
@@ -5106,9 +5106,9 @@ impl<'a> Fx<'a> {
         scrutinee: ExprId,
         arms: &[Arm],
     ) -> Vec<(Octagon, Val)> {
-        let is_bool = matches!(self.typing.exprs[scrutinee.0 as usize], Ty::Bool);
-        let (value, cond) = if is_bool {
-            (Val::Other, Some(self.cond(&mut st, scrutinee)))
+        // A `match` on a `bool` decides as an `if` does, and its scrutinee is a condition.
+        let (value, cond) = if crate::conditions::decides(self.typing, scrutinee) {
+            (Val::Other, Some(self.decide(&mut st, scrutinee)))
         } else {
             (self.eval(&mut st, scrutinee), None)
         };
@@ -5211,7 +5211,7 @@ impl<'a> Fx<'a> {
         then: BlockId,
         otherwise: Option<Else>,
     ) -> Val {
-        let c = self.cond(st, cond);
+        let c = self.decide(st, cond);
         let mut t = st.clone();
         self.assume(&mut t, &c, true);
         let tv = self.block(&mut t, then, None);
@@ -5245,8 +5245,43 @@ impl<'a> Fx<'a> {
         v
     }
 
+    /// A condition changes nothing (`core-calculus.md`, item 10, [`pure-conditions`]): the
+    /// condition of a `while`, a `guard` or an `if`, a `bool` scrutinee, a contract clause, and
+    /// the operands of `and` and `or`. The checker refuses one that assigns or passes a place
+    /// `mut` (`E0236`), so a state a condition decides is the one it was evaluated in, whichever
+    /// of its parts ran, and a clause is the same fact whether it is checked or erased. This
+    /// check holds that in every build where Tier 1 relies on it: the condition `e`, a `noun`,
+    /// reaching Tier 1 with an effect stops the compile with an internal error, which names the
+    /// function, the condition and the binding it changes. A binding the condition declares
+    /// itself, in a block or a pattern inside it, is not yet in scope where the condition is
+    /// checked, and is its own.
+    ///
+    /// [`pure-conditions`]: ../../docs/design-review.md#pure-conditions
+    fn changes_nothing(&self, e: ExprId, noun: &str) {
+        let at = self.span(e);
+        let mut changed = Vec::new();
+        self.changed_expr(e, &mut changed);
+        let outside = changed.into_iter().find(|b| self.scope.contains(b));
+        if let Some(b) = outside {
+            panic!(
+                "internal error: in `{}`, the {} at {}:{} changes `{}`, and a condition changes nothing (core-calculus.md, item 10, pure-conditions); the checker refuses it (E0236)",
+                self.syntax.name, noun, at.line, at.col, self.resolution.bindings[b].name
+            );
+        }
+    }
+
+    /// The condition of a `while`, a `guard` or an `if`, or a `bool` scrutinee, which changes
+    /// nothing ([`Fx::changes_nothing`]).
+    fn decide(&mut self, st: &mut Octagon, cond: ExprId) -> Cond {
+        self.changes_nothing(cond, "condition");
+        self.cond(st, cond)
+    }
+
     /// A condition, its operands evaluated once; the right operand of `and` and `or` is
-    /// evaluated where the left one has decided that it runs.
+    /// evaluated where the left one has decided that it runs, and changes nothing there
+    /// ([`Fx::changes_nothing`]), so that the state after the operator is where the left one
+    /// decided it. A right operand that changed state left that state to say which operands had
+    /// run, which Tier 1 once answered by merging the two and forgetting what the left one read.
     fn cond(&mut self, st: &mut Octagon, e: ExprId) -> Cond {
         let tree = self.tree;
         match &tree.expr(e).kind {
@@ -5262,24 +5297,10 @@ impl<'a> Fx<'a> {
             } => {
                 let and = *op == BinaryOp::And;
                 let l = self.cond(st, *lhs);
+                self.changes_nothing(*rhs, "right operand");
                 let mut s2 = st.clone();
                 self.assume(&mut s2, &l, and);
                 let r = self.cond(&mut s2, *rhs);
-                let mut changed = Vec::new();
-                self.changed_expr(*rhs, &mut changed);
-                let mut l = l;
-                if !changed.is_empty() {
-                    // A right operand that changes bindings where it runs leaves them changed:
-                    // the state is then where the left operand decided, or where the right one
-                    // ended, and a left operand that reads what it changes is not known in it.
-                    self.assume(st, &l, !and);
-                    *st = st.join(&s2);
-                    let touched: Vec<usize> =
-                        changed.iter().flat_map(|&b| self.vars_of(b)).collect();
-                    if touched.iter().any(|&x| cond_mentions(&l, x)) {
-                        l = Cond::Unknown;
-                    }
-                }
                 if and {
                     Cond::And(Box::new(l), Box::new(r))
                 } else {
@@ -5287,10 +5308,13 @@ impl<'a> Fx<'a> {
                 }
             }
             // `and` and `or` have their arm above; an arithmetic or bit operation is a value.
+            // A comparison read as a condition changes nothing (`core-calculus.md`, item 10), so
+            // its right operand leaves its left one as it was read; one that is a value, and may
+            // pass a binding `mut`, is evaluated for its effects alone, its result unread
+            // (`Fx::eval`).
             ExprKind::Binary { op, lhs, rhs } => match Rel::of(*op) {
                 Some(op) => {
-                    let mut l = self.eval(st, *lhs);
-                    self.read_before(st, *rhs, [&mut l]);
+                    let l = self.eval(st, *lhs);
                     let r = self.eval(st, *rhs);
                     match (far(self.literal(*lhs)), far(self.literal(*rhs))) {
                         (_, Some(c)) => Cond::Far(op, Box::new((l, c))),
@@ -5819,10 +5843,12 @@ impl<'a> Fx<'a> {
     }
 
     /// Why `e` is no candidate fact at a loop head, by its syntax alone, or `None` when it is
-    /// one ([`loop-candidates-by-syntax`]): a candidate calls nothing, assigns nothing, passes
-    /// nothing as `mut` and leaves nowhere, by `break`, `continue`, `return`, `todo` or
-    /// `unreachable`, and each branch of an `if` or a `match` in it is a single expression that
-    /// is one. Its evaluation then changes no binding and either traps or gives a value, so
+    /// one ([`loop-candidates-by-syntax`]): a candidate calls nothing and leaves nowhere, by
+    /// `break`, `continue`, `return`, `todo` or `unreachable`, and each branch of an `if` or a
+    /// `match` in it is a single expression that is one. It assigns nothing and passes nothing
+    /// as `mut`, since it comes from a condition, which changes nothing ([`Fx::decide`]), or
+    /// from a written invariant in the Tier-1 fragment, which holds no call, `if` or `match`.
+    /// Its evaluation then changes no binding and either traps or gives a value, so
     /// whether it gives `true` is a fact of the state alone, which Houdini judges on entry and
     /// after a round and assumes at the head; [`Fx::refute_cand`] adds that it cannot trap
     /// there. A call is none even when it returns: its `ensures` holds only where it runs and
@@ -5850,10 +5876,9 @@ impl<'a> Fx<'a> {
             ExprKind::Variant { payload, .. } => match payload {
                 Payload::None => None,
                 Payload::Named(fields) => fields.iter().find_map(|f| self.not_a_candidate(f.value)),
-                Payload::Positional(args) => args.iter().find_map(|a| match a.is_mut {
-                    true => Some("it passes a value as `mut`"),
-                    false => self.not_a_candidate(a.value),
-                }),
+                Payload::Positional(args) => {
+                    args.iter().find_map(|a| self.not_a_candidate(a.value))
+                }
             },
             ExprKind::If {
                 cond,
@@ -5887,11 +5912,11 @@ impl<'a> Fx<'a> {
         let tree = self.tree;
         let why = |s: StmtId| match &tree.stmt(s).kind {
             StmtKind::Expr(x) => self.not_a_candidate(*x),
-            StmtKind::Assign { .. } => Some("a branch of it assigns"),
             StmtKind::Break | StmtKind::Continue | StmtKind::Return(_) => {
                 Some("a branch of it may leave")
             }
             StmtKind::Binding { .. }
+            | StmtKind::Assign { .. }
             | StmtKind::Guard { .. }
             | StmtKind::While { .. }
             | StmtKind::Discard(_) => Some("a branch of it runs a statement"),
@@ -5975,8 +6000,10 @@ impl<'a> Fx<'a> {
         }
     }
 
-    /// The bindings a statement declares, assigns or passes as `mut`: a loop's in its header,
-    /// its condition, invariants and measures, which run at every round, as in its body.
+    /// The bindings a statement declares, assigns or passes as `mut`: a loop's in its body. A
+    /// condition and a loop's clauses change nothing (`Fx::changes_nothing`), and a binding one
+    /// declares itself, in a block or a pattern inside it, it declares anew before reading it,
+    /// wherever it runs, so none is named here.
     fn changed_stmt(&self, s: StmtId, out: &mut Vec<usize>) {
         match &self.tree.stmt(s).kind {
             StmtKind::Binding { init, .. } => {
@@ -5988,21 +6015,8 @@ impl<'a> Fx<'a> {
                 self.changed_expr(*place, out);
                 self.changed_expr(*value, out);
             }
-            StmtKind::While {
-                cond,
-                invariants,
-                decreases,
-                body,
-            } => {
-                for &e in std::iter::once(cond).chain(invariants).chain(decreases) {
-                    self.changed_expr(e, out);
-                }
-                self.changed_block(*body, out);
-            }
-            StmtKind::Guard { cond, otherwise } => {
-                self.changed_expr(*cond, out);
-                self.changed_block(*otherwise, out);
-            }
+            StmtKind::While { body, .. } => self.changed_block(*body, out),
+            StmtKind::Guard { otherwise, .. } => self.changed_block(*otherwise, out),
             StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
                 self.changed_expr(*e, out)
             }
@@ -6251,7 +6265,7 @@ impl<'a> Fx<'a> {
         self.passes += 1;
         let header = self.head_of.replace(s);
         let mut at = head.clone();
-        let c = self.cond(&mut at, cond);
+        let c = self.decide(&mut at, cond);
         let mut b = at.clone();
         self.assume(&mut b, &c, true);
         // The measures at the start of a round that runs: never negative, and followed. One
@@ -6343,7 +6357,7 @@ impl<'a> Fx<'a> {
         };
         self.recording = false;
         let mut first = entry.clone();
-        let c = self.cond(&mut first, cond);
+        let c = self.decide(&mut first, cond);
         self.assume(&mut first, &c, true);
         let v0 = self.eval(&mut first, e);
         let on_entry = self.refute(&first, &cmp(Rel::Ge, v0, lin(Vec::new(), 0)));
@@ -6438,7 +6452,7 @@ impl<'a> Fx<'a> {
             self.eval(&mut st, e);
             return vec![st];
         };
-        let c = self.cond(&mut st, *cond);
+        let c = self.decide(&mut st, *cond);
         let mut t = st.clone();
         self.assume(&mut t, &c, true);
         self.block(&mut t, *then, None);
@@ -6480,7 +6494,7 @@ impl<'a> Fx<'a> {
         tracked: &[bool],
     ) -> (Octagon, Vec<Val>, Vec<Val>) {
         let mut next = end.clone();
-        let c = self.cond(&mut next, cond);
+        let c = self.decide(&mut next, cond);
         self.assume(&mut next, &c, true);
         // A tracked measure has changed by its delta, which is below 0 when it decreased; any
         // other is evaluated again, to compare with its value at the round's start.
@@ -7445,7 +7459,7 @@ mod tests {
         assert!(repaired.contains("      guard n < 5"), "{}", repaired);
     }
 
-    /// A `mut` call in a scrutinee, in an arm, and in a `match` inside a loop's condition
+    /// A `mut` call in a scrutinee, in an arm, and in a `match` at the top of a loop's body
     /// changes the binding it is passed: what Tier 1 knew of it before holds no longer, and a
     /// loop forgets at its head what any of them changes.
     #[test]
@@ -7456,8 +7470,8 @@ mod tests {
             "pub fn f() -> u8[0..1] {\n  var j: u8 = 0\n  val k = match next(mut j) {\n    0 => 0\n    _ => j\n  }\n  k\n}",
             // An arm changes `j`, and the join keeps both states.
             "pub fn f(c: bool) -> u8[0..1] {\n  var j: u8 = 0\n  val k = match c {\n    true => next(mut j)\n    false => 0\n  }\n  j + k * 0\n}",
-            // A `match` in a loop's condition changes `i` at every round's head.
-            "pub fn f() -> u8[0..1] {\n  var i: u8 = 0\n  var r: u8 = 0\n  while (match next(mut i) {\n    1 => r < 3\n    _ => false\n  }) {\n    r += 1\n  }\n  i\n}",
+            // A `match` at the top of a loop's body changes `i` in every round.
+            "pub fn f() -> u8[0..1] {\n  var i: u8 = 0\n  var r: u8 = 0\n  while true {\n    val go = match next(mut i) {\n      1 => r < 3\n      _ => false\n    }\n    guard go else {\n      break\n    }\n    r += 1\n  }\n  i\n}",
             // A `match` statement in a loop's body binds afresh at every round.
             "pub fn f(rs: [3]Reading) -> u8[0..1] {\n  var i: usize = 0\n  var last: u8 = 0\n  while i < 3 {\n    match rs[i] {\n      Reading.Level(n: n, m: _) => {\n        last = n\n      }\n      Reading.Missing => {}\n    }\n    i += 1\n  }\n  last\n}",
         ] {
@@ -8034,18 +8048,13 @@ mod tests {
             "    k += 1",
             "    _ = set(mut k)",
             "    while k < n {\n      k += 1\n    }",
-            "    while set(mut k) {\n      return 0\n    }",
-            "    guard not set(mut k) else {\n      return 0\n    }",
-            "    guard set(mut k) and true else {\n      return 0\n    }",
             "    guard n > 2 else {\n      k = 99\n      break\n    }",
-            "    if set(mut k) {\n      return 0\n    }",
             "    if n > 2 {\n      k = 0\n    } else if n > 1 {\n      k = 99\n    }",
             "    if n > 2 {\n      k = 0\n    } else {\n      k = 99\n    }",
             "    _ = [1, 2][id(set(mut k))]",
             "    _ = [set(mut k), true]",
             "    _ = [set(mut k)].len",
             "    _ = [set(mut k); 2]",
-            "    _ = if set(mut k) { 1 } else { 2 }",
             "    val m = id(set(mut k))\n    _ = m",
             "    i = i + 0 * id(set(mut k))",
             "    var xs: [2]u8 = [0, 0]\n    xs[id(set(mut k))] = 1\n    _ = xs",
@@ -8055,6 +8064,21 @@ mod tests {
                 changes
             );
             assert_eq!(codes(&src), ["E0502"], "{}", changes);
+        }
+        // A condition changes nothing (`core-calculus.md`, item 10): one that passes `k` as `mut`
+        // is refused before Tier 1 runs, so a loop never learns of a change from a condition.
+        for changes in [
+            "    while set(mut k) {\n      return 0\n    }",
+            "    guard not set(mut k) else {\n      return 0\n    }",
+            "    guard set(mut k) and true else {\n      return 0\n    }",
+            "    if set(mut k) {\n      return 0\n    }",
+            "    _ = if set(mut k) { 1 } else { 2 }",
+        ] {
+            let src = format!(
+                "pub fn set(mut x: u8) -> bool {{\n  x = 200\n  true\n}}\npub fn f(n: u8) -> u8[0..10] {{\n  var k: u8 = 3\n  var i: u8 = 0\n  while i < n {{\n    i += 1\n{}\n  }}\n  k\n}}",
+                changes
+            );
+            assert_eq!(codes(&src), ["E0236"], "{}", changes);
         }
     }
 
@@ -8233,18 +8257,12 @@ mod tests {
             loop_then_y("i < n and pin(x) == 0", "    i += 1\n", "u8[0..=9]")
         );
         assert_eq!(codes(&called), ["E0502"]);
-        // A branch that assigns: assumed at the head, it set `j` to 0 there, and the round, where
-        // the body has made `j` 9, proved that `j + 250` fits in `take`'s parameter.
+        // A branch that assigns, b2 of the reviews: assumed at the head, it set `j` to 0 there,
+        // and the round, where the body has made `j` 9, proved that `j + 250` fits in `take`'s
+        // parameter. A condition changes nothing now (`core-calculus.md`, item 10), so the
+        // checker refuses it before Tier 1 runs.
         let assigns = "fn take(x: u8) -> u8 = x\npub fn f(n: u8) -> u8 {\n  var i: u8 = 0\n  var j: u8 = 0\n  while take(j + 250) > 0 and (if n < 255 {\n    j = 0\n    0\n  } else {\n    j = 0\n    0\n  }) == 0 and i < 3 {\n    j = 9\n    i += 1\n  }\n  i\n}";
-        let found: Vec<(ObligationKind, bool)> = obligations(assigns)
-            .into_iter()
-            .map(|(k, _, proven)| (k, proven))
-            .collect();
-        assert!(
-            found.contains(&(ObligationKind::Range, false)),
-            "{:?}",
-            found
-        );
+        assert_eq!(codes(assigns), ["E0236"]);
         // The note at the loop says which conjuncts are no candidates, and why.
         let noted = format!(
             "{}pub fn f(x: u8, n: u8) -> u8 {{\n  var i: u8 = 0\n  while i < n and pin(x) == 0 {{\n    val z: u8[0..=5] = i\n    i = z + 1\n  }}\n  i\n}}",
@@ -8925,28 +8943,32 @@ mod tests {
 
     /// A value is read when the reference interpreter reads it: an operator's left operand, a
     /// compound assignment's place and a struct literal's earlier field before what follows
-    /// runs, and what the right operand of `and` or `or` changes stays changed after it.
+    /// runs. The operands of `and` and `or`, and a `bool` scrutinee, change nothing
+    /// (`core-calculus.md`, item 10): the forms that once tested what Tier 1 read of them, a
+    /// right operand's change and a left operand read before it, are refused before Tier 1 runs.
     #[test]
     fn test_values_are_read_in_the_order_the_interpreter_reads_them() {
-        let bump = "fn bump(mut x: u8) -> u8\n  ensures x == 9\n  ensures result == 0\n{\n  x = 9\n  0\n}\n";
+        let bump = "fn bump(mut x: u8) -> u8\n  ensures x == 9\n  ensures result == 0\n{\n  x = 9\n  0\n}\nfn zap(mut z: u8) -> u8\n  ensures z == 7\n  ensures result == 0\n{\n  z = 7\n  0\n}\n";
         let with = |f: &str| format!("{}{}", bump, f);
         for f in [
             "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  val y = x * 1 + bump(mut x)\n  y\n}",
-            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x == bump(mut x) {\n    return 1\n  }\n  0\n}",
             "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  x += bump(mut x)\n  x\n}",
             "pub struct P {\n  a: u8\n}\npub fn f(q: P) -> u8[9..=9] {\n  var p = q\n  p.a = 0\n  p.a += bump(mut p.a)\n  p.a\n}",
             "pub struct Q {\n  a: u8\n}\npub struct O {\n  p: u8\n  r: Q\n}\npub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  val o = O(p: x, r: Q(a: bump(mut x)))\n  o.p\n}",
-            // What the right operand changes stays changed ...
-            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x == 0 and bump(mut x) == 0 {\n    return 0\n  }\n  x\n}",
-            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x != 0 or bump(mut x) != 0 {\n    return 0\n  }\n  x\n}",
-            // ... and a left operand that reads it held before it ran, wherever it reads it.
-            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if x == 0 and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
-            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if 0 == x and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
-            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  if not (x != 0) and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
-            "pub fn f(y: u8) -> u8[0..=0] {\n  var x: u8 = 0\n  if (x == 0 and y == 0) and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
-            "pub fn f(y: u8) -> u8[0..=0] {\n  var x: u8 = 0\n  if (y == 0 and x == 0) and bump(mut x) == 0 {\n    return x\n  }\n  0\n}",
         ] {
             assert_eq!(codes(&with(f)), ["E0502"], "{}", f);
+        }
+        for f in [
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  val k: u8 = match x == bump(mut x) {\n    true => 1\n    false => 0\n  }\n  k\n}",
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  _ = x == 0 and bump(mut x) == 0\n  x\n}",
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  _ = x != 0 or bump(mut x) != 0\n  x\n}",
+            "pub fn f() -> u8[0..=0] {\n  var x: u8 = 0\n  val k: u8 = match x == 0 and bump(mut x) == 0 {\n    true => x\n    false => 0\n  }\n  k\n}",
+            "pub fn f(i: u8) -> u8[0..4] {\n  var z: u8 = 0\n  val k: u8 = match i < 4 and bump(mut z) == 0 {\n    true => i\n    false => 0\n  }\n  k\n}",
+            // Without the rule, Tier 1 read the inner `x == 0` after `bump` had made `x` 9,
+            // concluded that `zap` always runs, and proved `z` 7 where the run leaves it 0.
+            "pub fn f() -> u8[7..=7] {\n  var x: u8 = 0\n  var z: u8 = 0\n  _ = (x == 0 and bump(mut x) == 0) or zap(mut z) == 0\n  z\n}",
+        ] {
+            assert_eq!(codes(&with(f)), ["E0236"], "{}", f);
         }
         // A value that passes a binding `mut` is offered no `guard`, which would repeat the call
         // and change the binding again; one that does not is.
@@ -8978,9 +9000,6 @@ mod tests {
             "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  val y = bump(mut x) + x\n  y\n}",
             "pub fn f(a: u8[0..100]) -> u8[0..=0] {\n  var z: u8 = 0\n  val y = a + bump(mut z)\n  y - a\n}",
             "pub fn f(a: u8[0..100]) -> u8[0..=0] {\n  var x: u8 = a\n  var z: u8 = 0\n  x += bump(mut z)\n  x - a\n}",
-            "pub fn f(i: u8) -> u8[0..4] {\n  var z: u8 = 0\n  if i < 4 and bump(mut z) == 0 {\n    return i\n  }\n  0\n}",
-            // Where the left operand decides alone, it holds; here it never does.
-            "pub fn f() -> u8[9..=9] {\n  var x: u8 = 0\n  if x == 0 and bump(mut x) == 0 {\n    return x\n  }\n  x\n}",
         ] {
             assert_eq!(codes(&with(f)), NONE, "{}", f);
         }
@@ -9489,25 +9508,123 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         );
     }
 
-    /// A loop's condition runs at the head of every round, so a binding or a struct it passes
-    /// `mut` keeps only its type and refinement there; and a call in the condition, which the
-    /// head reads as a candidate fact too, reports a failure once.
+    /// A condition that changes state stops the compile in every build with an internal error
+    /// naming the function, the condition and the binding (`Fx::decide`): the checker refuses
+    /// it (`E0236`), and `with_fx` runs Tier 1 past the checker's errors to plant one, as a
+    /// future change to the checker might let one through. A `guard`'s condition here, and an
+    /// `if`'s and a loop's in the tests after it.
     #[test]
-    fn test_a_loops_condition_changes_what_it_passes_mut() {
+    #[should_panic(
+        expected = "internal error: in `f`, the condition at 8:9 changes `i`, and a condition changes nothing"
+    )]
+    fn test_a_guard_condition_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  guard next(mut i) > 3 else {\n    return 0\n  }\n  i\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the condition at 8:19 changes `i`, and a condition changes nothing"
+    )]
+    fn test_an_if_condition_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  val k: u8 = if (if n > 3 {\n    i = 0\n    true\n  } else {\n    false\n  }) {\n    1\n  } else {\n    0\n  }\n  k + i\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the condition at 9:9 changes `i`, and a condition changes nothing"
+    )]
+    fn test_a_loop_condition_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while next(mut i) > 0 and r < 8 {\n    r += 1\n  }\n  r\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    /// The same for a loop's `invariant` and its `decreases`, clauses that the loop's statement
+    /// checks before its analysis reads them.
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the clause at 10:15 changes `i`, and a condition changes nothing"
+    )]
+    fn test_a_loop_invariant_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while r < 8\n    invariant next(mut i) >= 0\n  {\n    r += 1\n  }\n  r\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the clause at 10:15 changes `i`, and a condition changes nothing"
+    )]
+    fn test_a_loop_measure_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while r < 8\n    decreases next(mut i)\n  {\n    r += 1\n  }\n  r\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    /// The same for a `bool` scrutinee, a clause and the right operand of an `and` in a value.
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the condition at 8:21 changes `i`, and a condition changes nothing"
+    )]
+    fn test_a_bool_scrutinee_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  val k: u8 = match next(mut i) > 3 {\n    true => 1\n    false => 0\n  }\n  k + i\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the clause at 7:12 changes `n`, and a condition changes nothing"
+    )]
+    fn test_a_clause_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(mut n: u8) -> u8\n  requires next(mut n) > 0\n= n";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the right operand at 8:21 changes `i`, and a condition changes nothing"
+    )]
+    fn test_an_operand_that_changes_state_stops_the_compile() {
+        let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> bool {\n  var i = n\n  val c = n > 3 and next(mut i) > 0\n  c\n}";
+        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+    }
+
+    /// A binding a condition declares itself, in a block of an `if` or a pattern of a `match`
+    /// inside it, is its own: the condition changes nothing outside it (`Fx::decide`).
+    #[test]
+    fn test_a_condition_declares_bindings_of_its_own() {
+        let with = |f: &str| format!("{}{}", READING, f);
+        for f in [
+            "pub fn f(c: bool) -> u8 {\n  var k: u8 = 0\n  if (if c {\n    val t: u8 = 1\n    t > 0\n  } else {\n    false\n  }) {\n    k = 1\n  }\n  k\n}",
+            "pub fn f(r: Reading) -> u8 {\n  var k: u8 = 0\n  while k < 3 and (match r {\n    Reading.Level(n: n, m: _) => n > 0\n    Reading.Missing => false\n  }) {\n    k += 1\n  }\n  k\n}",
+        ] {
+            assert_eq!(codes(&with(f)), NONE, "{}", f);
+        }
+    }
+
+    /// A loop changes at its head what its body passes `mut` or assigns, a struct's field
+    /// included: there it keeps only its type and refinement; and a call in the condition reports
+    /// a failure once. A condition itself changes nothing (`core-calculus.md`, item 10): one that
+    /// passes a binding `mut` is refused before Tier 1 runs.
+    #[test]
+    fn test_a_loop_changes_at_its_head_what_its_body_passes_mut() {
         let decls = "pub struct P {\n  a: u8\n}\nfn bump(mut x: u8) -> u8\n  ensures x == 9\n{\n  x = 9\n  0\n}\nfn touch(mut p: P) -> u8 {\n  p.a = 9\n  0\n}\nfn take0(x: u8) -> u8[0..=0]\n  requires x == 0\n= x\n";
         let with = |f: &str| format!("{}{}", decls, f);
-        for f in [
-            "pub fn f() -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0 and bump(mut x) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
-            "pub fn f(q: P) -> u8 {\n  var p = q\n  p.a = 0\n  var i: u8 = 0\n  while i < 2 and take0(p.a) == 0 and touch(mut p) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
+        let changed_by_the_body = [
+            "pub fn f() -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0\n    decreases 2 - i\n  {\n    _ = bump(mut x)\n    i += 1\n  }\n  i\n}",
+            "pub fn f(q: P) -> u8 {\n  var p = q\n  p.a = 0\n  var i: u8 = 0\n  while i < 2 and take0(p.a) == 0\n    decreases 2 - i\n  {\n    _ = touch(mut p)\n    i += 1\n  }\n  i\n}",
             "pub fn f() -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0\n    decreases 2 - i\n  {\n    x = 1\n    i += 1\n  }\n  i\n}",
-        ] {
+        ];
+        for f in changed_by_the_body {
             assert_eq!(codes(&with(f)), ["E0504"], "{}", f);
         }
-        // There a `guard` before the loop would not hold at a later round: none is offered.
         for f in [
             "pub fn f() -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  while i < 2 and take0(x) == 0 and bump(mut x) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
             "pub fn f(q: P) -> u8 {\n  var p = q\n  p.a = 0\n  var i: u8 = 0\n  while i < 2 and take0(p.a) == 0 and touch(mut p) == 0\n    decreases 2 - i\n  {\n    i += 1\n  }\n  i\n}",
         ] {
+            assert_eq!(codes(&with(f)), ["E0236"], "{}", f);
+        }
+        // There a `guard` before the loop would not hold at a later round: none is offered.
+        for f in changed_by_the_body {
             let d = diagnostics(&with(f));
             assert!(d[0].fixes.is_empty(), "{}: {:?}", f, d[0].fixes);
             assert!(

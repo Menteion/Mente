@@ -478,8 +478,6 @@ fn passes_mut(e: &E, name: &str) -> bool {
         E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
         E::Return(x) => sub(x),
         E::Leave(_) => false,
-        // An assignment assigns its binding, as a `mut` argument does.
-        E::Assigned(n, v, then) => n == name || sub(v) || sub(then),
     }
 }
 
@@ -500,8 +498,6 @@ fn names(e: &E, is: &dyn Fn(&str) -> bool) -> bool {
         E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
         E::Return(x) => sub(x),
         E::Leave(_) => false,
-        // The binding an assignment names counts, as a place it changes.
-        E::Assigned(n, v, then) => is(n) || sub(v) || sub(then),
     }
 }
 
@@ -680,9 +676,6 @@ enum E {
     Return(Box<E>),
     /// `break` or `continue`, as a branch of an `if` inside a loop: the branch leaves the round.
     Leave(&'static str),
-    /// An assignment of a binding, by name, and then a value, as a branch of an `if`: a block of
-    /// two lines.
-    Assigned(String, Box<E>, Box<E>),
 }
 
 impl E {
@@ -705,7 +698,7 @@ impl E {
 
     fn level(&self) -> u8 {
         match self {
-            E::If(..) | E::Match(..) | E::Return(_) | E::Assigned(..) => 0,
+            E::If(..) | E::Match(..) | E::Return(_) => 0,
             E::Bin(op, ..) => op.level(),
             E::Not(_) => NOT,
             E::Neg(_) | E::BitNot(_) => UNARY,
@@ -858,13 +851,6 @@ impl E {
                 v.print(0, out);
             }
             E::Leave(keyword) => out.push_str(keyword),
-            E::Assigned(name, v, then) => {
-                out.push_str(name);
-                out.push_str(" = ");
-                v.print(0, out);
-                out.push('\n');
-                then.print(0, out);
-            }
         }
     }
 
@@ -1220,6 +1206,9 @@ struct Gen {
     mult: u64,
     cost: u64,
     no_calls: bool,
+    /// How many conditions the expression being written stands in: inside one, no call passes a
+    /// place `mut`, since a condition changes nothing (`core-calculus.md`, item 10).
+    pure: u32,
     names: usize,
     /// The stream of the rules added to a function's body since the first, so that one leaves
     /// what every other rule writes as it was: each attempt at a body has its own.
@@ -1229,8 +1218,6 @@ struct Gen {
     no_candidates: Rng,
     /// The functions those conjuncts call, written after the module's own.
     helpers: Vec<String>,
-    /// The bindings those conjuncts declare so far, which name each.
-    helper_bindings: usize,
 }
 
 impl Gen {
@@ -1260,11 +1247,11 @@ impl Gen {
             mult: 1,
             cost: 0,
             no_calls: false,
+            pure: 0,
             names: 0,
             rules: Rng::new(seed),
             no_candidates: Rng::new(seed),
             helpers: Vec::new(),
-            helper_bindings: 0,
         }
     }
 
@@ -1570,8 +1557,9 @@ impl Gen {
     /// refinement bounds the literals.
     fn scrutinee(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
         // Now and then what a call that changes a place gives, which the arms then read as the
-        // call left it. A call's result has its type's range, refined or not.
-        if self.rng.chance(60) {
+        // call left it. A call's result has its type's range, refined or not. Not for a `bool`,
+        // whose `match` decides as an `if` does and whose scrutinee changes nothing.
+        if self.rng.chance(60) && *ty != Ty::Bool {
             if let Some((e, _)) = self.call_of(depth + 1, |t| t == ty, true) {
                 let range = match ty {
                     Ty::Int(t) => Some(t.range()),
@@ -1582,7 +1570,8 @@ impl Gen {
         }
         match ty {
             Ty::Enum(name) => Some((self.enum_value(name, depth + 1), None)),
-            Ty::Bool => Some((self.bool_expr(depth + 1), None)),
+            // A `match` on a `bool` decides as an `if` does, and its scrutinee changes nothing.
+            Ty::Bool => Some((self.condition(depth + 1), None)),
             Ty::Int(t) => {
                 // A binding whose refinement has literal bounds: the literals cover its range.
                 let refined: Vec<usize> = self
@@ -1603,7 +1592,7 @@ impl Gen {
                 // such; tried a few times, or a binding of the type read.
                 if self.rng.chance(20) {
                     let m = self.mark();
-                    let c = self.bool_expr(depth + 1);
+                    let c = self.condition(depth + 1);
                     match (
                         self.int_scrutinee(*t, depth + 1),
                         self.int_scrutinee(*t, depth + 1),
@@ -1793,7 +1782,6 @@ impl Gen {
             E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
             E::Return(x) => sub(x),
             E::Leave(_) => false,
-            E::Assigned(n, v, then) => names.contains(n) || sub(v) || sub(then),
         }
     }
 
@@ -1866,12 +1854,7 @@ impl Gen {
                     self.returns_in(x, t);
                 }
             }
-            E::Lit(_)
-            | E::Name(_)
-            | E::Builtin(..)
-            | E::Return(_)
-            | E::Leave(_)
-            | E::Assigned(..) => {}
+            E::Lit(_) | E::Name(_) | E::Builtin(..) | E::Return(_) | E::Leave(_) => {}
         }
     }
 
@@ -3170,9 +3153,10 @@ impl Gen {
 
     /// A call whose result is an integer, for an index, which traps where it is negative: one
     /// with `mut` arguments may change the array it indexes, which is read as it was before the index is evaluated
-    /// (`core-calculus.md`, items 10 and 12). Its own arguments make no further calls.
+    /// (`core-calculus.md`, items 10 and 12). Its own arguments make no further calls. None
+    /// inside a condition, which changes nothing.
     fn index_call(&mut self) -> Option<E> {
-        if self.no_calls {
+        if self.no_calls || self.pure > 0 {
             return None;
         }
         let options: Vec<Sig> = self
@@ -3205,6 +3189,17 @@ impl Gen {
 
     // ---------------------------------------------------------------- other expressions
 
+    /// A condition (`core-calculus.md`, item 10), the condition of an `if` or a `guard`, a
+    /// `bool` scrutinee or an operand of `and` or `or`: a `bool` expression that changes
+    /// nothing, so that no call in it, at any depth, passes a place `mut`. The clauses the
+    /// generator writes compare names and literals alone.
+    fn condition(&mut self, depth: u32) -> E {
+        self.pure += 1;
+        let c = self.bool_expr(depth);
+        self.pure -= 1;
+        c
+    }
+
     fn bool_expr(&mut self, depth: u32) -> E {
         if depth >= 3 || self.rng.chance(25 + 15 * u64::from(depth)) {
             return self.bool_leaf();
@@ -3229,10 +3224,11 @@ impl Gen {
                     E::bin(op, a.e, b.e)
                 }
             }
+            // The operands of `and` and `or` change nothing (`core-calculus.md`, item 10).
             45..=59 => {
                 let op = if self.rng.chance(50) { Op::And } else { Op::Or };
-                let a = self.bool_expr(depth + 1);
-                let b = self.bool_expr(depth + 1);
+                let a = self.condition(depth + 1);
+                let b = self.condition(depth + 1);
                 E::bin(op, a, b)
             }
             60..=69 => E::Not(Box::new(self.bool_expr(depth + 1))),
@@ -3562,7 +3558,7 @@ impl Gen {
         }
         if !matches!(ty, Ty::Array(..)) && self.rng.chance(10) {
             let m = self.mark();
-            let c = self.bool_expr(depth + 1);
+            let c = self.condition(depth + 1);
             let (a, b, hull) = match ty {
                 Ty::Int(t) => {
                     let (a, ra) = self.narrowed_range(*t, depth + 1);
@@ -3600,8 +3596,11 @@ impl Gen {
         if self.no_calls || depth >= 3 {
             return None;
         }
+        // Inside a condition, which changes nothing, no call passes a place `mut`.
+        let pure = self.pure > 0;
         let wanted = |s: &Sig| {
-            s.ret.as_ref().is_some_and(&fits) && (!changes || s.params.iter().any(|p| p.is_mut))
+            let passes_mut = s.params.iter().any(|p| p.is_mut);
+            s.ret.as_ref().is_some_and(&fits) && (!changes || passes_mut) && !(pure && passes_mut)
         };
         let mut options: Vec<Sig> = self
             .sigs
@@ -4169,7 +4168,7 @@ impl Gen {
     fn leaving_if(&mut self) -> Option<E> {
         let t = self.current.as_ref().and_then(|s| s.ret.clone())?;
         let r = self.current.as_ref().and_then(|s| s.ret_range);
-        let cond = self.bool_expr(1);
+        let cond = self.condition(1);
         let a = E::Return(Box::new(self.default_of(&t, r)));
         let b = E::Return(Box::new(self.default_of(&t, r)));
         Some(E::If(Box::new(cond), Box::new(a), Box::new(b)))
@@ -4739,9 +4738,9 @@ impl Gen {
     /// An `if`, now and then with `else if`s: each condition of the chain is generated first, so
     /// that what they need is guarded before the whole statement.
     fn if_statement(&mut self, depth: u32) -> Vec<S> {
-        let mut conds = vec![self.bool_expr(0)];
+        let mut conds = vec![self.condition(0)];
         while conds.len() < 4 && self.rng.chance(25) {
-            conds.push(self.bool_expr(0));
+            conds.push(self.condition(0));
         }
         let mut out = self.flush();
         let mut els = self
@@ -4818,7 +4817,7 @@ impl Gen {
                 ));
             }
         }
-        let before = self.no_candidate(&mut cond, &mut first);
+        self.no_candidate(&mut cond, &mut first);
         let mut clauses = Vec::new();
         let invariant = self.mode == Mode::Refined && self.rng.chance(50);
         if self.mode == Mode::Refined {
@@ -4839,7 +4838,6 @@ impl Gen {
             }
         }
         let mut out = self.flush();
-        out.extend(before);
         out.push(S::Bind(
             id,
             Some(t.name.to_string()),
@@ -4929,20 +4927,18 @@ impl Gen {
     ///   `continue`, which in a condition leave the loop around it, so only a loop inside a loop
     ///   has them there, and then mostly `break` (the review's d1); by `return`; or at `todo` or
     ///   `unreachable`;
-    /// - an `if` whose branch assigns a binding of its own, which a conjunct before it reads in a
-    ///   sum that the body makes overflow in a later round where the input is large, both before
-    ///   the condition's other conjuncts;
     /// - a call whose `ensures` bounds its argument, of a function written for it that returns
     ///   only where that holds, and which the loop's exit never calls; in a refined program only,
     ///   since a plain one has no contracts.
     ///
+    /// The reviews' b2, an `if` whose branch assigns, is no condition at all now: a condition
+    /// changes nothing (`core-calculus.md`, item 10), and the checker refuses one that does.
+    ///
     /// Each reads a binding in scope, so that a fact Tier 1 wrongly held there would prove a
-    /// check some run fails. The statements to write before the loop come back; `cond` takes the
-    /// conjunct, and `first` the guard and the body's first statements, after the step.
-    fn no_candidate(&mut self, cond: &mut E, first: &mut Vec<S>) -> Vec<S> {
-        let mut before = Vec::new();
+    /// check some run fails. `cond` takes the conjunct, and `first` the guard, after the step.
+    fn no_candidate(&mut self, cond: &mut E, first: &mut Vec<S>) {
         if !self.no_candidates.chance(NO_CANDIDATE_CHANCE) {
-            return before;
+            return;
         }
         let ints: Vec<(usize, IntT)> = self
             .visible()
@@ -4953,13 +4949,13 @@ impl Gen {
             })
             .collect();
         if ints.is_empty() {
-            return before;
+            return;
         }
         let (x, t) = ints[self.no_candidates.below(ints.len() as u64) as usize];
         let zero = || E::Lit("0".to_string());
         // A contract is the refined mode's alone, so a plain program's call is a leaving one.
-        let pick = match self.no_candidates.below(4) {
-            3 if self.mode != Mode::Refined => 0,
+        let pick = match self.no_candidates.below(3) {
+            2 if self.mode != Mode::Refined => 0,
             pick => pick,
         };
         let test = {
@@ -5013,59 +5009,6 @@ impl Gen {
                     *cond = E::bin(Op::And, cond.clone(), conj);
                 }
             }
-            2 => {
-                let byte = INTS[0];
-                self.helper_bindings += 1;
-                let name = format!("lc{}", self.helper_bindings);
-                // Its own binding, which no other rule sees and so none plans with.
-                self.binds.push(Binding {
-                    name: name.clone(),
-                    ty: Ty::Int(byte),
-                    kind: Kind::Var,
-                    range: None,
-                    known: None,
-                    elements: None,
-                    read: true,
-                    assigned: true,
-                });
-                before.push(S::Bind(
-                    self.binds.len() - 1,
-                    Some(byte.name.to_string()),
-                    zero(),
-                ));
-                let sum = 1 + self.no_candidates.below(255);
-                let reads = E::bin(
-                    Op::Gt,
-                    E::bin(Op::Add, E::name(&name), E::Lit(sum.to_string())),
-                    zero(),
-                );
-                let assigns = || E::Assigned(name.clone(), Box::new(zero()), Box::new(zero()));
-                let other = if self.no_candidates.chance(50) {
-                    assigns()
-                } else {
-                    zero()
-                };
-                let conj = E::bin(
-                    Op::Eq,
-                    E::If(Box::new(test), Box::new(assigns()), Box::new(other)),
-                    zero(),
-                );
-                // First, as in the review's b2: Tier 1 forgets every conjunct to the left of one
-                // that assigns, if any of them reads what it assigns, the counter's included.
-                *cond = E::bin(Op::And, E::bin(Op::And, reads, conj), cond.clone());
-                let bytes: Vec<usize> = ints
-                    .iter()
-                    .filter(|(_, t)| *t == byte)
-                    .map(|(id, _)| *id)
-                    .collect();
-                let value = if bytes.is_empty() {
-                    E::Lit(self.no_candidates.below(256).to_string())
-                } else {
-                    let id = bytes[self.no_candidates.below(bytes.len() as u64) as usize];
-                    self.read(id)
-                };
-                first.push(S::Assign(E::name(&name), "=", value));
-            }
             _ => {
                 let name = format!("pin{}", self.helpers.len());
                 // Every integer type holds 0 to 99.
@@ -5082,7 +5025,6 @@ impl Gen {
                 );
             }
         }
-        before
     }
 
     fn guard_statement(&mut self) -> Vec<S> {
@@ -5093,7 +5035,7 @@ impl Gen {
                 let n = self.value_in(r);
                 E::bin(op, x, E::num(n))
             }
-            _ => self.bool_expr(0),
+            _ => self.condition(0),
         };
         self.pending.push(cond);
         self.flush()
@@ -6879,7 +6821,6 @@ mod tests {
             E::Array(items) => items.iter().any(sub),
             E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
             E::Leave(_) => false,
-            E::Assigned(_, v, then) => sub(v) || sub(then),
         }
     }
 

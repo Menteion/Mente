@@ -276,18 +276,24 @@ const TRAPS: &[&str] = &[
 /// its own evaluation, which once proved it (the nightly's wrong proofs, 2026-11-16 to 11-21).
 /// And a conjunct or a guard that is no candidate by its syntax (`loop-candidates-by-syntax`),
 /// of each form the reviews of pull request 182 found Tier 1 holding at a loop's head: one that
-/// may leave, by `break`, `continue`, `return`, `todo` or `unreachable`, one that assigns,
-/// a call whose `ensures` bounds its argument, and a `break` in the condition of a loop inside
-/// a loop, which leaves the loop around it.
+/// may leave, by `break`, `continue`, `return`, `todo` or `unreachable`, a call whose `ensures`
+/// bounds its argument, and a `break` in the condition of a loop inside a loop, which leaves the
+/// loop around it. The review's form that assigns is a condition that changes state, which
+/// [`CONDITIONS`] names.
 const CANDIDATES: &[&str] = &[
     "remainder that can trap in a loop's condition",
     "remainder that can trap in a guard of a loop's body",
     "conjunct of a loop's condition that may leave",
     "guard of a loop's body whose condition may leave",
-    "conjunct of a loop's condition that assigns",
     "conjunct of a loop's condition that calls a function whose ensures bounds its argument",
     "break in the condition of a loop inside a loop",
 ];
+
+/// A condition that assigns or passes a place `mut`, anywhere inside it, which the checker
+/// refuses (`E0236`): the condition of a `while`, a `guard` or an `if`, a `bool` scrutinee, a
+/// contract clause or an operand of `and` or `or` changes nothing (`core-calculus.md`, item 10),
+/// so no generated program holds one ([`NOT_GENERATED`]).
+const CONDITIONS: &[&str] = &["condition that assigns or passes mut"];
 
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
 /// (`core-calculus.md`, item 5), by what the checker's table says of it: beside an operand
@@ -351,6 +357,10 @@ pub(super) const NOT_GENERATED: &[(&str, &str)] = &[
     (
         "suffixed literal pattern",
         "a pattern's literal takes the type of what the `match` reads, so it has no suffix (E0221)",
+    ),
+    (
+        "condition that assigns or passes mut",
+        "a condition changes nothing, and the checker refuses one that does (E0236)",
     ),
 ];
 
@@ -963,7 +973,8 @@ fn reached_candidates(module: &CheckedModule, f: &CheckedFn, seen: &mut BTreeSet
 }
 
 /// The rows of [`CANDIDATES`] for what is no candidate by its syntax, a checked function reaches
-/// inside a loop's condition or a guard's condition inside `bodies`, its loops' bodies.
+/// inside a loop's condition or a guard's condition inside `bodies`, its loops' bodies; and the
+/// row of [`CONDITIONS`], which none reaches.
 fn reached_no_candidates(
     module: &CheckedModule,
     f: &CheckedFn,
@@ -973,10 +984,9 @@ fn reached_no_candidates(
     let tree = &f.syntax.tree;
     let within =
         |s: mente_syntax::Span, c: mente_syntax::Span| c.start <= s.start && s.end <= c.end;
-    // What leaves, by a statement or at `todo` or `unreachable`, and what breaks or assigns.
+    // What leaves, by a statement or at `todo` or `unreachable`, and what breaks.
     let mut leaving: Vec<mente_syntax::Span> = Vec::new();
     let mut breaking: Vec<mente_syntax::Span> = Vec::new();
-    let mut assigning: Vec<mente_syntax::Span> = Vec::new();
     for s in &tree.stmts {
         match &s.kind {
             StmtKind::Break => {
@@ -984,7 +994,6 @@ fn reached_no_candidates(
                 breaking.push(s.span);
             }
             StmtKind::Continue | StmtKind::Return(_) => leaving.push(s.span),
-            StmtKind::Assign { .. } => assigning.push(s.span),
             _ => {}
         }
     }
@@ -1011,9 +1020,6 @@ fn reached_no_candidates(
                 if any_in(&leaving, c) {
                     seen.insert("conjunct of a loop's condition that may leave".to_string());
                 }
-                if any_in(&assigning, c) {
-                    seen.insert("conjunct of a loop's condition that assigns".to_string());
-                }
                 if any_in(&bounding, c) {
                     seen.insert(
                         "conjunct of a loop's condition that calls a function whose ensures bounds its argument"
@@ -1035,6 +1041,77 @@ fn reached_no_candidates(
             _ => {}
         }
     }
+    if a_condition_changes_state(&f.syntax) {
+        seen.insert("condition that assigns or passes mut".to_string());
+    }
+}
+
+/// Whether a condition of `f` holds an assignment or a `mut` argument, by their spans: the row of
+/// [`CONDITIONS`]. A condition is the condition of a `while`, a `guard` or an `if`, a contract
+/// clause, an `and` or an `or`, and the scrutinee of a `match` on a `bool`, which this tells by
+/// a `true` or `false` pattern among its arms.
+fn a_condition_changes_state(f: &FnSyntax) -> bool {
+    let tree = &f.tree;
+    let mut changing: Vec<mente_syntax::Span> = tree
+        .stmts
+        .iter()
+        .filter(|s| matches!(s.kind, StmtKind::Assign { .. }))
+        .map(|s| s.span)
+        .collect();
+    for e in &tree.exprs {
+        let args = match &e.kind {
+            ExprKind::Call { args, .. }
+            | ExprKind::Variant {
+                payload: Payload::Positional(args),
+                ..
+            } => args.as_slice(),
+            _ => &[],
+        };
+        changing.extend(
+            args.iter()
+                .filter(|a| a.is_mut)
+                .map(|a| tree.expr(a.value).span),
+        );
+    }
+    let mut conditions: Vec<ExprId> = f.contracts.iter().map(|c| c.expr).collect();
+    for s in &tree.stmts {
+        match &s.kind {
+            StmtKind::While {
+                cond,
+                invariants,
+                decreases,
+                ..
+            } => {
+                conditions.push(*cond);
+                conditions.extend(invariants.iter().chain(decreases));
+            }
+            StmtKind::Guard { cond, .. } => conditions.push(*cond),
+            _ => {}
+        }
+    }
+    for (i, e) in tree.exprs.iter().enumerate() {
+        match &e.kind {
+            ExprKind::If { cond, .. } => conditions.push(*cond),
+            ExprKind::Binary {
+                op: BinaryOp::And | BinaryOp::Or,
+                ..
+            } => conditions.push(ExprId(i as u32)),
+            ExprKind::Match { scrutinee, arms }
+                if arms
+                    .iter()
+                    .any(|a| matches!(a.pattern.kind, PatternKind::Bool(_))) =>
+            {
+                conditions.push(*scrutinee)
+            }
+            _ => {}
+        }
+    }
+    conditions.into_iter().any(|c| {
+        let at = tree.expr(c).span;
+        changing
+            .iter()
+            .any(|s| at.start <= s.start && s.end <= at.end)
+    })
 }
 
 /// Whether a function's `ensures` names one of its parameters, which then bounds the argument a
@@ -1413,6 +1490,7 @@ fn grammar() -> BTreeSet<String> {
         RELATIONS,
         TRAPS,
         CANDIDATES,
+        CONDITIONS,
         LITERALS,
         COMPARISONS,
         EXPRESSIONS,
@@ -1595,6 +1673,70 @@ fn test_each_row_is_asked_of_at_least_three_programs() {
     assert_eq!(too_few(&grammar, &seeds, 2), ["`while` in seeds []"]);
     assert_eq!(too_few(&grammar, &seeds, 0), [""; 0]);
     assert_eq!(too_few(&grammar, &seeds, 4).len(), 3);
+}
+
+/// The row of a condition that changes state, which no generated program holds since the
+/// checker refuses it, is seen where a parsed function holds one: an assignment in a block of an
+/// `if` inside a loop's condition, a `mut` argument in a `guard`'s or an `if`'s, in a loop's
+/// `invariant`, in an operand of `and`, in the scrutinee of a `match` on a `bool`, and in a
+/// function's `requires`; and not where the effect stands outside every condition.
+#[test]
+fn test_a_condition_that_changes_state_is_seen() {
+    let function = |header: &str, body: &str| {
+        let src = format!(
+            "module t\nfn next(mut i: u8) -> u8 {{\n  i = i / 2\n  i\n}}\n{} {{\n  var i = n\n{}\n  i\n}}\n",
+            header, body
+        );
+        let module = mente_syntax::parse_module(&src).unwrap();
+        let parsed = mente_syntax::parse_bodies(&src, &module);
+        parsed
+            .into_iter()
+            .filter_map(|p| p.syntax)
+            .next_back()
+            .unwrap()
+    };
+    let plain = "pub fn f(n: u8) -> u8";
+    for (header, body) in [
+        (
+            plain,
+            "  while (if n > 3 {\n    i = 0\n    0\n  } else {\n    0\n  }) == 0 {\n    i += 1\n  }",
+        ),
+        (plain, "  guard next(mut i) > 0 else {\n    return 0\n  }"),
+        (
+            plain,
+            "  val k: u8 = if next(mut i) > 0 { 1 } else { 0 }\n  i += k",
+        ),
+        (
+            plain,
+            "  while i > 0 invariant next(mut i) >= 0 {\n    i -= 1\n  }",
+        ),
+        (plain, "  val c = n > 0 and next(mut i) > 0\n  _ = c"),
+        (
+            plain,
+            "  val k: u8 = match next(mut i) > 0 {\n    true => 1\n    false => 0\n  }\n  i += k",
+        ),
+        (
+            "pub fn f(mut n: u8) -> u8\n  requires next(mut n) > 0",
+            "",
+        ),
+    ] {
+        assert!(
+            a_condition_changes_state(&function(header, body)),
+            "{}",
+            body
+        );
+    }
+    for body in [
+        "  val ok = next(mut i) > 0\n  if ok {\n    i = 0\n  }",
+        "  while i > 0 {\n    _ = next(mut i)\n  }",
+        "  val k = match next(mut i) {\n    0 => 1\n    _ => 0\n  }\n  i += k",
+    ] {
+        assert!(
+            !a_condition_changes_state(&function(plain, body)),
+            "{}",
+            body
+        );
+    }
 }
 
 /// The seeds the test reads: the first programs of each mode.

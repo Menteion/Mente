@@ -1,0 +1,18 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (item 10), in the scrutinee of a `match` inside it too.
+fn next(mut i: u8) -> u8 {
+  i = i / 2
+  i
+}
+
+pub fn f(n: u8) -> u8 {
+  var i = n
+  guard (match next(mut i) {
+    0 => false
+    _ => true
+  }) else {
+    return 0
+  }
+  i
+}

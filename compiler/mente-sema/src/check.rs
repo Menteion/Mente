@@ -156,6 +156,8 @@ pub fn check(
     c.compared_literals(f);
     c.literal_traps();
     c.unheld_literals();
+    let pure = crate::conditions::effects_in_conditions(f, resolution, &c.typing, src);
+    c.errors.extend(pure);
     (c.typing, c.errors)
 }
 
@@ -5425,9 +5427,18 @@ pub fn f(mut p: Pair) {
             "cannot pass as `mut` `v`: it is a `val`, which never changes; declare it with `var`"
         );
         assert_eq!(codes("pub fn f(v: u8) {\n  touch(mut v)\n}"), ["E0206"]);
+        // The clause also changes state, which no clause does (`E0236`).
+        let clause = messages(
+            "pub fn bump(mut x: u8) -> bool = true\npub fn f() -> u8\n  ensures bump(mut result)\n= 1",
+        );
         assert_eq!(
-            messages("pub fn bump(mut x: u8) -> bool = true\npub fn f() -> u8\n  ensures bump(mut result)\n= 1"),
-            ["cannot pass as `mut` `result`, the value an `ensures` clause reads"]
+            clause[0],
+            "cannot pass as `mut` `result`, the value an `ensures` clause reads"
+        );
+        assert!(
+            clause[1].starts_with("this `ensures` clause passes `result` as `mut`"),
+            "{:?}",
+            clause
         );
         assert_eq!(
             codes("pub fn f(v: u8) {\n  declared(mut v)\n}"),

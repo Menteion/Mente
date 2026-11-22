@@ -231,6 +231,7 @@ pub fn check(f: &FnSyntax, resolution: &Resolution, typing: &Typing, src: &str) 
         },
         ranges: vec![None; tree.exprs.len()],
         unfit: vec![false; tree.exprs.len()],
+        given: Vec::new(),
         errors: Vec::new(),
     };
     for i in 0..tree.exprs.len() {
@@ -290,6 +291,7 @@ pub fn intervals(f: &FnSyntax, resolution: &Resolution, typing: &Typing) -> Vec<
         body: None,
         ranges: vec![None; tree.exprs.len()],
         unfit: vec![false; tree.exprs.len()],
+        given: Vec::new(),
         errors: Vec::new(),
     };
     (0..tree.exprs.len())
@@ -316,6 +318,8 @@ struct Wide<'a> {
     ranges: Vec<Option<Option<Range>>>,
     /// Each array literal reported `E0222`, so that one that holds it is not reported too.
     unfit: Vec<bool>,
+    /// The names the fixes reported so far declare, which a later fix does not declare again.
+    given: Vec<String>,
     errors: Vec<Diagnostic>,
 }
 
@@ -765,6 +769,7 @@ impl Wide<'_> {
                 applicability: Applicability::Suggestion,
                 edits,
             });
+            self.given.push(name);
         }
         self.errors.push(d);
     }
@@ -832,14 +837,7 @@ impl Wide<'_> {
             | ExprKind::If { .. }
             | ExprKind::Error => "wide",
         };
-        let taken = |n: &str| self.resolution.bindings.iter().any(|b| b.name == n);
-        (1..)
-            .map(|k| match k {
-                1 => base.to_string(),
-                k => format!("{}{}", base, k),
-            })
-            .find(|n| !taken(n))
-            .unwrap_or_default()
+        self.resolution.unused_name_besides(base, &self.given)
     }
 
     /// The edit that inserts `line` before the statement that holds `at`: none for a loop's
@@ -920,34 +918,40 @@ impl Wide<'_> {
             .filter(|s| s.span.start <= at.start && at.end <= s.span.end)
             .max_by_key(|s| s.span.start)
             .filter(|s| !matches!(s.kind, StmtKind::While { .. }))?;
-        let start = stmt.span.start;
-        let line_start = self.src.get(..start)?.rfind('\n').map_or(0, |i| i + 1);
-        let lead = self.src.get(line_start..start)?;
-        let point = |byte: usize| {
-            let (line, col) = line_col(self.src, byte);
-            Span {
-                start: byte,
-                end: byte,
-                line: line as u32,
-                col: col as u32,
-            }
-        };
-        Some(if lead.trim().is_empty() {
-            Edit {
-                span: point(line_start),
-                replacement: format!("{}{}\n", lead, line),
-            }
-        } else {
-            let indent: String = lead
-                .chars()
-                .take_while(|c| *c == ' ' || *c == '\t')
-                .collect();
-            Edit {
-                span: point(start),
-                replacement: format!("{}\n{}", line, indent),
-            }
-        })
+        line_before(self.src, stmt.span.start, line)
     }
+}
+
+/// The edit that writes `line` before the statement that starts at byte `start` of `src`: on a
+/// line of its own with the statement's indentation, or, where the statement shares its line,
+/// before it, the statement then going on a line of its own with that line's indentation.
+pub(crate) fn line_before(src: &str, start: usize, line: &str) -> Option<Edit> {
+    let line_start = src.get(..start)?.rfind('\n').map_or(0, |i| i + 1);
+    let lead = src.get(line_start..start)?;
+    let point = |byte: usize| {
+        let (line, col) = line_col(src, byte);
+        Span {
+            start: byte,
+            end: byte,
+            line: line as u32,
+            col: col as u32,
+        }
+    };
+    Some(if lead.trim().is_empty() {
+        Edit {
+            span: point(line_start),
+            replacement: format!("{}{}\n", lead, line),
+        }
+    } else {
+        let indent: String = lead
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect();
+        Edit {
+            span: point(start),
+            replacement: format!("{}\n{}", line, indent),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1368,6 +1372,12 @@ mod tests {
             "bind `b * c + b` to `sum: u128` first",
         );
         assert!(check_source(&sum).is_ok(), "{}", sum);
+        // Nor a name of a function of the module, which no binding takes (`E0220`).
+        let beside = fixed(
+            "pub fn sum() -> u8 = 1\npub fn f(a: u128, b: u64, c: u64) -> u128 {\n  val s: u128 = (b * c + b) * b * c\n  s\n}",
+            "bind `b * c + b` to `sum2: u128` first",
+        );
+        assert!(check_source(&beside).is_ok(), "{}", beside);
         // Of operands of one range, the left is bound; a difference is named so.
         let tie = fixed(
             "pub fn f(a: u64, b: u64, c: u64, d: u64) -> u128 {\n  val x: u128 = a * b * (c * d)\n  x\n}",
