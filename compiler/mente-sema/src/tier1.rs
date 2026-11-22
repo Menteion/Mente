@@ -2804,17 +2804,16 @@ impl<'a> Fx<'a> {
             .map(|_| (n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)))
             .collect();
         // A compound remainder `p %= e` is no expression's, so its value has a variable of its
-        // own, which no expression's value is held in (`Fx::binary`).
+        // own, which no expression's value is held in (`Fx::binary`). Tier 1 reads only a
+        // program the checker accepted, where its place is an integer, or the `Any` of `todo` or
+        // `unreachable`, which Tier 1 meets only in an empty state, since evaluating either
+        // empties it first.
         let compounds = tree
             .stmts
             .iter()
             .map(|s| match &s.kind {
-                StmtKind::Assign { place, op, .. } => match op {
-                    AssignOp::Compound(BinaryOp::Rem)
-                        if int_type(&f.typing.exprs[place.0 as usize]).is_some() =>
-                    {
-                        n.alloc(true)
-                    }
+                StmtKind::Assign { op, .. } => match op {
+                    AssignOp::Compound(BinaryOp::Rem) => n.alloc(true),
                     AssignOp::Set | AssignOp::Compound(_) => None,
                 },
                 StmtKind::Binding { .. }
@@ -8464,6 +8463,30 @@ mod tests {
             .map(|(k, _, proven)| (k, proven))
             .collect();
         assert_eq!(unproven, Vec::new());
+    }
+
+    /// A compound remainder's place is an integer, or the `Any` of `todo` or `unreachable`, which
+    /// the checker accepts too (`Fx::rest`): Tier 1 meets such a place only where no run
+    /// reaches, since evaluating either empties the state first. For each, the program checks, and
+    /// the statement after it is reached in an empty state.
+    #[test]
+    fn test_a_compound_remainder_of_a_todo_place_is_met_only_where_no_run_reaches() {
+        for leaves in ["todo(\"later\")", "unreachable(\"later\")"] {
+            let src = format!(
+                "pub fn f(a: [2]u8[1..=9]) -> u8 {{\n  var y = {}\n  y %= a[1]\n  _ = y\n  0\n}}",
+                leaves
+            );
+            assert_eq!(codes(&src), NONE, "{}", leaves);
+            with_fx(&src, |fx, st| {
+                let Some(Body::Block(b)) = fx.syntax.body else {
+                    panic!("a block body");
+                };
+                let stmts = fx.tree.block(b).stmts.clone();
+                let mut at = st.clone();
+                fx.stmt_eval(&mut at, stmts[0], None);
+                assert!(at.is_empty(), "the state after {} is reached", leaves);
+            });
+        }
     }
 
     /// Every compound operator, after a site value on its right side, proves only what holds:
