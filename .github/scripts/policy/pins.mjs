@@ -60,7 +60,7 @@ export const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "8594d53e73f3b014fff01ee9cc1014fa5575a9b3ee9b102fae33c03754b0f6af"],
-  [".github/scripts/policy-run.test.mjs", "c86e485a5efc9933012f768e0737fea66b772d032b11a2304766760497920348"],
+  [".github/scripts/policy-run.test.mjs", "b081bf09e218d69839cd3c8a8f53fde07bbe389671eb56b263bfa7598159a6d8"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -111,10 +111,11 @@ export const PINNED_FILES = new Map([
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 export const PINNED_JOBS = new Map([
   ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
-  ["mutants.yml#plan", "b507c640bfc6cdd89c682aac76c9799f646578ad3fbb23581d0b57d8943a1056"],
-  ["mutants.yml#shard", "0df83c0734f764d8c3a13b10e7eb81467725364d88561dfe58b02ff485308d36"],
+  ["mutants.yml#plan", "a13a733683622b5149435a55f9f7b5f334383df878d1006b0a4093ee06a5b3bc"],
+  ["mutants.yml#shard", "24a84a703e6e775e8d00c984accc1e708c8de93f7eff7e2f2eef6157c116f681"],
   ["mutants.yml#aggregate", "579f212be0eb40ba5b554285629ca1d61b5cc8f78d8e5aa56db6f8e26fa73ac4"],
-  ["mutants-full.yml#full", "31cd41c53714095da362d53b6b06e9ecfc9c247f8fd5a809fd3fbad2595de095"],
+  ["mutants-full.yml#build", "2c983a54519f8d1007516cc85819127a66bba1008c017d70a6fbf9bb5a4d437a"],
+  ["mutants-full.yml#full", "e1d21246b9c6b8e0bb849381d7f7a56fe717718ec3a0245f2fb13fb707aac996"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "62af70c69ee897c012199ec4699de6b1035cabe358f855b7c4e3f31c7f119d75"],
@@ -129,7 +130,7 @@ export const PINNED_JOBS = new Map([
   // The nightly alarms, each with its workflow's triggers (Norman, 2026-11-21).
   ["fuzz-nightly.yml#alarm", "3873cebb627ff350058b72ed6a16297ebd92eff8155306ccc271157ce359d652"],
   ["generated-nightly.yml#alarm", "362bd08920cd3c3830502a91997feda6e45cb81604fcdf9bbe596e16e8ceb946"],
-  ["mutants-full.yml#alarm", "640ea7be48a9d5582adf62724215b1ef52bbf977605f504d6ea905900235db05"],
+  ["mutants-full.yml#alarm", "61563727026e3b1ee149e9720963b3dd6336e8a19642c64cccf2437f9b93b598"],
 ]);
 export const GATE_FILES = [
   "/.github/",

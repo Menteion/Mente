@@ -160,12 +160,12 @@ const TOOL_ENV_ALLOWED = new Map([
   // cargo and no nextest.
   // cargo-mutants' commit, the one value it may take: another build of the tool is a change to the
   // policy too.
-  ["CARGO_MUTANTS_REV", { value: "b00aff0c6ca0670bccdf4eb2ece9e15c4c35c8b9", jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
+  ["CARGO_MUTANTS_REV", { value: "b00aff0c6ca0670bccdf4eb2ece9e15c4c35c8b9", jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#build", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // The fuzzer's release build also asserts what a debug build asserts.
   ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", { value: "true", jobs: ["fuzz.yml#fuzz"] }],
   // The base branch's build beside this change's.
   ["CARGO_TARGET_DIR", { value: "${{ github.workspace }}/../target", jobs: ["perf.yml#kernels"] }],
-  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
+  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#plan", "mutants.yml#shard", "mutants.yml#aggregate", "mutants-full.yml#build", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // A warning fails the build.
   ["RUSTFLAGS", { value: "-D warnings", jobs: ["ci.yml#rust"] }],
 ]);
@@ -185,7 +185,16 @@ function toolEnvProblems(key, doc, job) {
   return found;
 }
 
+/// Why a commit of cargo-mutants is no pin: a branch, a tag or a short SHA can move or match more
+/// than one commit, so it must be a full commit SHA, forty hexadecimal digits in lower case.
+export function revProblems(rev) {
+  return /^[0-9a-f]{40}$/.test(String(rev)) ? [] : [`CARGO_MUTANTS_REV is ${JSON.stringify(rev)}, not a full commit SHA: a branch, a tag or a short SHA can move`];
+}
+
 check("no required or pinned job sets a variable that changes how its tools run", () => {
+  // cargo-mutants' commit is a full SHA, which no push can move (the Manager, 2026-11-22).
+  assert.deepEqual(revProblems(TOOL_ENV_ALLOWED.get("CARGO_MUTANTS_REV").value), []);
+  for (const rev of ["main", "v27.1.0", "27.1.0", "b00aff0", "b00aff0c6ca0670bccdf4eb2ece9e15c4c35c8b", "B00AFF0C6CA0670BCCDF4EB2ECE9E15C4C35C8B9", "refs/heads/main", null]) assert.ok(revProblems(rev).length > 0, `${rev} passes as a pin of cargo-mutants`);
   const keys = new Set([...requiredJobs().map((j) => `${j.file}#${j.id}`), ...PINNED_JOBS.keys()]);
   for (const { file, doc, id, job } of allJobs().filter((j) => keys.has(`${j.file}#${j.id}`))) assert.deepEqual(toolEnvProblems(`${file}#${id}`, doc, job), []);
   for (const name of ["BASH_ENV", "npm_config_script_shell", "NODE_OPTIONS", "PATH", "Path", "cargo_target_x86_64_unknown_linux_gnu_runner", "RUSTC_WRAPPER", "RUSTUP_TOOLCHAIN"]) assert.match(name, TOOL_ENV, name);

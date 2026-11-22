@@ -74,6 +74,7 @@ mutants.yml#shard: node .github/scripts/build-time-code.mjs --before-toolchain
 mutants.yml#shard: node .github/scripts/build-time-code.mjs
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh check
+mutants.yml#shard: /usr/bin/sha256sum -c "$RUNNER_TEMP/cargo-mutants.sha256"
 mutants.yml#shard: node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"

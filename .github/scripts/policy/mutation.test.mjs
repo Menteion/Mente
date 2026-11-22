@@ -649,14 +649,32 @@ check("the plan deals every mutant of the run to one shard, as many shards as th
   assert.ok(doc.jobs.shard.strategy?.matrix?.shard === "${{ fromJSON(needs.plan.outputs.shards) }}", "the shards are not those the plan made");
   const planStep = steps(doc.jobs.plan).find((s) => s.id === "plan");
   assert.match(String(planStep?.run), /mutants-floor\.mjs plan diff-mutants\.json deleted-mutants\.json "\$\(cat baseline-seconds\.txt\)" plan >> "\$GITHUB_OUTPUT"\n/);
-  const upload = steps(doc.jobs.plan).find((s) => String(s.uses ?? "").startsWith("actions/upload-artifact@"));
-  const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@"));
+  const upload = steps(doc.jobs.plan).find((s) => String(s.uses ?? "").startsWith("actions/upload-artifact@") && s.with?.name === "mutants-plan");
+  const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@") && s.with?.path === "mutants-plan");
   assert.equal(upload?.with?.name, download?.with?.name, "the shards download another artifact than the plan keeps");
   assert.ok(String(upload.with.path).split("\n").includes("plan") && download.with.path === "mutants-plan", "the shards read the plan's files elsewhere than it keeps them");
   // Every run of cargo-mutants, the full run's too, is the build of the one commit the policy holds
   // (CARGO_MUTANTS_REV in build-and-toolchain.test.mjs), with its own lock.
   const installs = workflows().flatMap(({ file, doc: d }) => Object.values(d.jobs ?? {}).flatMap((j) => steps(j)).flatMap((s) => String(s.run ?? "").split("\n").filter((l) => /\bcargo\s+install\b[^\n]*\bmutants\b/.test(l)).map((l) => [file, l.trim()])));
-  assert.ok(installs.length >= 3, "the policy reads the installs of cargo-mutants");
+  assert.ok(installs.length >= 2, "the policy reads the installs of cargo-mutants");
+  // Built once, by the plan and by the full run's build job, and handed to each shard as the binary
+  // whose digest the builder took right after building it, before anything else ran there.
+  const full = workflows().find((w) => w.file === "mutants-full.yml").doc;
+  for (const [where, builder, shard, need] of [
+    ["mutants.yml", doc.jobs.plan, doc.jobs.shard, "plan"],
+    ["mutants-full.yml", full.jobs.build, full.jobs.full, "build"],
+  ]) {
+    const install = steps(builder).find((s) => s.id === "mutants");
+    assert.equal(String(install?.run), 'cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"\necho "digest=$(/usr/bin/sha256sum "$HOME/.cargo/bin/cargo-mutants" | /usr/bin/cut -c1-64)" >> "$GITHUB_OUTPUT"\n', `${where}: the builder does not install cargo-mutants and take its digest, alone, in its step mutants`);
+    assert.equal(builder.outputs?.mutants, "${{ steps.mutants.outputs.digest }}", `${where}: the builder gives another digest than its step's`);
+    const next = steps(builder)[steps(builder).indexOf(install) + 1];
+    assert.ok(String(next?.uses ?? "").startsWith("actions/upload-artifact@") && next.with?.name === "cargo-mutants" && next.with?.path === "~/.cargo/bin/cargo-mutants", `${where}: the builder does not keep the binary it built, right after building it`);
+    assert.ok(!steps(shard).some((s) => /\bcargo\s+install\b[^\n]*\bmutants\b/.test(String(s.run ?? ""))), `${where}: a shard builds cargo-mutants of its own`);
+    const verify = steps(shard).find((s) => /sha256sum -c "\$RUNNER_TEMP\/cargo-mutants\.sha256"/.test(String(s.run ?? "")));
+    assert.equal(verify?.env?.DIGEST, `\${{ needs.${need}.outputs.mutants }}`, `${where}: a shard checks cargo-mutants against another digest than its builder's`);
+    assert.ok([].concat(shard.needs ?? []).includes(need), `${where}: a shard does not need its builder, whose digest it reads`);
+    assert.ok(String(verify.run).trimEnd().endsWith('/usr/bin/install -m 755 "$RUNNER_TEMP/cargo-mutants/cargo-mutants" "$HOME/.cargo/bin/cargo-mutants"'), `${where}: a shard installs cargo-mutants other than after checking it`);
+  }
   for (const [file, line] of installs) assert.equal(line, 'cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"', `${file} installs cargo-mutants otherwise than from the commit the policy holds`);
   const shardScripts = steps(doc.jobs.shard).map((s) => String(s.run ?? "")).join("\n");
   assert.equal(shardScripts.split('< "mutants-plan/plan/shard-$SHARD.re"').length, 3, "the shard's list and its run do not both read its regexes");

@@ -7,6 +7,7 @@
 // test_the_documentation_job_runs_the_workflow_policy keeps FLOOR equal to them.
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,7 +28,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 19;
+const FLOOR = 20;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1291,6 +1292,52 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
     const untested = run(mutate.run, { tested: both.slice(1) });
     assert.equal(untested.status, 1, `a run that left a dealt name untested passes: ${untested.out}`);
     assert.match(untested.out, /::error::1 of this shard's mutants were tested otherwise than the plan dealt them/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("a shard installs cargo-mutants only as the binary its builder took the digest of", () => {
+  // The step of a pull request's shards and of the full run's, under bash: the binary handed on is
+  // installed when its digest is the builder's, and refused, uninstalled, otherwise.
+  const step = (file, job) => parseYaml(read(`${WORKFLOWS}/${file}`)).jobs[job].steps.find((s) => /sha256sum -c "\$RUNNER_TEMP\/cargo-mutants\.sha256"/.test(String(s.run ?? "")));
+  const shard = step("mutants.yml", "shard");
+  const full = step("mutants-full.yml", "full");
+  assert.ok(shard && full, "a shard has no step that checks cargo-mutants' digest");
+  assert.equal(full.run, shard.run, "the full run's shards check cargo-mutants otherwise than a pull request's");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mutants-binary-"));
+  try {
+    const posix = (p) => p.replace(/\\/g, "/");
+    const binary = path.join(dir, "temp", "cargo-mutants", "cargo-mutants");
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.mkdirSync(path.join(dir, "home", ".cargo", "bin"), { recursive: true });
+    fs.writeFileSync(binary, "the binary the builder built\n");
+    const digest = crypto.createHash("sha256").update(fs.readFileSync(binary)).digest("hex");
+    const installed = path.join(dir, "home", ".cargo", "bin", "cargo-mutants");
+    const run = (DIGEST) => {
+      fs.rmSync(installed, { force: true });
+      const env = { ...process.env, DIGEST, HOME: posix(path.join(dir, "home")), RUNNER_TEMP: posix(path.join(dir, "temp")) };
+      const r = spawnSync(bashPath(), ["-e", "-c", shard.run], { encoding: "utf8", env, timeout: 30000 });
+      return { status: r.status, out: `${r.stdout}${r.stderr}`, installed: fs.existsSync(installed) };
+    };
+    const ok = run(digest);
+    assert.equal(ok.status, 0, `the builder's binary is refused: ${ok.out}`);
+    assert.ok(ok.installed, "the builder's binary is not installed");
+    assert.equal(fs.readFileSync(installed, "utf8"), "the binary the builder built\n");
+    for (const [what, value] of [
+      ["another binary's digest", crypto.createHash("sha256").update("another").digest("hex")],
+      ["no digest", ""],
+      ["a digest in capitals", digest.toUpperCase()],
+      ["a short digest", digest.slice(0, 63)],
+      ["a digest and more", `${digest}0`],
+    ]) {
+      const r = run(value);
+      assert.equal(r.status, 1, `${what} passes: ${r.out}`);
+      assert.ok(!r.installed, `${what} installs the binary`);
+    }
+    const injected = run(`${digest}\n::warning::planted`);
+    assert.equal(injected.status, 1);
+    assert.doesNotMatch(injected.out, /^::warning::/m, "the digest reaches the log as a command");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

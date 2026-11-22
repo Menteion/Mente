@@ -38,10 +38,47 @@ env:
   NEXTEST_PROFILE: mutants
 
 jobs:
+  build:
+    # cargo-mutants, built once for the sixteen shards, which each check it against the digest
+    # taken here.
+    name: Build cargo-mutants for the full run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      mutants: ${{ steps.mutants.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
+        # Before rustup or cargo reads anything of the workspace: rust-toolchain.toml names a release
+        # alone and no cargo configuration file is there; then cargo reads the manifests and the
+        # lock, and a package with code that runs at build time, or a crate not approved, fails the
+        # job before anything is built (.github/scripts/build-time-code.mjs).
+        run: |
+          node .github/scripts/build-time-code.mjs --before-toolchain
+          rustup toolchain install
+          node .github/scripts/build-time-code.mjs
+      - name: Install cargo-mutants
+        id: mutants
+        # Built once for the sixteen shards, from the commit CARGO_MUTANTS_REV names, with its lock, never
+        # restored from a cache, which another job could have written; its digest, taken here before
+        # anything else runs, is the one each shard checks the binary it is handed against.
+        run: |
+          cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"
+          echo "digest=$(/usr/bin/sha256sum "$HOME/.cargo/bin/cargo-mutants" | /usr/bin/cut -c1-64)" >> "$GITHUB_OUTPUT"
+      - name: Keep cargo-mutants for the shards
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-mutants
+          path: ~/.cargo/bin/cargo-mutants
+          if-no-files-found: error
+
   full:
     # Every mutant of the compiler, some thousands at a minute or so each: sixteen shards keep
     # each within a runner's six hours.
     name: Full run (shard ${{ matrix.shard }} of 16)
+    needs: build
     strategy:
       fail-fast: false
       matrix:
@@ -61,10 +98,22 @@ jobs:
           node .github/scripts/build-time-code.mjs --before-toolchain
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
-      - name: Install cargo-mutants
-        # Built from the commit CARGO_MUTANTS_REV names, with its lock, never restored from a cache
-        # that another run on the same branch could have written.
-        run: cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"
+      - name: cargo-mutants as the build job built it
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cargo-mutants
+          path: ${{ runner.temp }}/cargo-mutants
+      - name: Install cargo-mutants, the binary the build job built, by its digest
+        env:
+          DIGEST: ${{ needs.build.outputs.mutants }}
+        # The build job took the digest right after it built cargo-mutants, before anything else ran
+        # there; a binary of another digest is refused, and a digest of another form named, not echoed.
+        run: |
+          case "$DIGEST" in *[!0-9a-f]*) echo "::error::the digest of cargo-mutants is no SHA-256"; exit 1 ;; esac
+          if [ "${#DIGEST}" -ne 64 ]; then echo "::error::the digest of cargo-mutants is no SHA-256"; exit 1; fi
+          echo "$DIGEST  $RUNNER_TEMP/cargo-mutants/cargo-mutants" > "$RUNNER_TEMP/cargo-mutants.sha256"
+          /usr/bin/sha256sum -c "$RUNNER_TEMP/cargo-mutants.sha256"
+          /usr/bin/install -m 755 "$RUNNER_TEMP/cargo-mutants/cargo-mutants" "$HOME/.cargo/bin/cargo-mutants"
       - name: Install cargo-nextest
         run: bash .github/scripts/install-nextest.sh
       - name: Record the tools, before any code of the change runs
@@ -149,7 +198,7 @@ jobs:
     # run's jobs, nothing else; the workflow policy (.github/scripts/policy/) pins this job
     # and the script.
     name: Nightly alarm (Mutants, the full run)
-    needs: [full]
+    needs: [build, full]
     if: always() && github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 10

@@ -49,6 +49,7 @@ jobs:
       count: ${{ steps.plan.outputs.count }}
       shards: ${{ steps.plan.outputs.shards }}
       needed: ${{ steps.plan.outputs.needed }}
+      mutants: ${{ steps.mutants.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,10 +69,21 @@ jobs:
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
       - name: Install cargo-mutants
+        id: mutants
         if: steps.watch.outputs.run != 'false'
-        # Built from the commit CARGO_MUTANTS_REV names, with its lock, never restored from a cache
-        # that another job of the same pull request could have written.
-        run: cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"
+        # Built once for the plan and every shard, from the commit CARGO_MUTANTS_REV names, with its lock, never
+        # restored from a cache, which another job could have written; its digest, taken here before
+        # anything else runs, is the one each shard checks the binary it is handed against.
+        run: |
+          cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"
+          echo "digest=$(/usr/bin/sha256sum "$HOME/.cargo/bin/cargo-mutants" | /usr/bin/cut -c1-64)" >> "$GITHUB_OUTPUT"
+      - name: Keep cargo-mutants for the shards
+        if: steps.watch.outputs.run != 'false'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-mutants
+          path: ~/.cargo/bin/cargo-mutants
+          if-no-files-found: error
       - name: Install cargo-nextest
         if: steps.watch.outputs.run != 'false'
         run: bash .github/scripts/install-nextest.sh
@@ -213,8 +225,22 @@ jobs:
         with:
           name: mutants-plan
           path: mutants-plan
-      - name: Install cargo-mutants
-        run: cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"
+      - name: cargo-mutants as the plan built it
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cargo-mutants
+          path: ${{ runner.temp }}/cargo-mutants
+      - name: Install cargo-mutants, the binary the plan built, by its digest
+        env:
+          DIGEST: ${{ needs.plan.outputs.mutants }}
+        # The plan took the digest right after it built cargo-mutants, before anything else ran
+        # there; a binary of another digest is refused, and a digest of another form named, not echoed.
+        run: |
+          case "$DIGEST" in *[!0-9a-f]*) echo "::error::the digest of cargo-mutants is no SHA-256"; exit 1 ;; esac
+          if [ "${#DIGEST}" -ne 64 ]; then echo "::error::the digest of cargo-mutants is no SHA-256"; exit 1; fi
+          echo "$DIGEST  $RUNNER_TEMP/cargo-mutants/cargo-mutants" > "$RUNNER_TEMP/cargo-mutants.sha256"
+          /usr/bin/sha256sum -c "$RUNNER_TEMP/cargo-mutants.sha256"
+          /usr/bin/install -m 755 "$RUNNER_TEMP/cargo-mutants/cargo-mutants" "$HOME/.cargo/bin/cargo-mutants"
       - name: Install cargo-nextest
         run: bash .github/scripts/install-nextest.sh
       - name: Record the tools, before any code of the change runs
