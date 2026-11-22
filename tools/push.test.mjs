@@ -14,9 +14,10 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { LOCK_FD_VARIABLE, PASSED, TREE_RUNNER, takeLock } from "./local-limits.mjs";
-import { blobId, gateEnv, gitLocations, systemGit } from "./gate-entries/verify.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { LOCK_FD_VARIABLE, PASSED, TREE_RUNNER, capped, lockHolder, takeLock } from "./local-limits.mjs";
+import { INTERFACE, blobId, filesOf, gateEnv, gitLocations, localMain, manifestText, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
+import { ENTRIES, GET_URL_MS, REFRESH_MS, REMOTE_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
@@ -588,4 +589,696 @@ test("a lock handed down stays held after the hander ends, and a claim without i
     // Windows frees a killed process's files a moment after it ends.
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
+});
+
+// The local gates run from a verified copy of main (briefs/gate-tools-from-main.md). Each case
+// makes a fixture: a bare repository standing for the remote, and a checkout of it whose main
+// holds this checkout's set, its tools/gate-set.json naming the bare repository's path as the
+// remote, which only the seam of tools/gates.mjs admits; the command admits only https.
+
+const TREE = fileURLToPath(new URL("..", import.meta.url));
+const SET = JSON.parse(fs.readFileSync(new URL("./gate-set.json", import.meta.url), "utf8"));
+const GATES_MODULE = new URL("./gates.mjs", import.meta.url).href;
+const EXECUTABLE = ["tools/git-hooks/pre-push", "tools/gate-entries/hooks/pre-push"];
+const posixOnly = process.platform === "win32" && "Windows keeps no executable bit";
+const windowsOnly = process.platform !== "win32" && "only Windows refuses to replace a file in use: a local proof the quick map runs";
+
+/** The environment of a fixture's own git commands: git's configuration closed, a fixed author. */
+function fixtureEnv(dir) {
+  const empty = path.join(dir, "no-config");
+  fs.writeFileSync(empty, "");
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(GIT_|NODE_OPTIONS$)/i.test(k))),
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: empty,
+    GIT_AUTHOR_NAME: "fixture",
+    GIT_AUTHOR_EMAIL: "fixture@example.invalid",
+    GIT_COMMITTER_NAME: "fixture",
+    GIT_COMMITTER_EMAIL: "fixture@example.invalid",
+  };
+}
+
+/**
+ * Runs `body` with a fixture of the gates, and removes it after. `commit(message, changes)` writes
+ * the set as this checkout holds it, then `changes` ({ path: text, or a function of the old bytes,
+ * or null to remove }), commits it, and unless `push` is false pushes main and fetches it.
+ */
+async function withGates(body) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gates-"));
+  try {
+    const env = fixtureEnv(dir);
+    const run = (cwd, args, extra = {}) => spawnSync("git", args, { cwd, env: { ...env, ...extra }, encoding: "utf8" });
+    const git = (cwd, ...args) => {
+      const r = run(cwd, args);
+      if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+      return r.stdout.trim();
+    };
+    const remote = path.join(dir, "remote.git").replace(/\\/g, "/");
+    const work = path.join(dir, "work");
+    git(dir, "init", "-q", "--bare", "-b", "main", remote);
+    git(dir, "init", "-q", "-b", "main", work);
+    git(work, "remote", "add", "origin", remote);
+    const commit = (message, changes = {}, { push = true } = {}) => {
+      for (const rel of SET.set) {
+        const at = path.join(work, rel);
+        fs.mkdirSync(path.dirname(at), { recursive: true });
+        fs.copyFileSync(path.join(TREE, rel), at);
+      }
+      fs.writeFileSync(path.join(work, "tools", "gate-set.json"), `${JSON.stringify({ ...SET, url: remote }, null, 2)}\n`);
+      for (const [rel, content] of Object.entries(changes)) {
+        const at = path.join(work, rel);
+        if (content === null) fs.rmSync(at, { force: true });
+        else {
+          fs.mkdirSync(path.dirname(at), { recursive: true });
+          fs.writeFileSync(at, typeof content === "function" ? content(fs.readFileSync(at)) : content);
+        }
+      }
+      git(work, "add", "-A");
+      git(work, "update-index", "--chmod=+x", ...EXECUTABLE);
+      git(work, "commit", "-q", "--allow-empty", "-m", message);
+      const sha = git(work, "rev-parse", "HEAD");
+      if (push) {
+        git(work, "push", "-q", "origin", "main");
+        git(work, "fetch", "-q", "origin");
+      }
+      return sha;
+    };
+    const repo = path.join(work, ".git");
+    const gates = path.join(repo, "mente-gates");
+    const said = [];
+    const seam = (options = {}) => refresh({ repo, policy: { allowLocal: true }, say: (line) => said.push(line), ...options });
+    /** The seam in a process of its own, which a kill at `stopAt` ends: its status and words. */
+    const seamChild = (options = {}, extra = {}) =>
+      spawnSync(process.execPath, ["--input-type=module", "-e", `import { refresh } from ${JSON.stringify(GATES_MODULE)}; process.exit(await refresh({ repo: ${JSON.stringify(repo)}, policy: { allowLocal: true }, ...${JSON.stringify(options)} }));`], { encoding: "utf8", env: { ...env, ...extra }, cwd: extra.CWD ?? work });
+    const entry = (name, args = [], extra = {}) => spawnSync(process.execPath, [path.join(gates, "entry", name), ...args], { encoding: "utf8", cwd: work, env: { ...env, ...extra } });
+    const current = () => fs.readFileSync(path.join(gates, "current"), "utf8").trim();
+    const blob = (sha, rel) => execFileSync(systemGit(), ["--git-dir", repo, "--no-replace-objects", "cat-file", "blob", `${sha}:${rel}`], { env: gateEnv() });
+    const copies = () => fs.readdirSync(gates).filter((name) => /^[0-9a-f]{40}$|^staging-|^aside-/.test(name)).sort();
+    const base = commit("the set");
+    await body({ dir, env, run, git, remote, work, repo, gates, said, seam, seamChild, entry, current, blob, copies, commit, base });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+}
+
+/** Writes `rel` of the copy in use with one byte changed. */
+function drift(gates, rel) {
+  const at = path.join(gates, fs.readFileSync(path.join(gates, "current"), "utf8").trim(), ...rel.split("/"));
+  const bytes = fs.readFileSync(at);
+  bytes[0] ^= 1;
+  fs.writeFileSync(at, bytes);
+}
+
+test("a copy holds the confirmed commit's bytes and modes, from its objects, whatever the working tree holds", async () => {
+  await withGates(async ({ work, gates, seam, current, blob, commit, entry }) => {
+    // A file committed with CRLF line ends before an eol attribute that would convert them.
+    commit("CRLF", { "tools/capped.ps1": (old) => Buffer.from(old.toString("utf8").replace(/\r?\n/g, "\r\n")) });
+    const head = commit("the attribute", { ".gitattributes": "* text=auto eol=lf\n", "tools/capped.ps1": (old) => Buffer.from(old.toString("utf8").replace(/\r?\n/g, "\r\n")) });
+    // Uncommitted edits to the set, to the refresher and to the entries, in the checkout.
+    for (const rel of ["tools/capped.mjs", "tools/gates.mjs", "tools/gate-entries/verify.mjs"]) fs.appendFileSync(path.join(work, rel), "\n// an uncommitted edit\n");
+    assert.equal(await seam(), 0);
+    assert.equal(current(), head);
+    for (const rel of SET.set) assert.ok(fs.readFileSync(path.join(gates, head, ...rel.split("/"))).equals(blob(head, rel)), `${rel} of the copy is not the commit's blob`);
+    assert.ok(fs.readFileSync(path.join(gates, head, "tools", "capped.ps1")).includes("\r\n"), "the CRLF file lost its line ends");
+    for (const name of ENTRIES) assert.ok(fs.readFileSync(path.join(gates, "entry", ...name.split("/"))).equals(blob(head, `tools/gate-entries/${name}`)), `the entry ${name} is not the commit's`);
+    const checked = verifyCopy(gates);
+    assert.equal(checked.refusal, undefined, checked.refusal);
+    if (process.platform !== "win32") {
+      for (const at of [path.join(gates, head, "tools", "git-hooks", "pre-push"), path.join(gates, "entry", "hooks", "pre-push")]) assert.ok(fs.statSync(at).mode & 0o100, `${at} is not executable`);
+    }
+    const r = entry("capped.mjs", ["--", process.execPath, "-e", "console.log('ran')"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ran/);
+  });
+});
+
+test("the entries run the copy whatever the checkout holds, and a push runs the copy's hook", async () => {
+  await withGates(async ({ work, gates, seam, git, run, entry }) => {
+    assert.equal(await seam(), 0);
+    git(work, "config", "core.hooksPath", path.join(gates, "entry", "hooks").replace(/\\/g, "/"));
+    // The checkout switched to a branch that holds no tools at all, as one from before #203 holds none of these.
+    git(work, "checkout", "-q", "--orphan", "before");
+    git(work, "rm", "-q", "-rf", ".");
+    fs.writeFileSync(path.join(work, "old.md"), "old\n");
+    git(work, "add", "old.md");
+    git(work, "commit", "-q", "-m", "old");
+    const r = entry("capped.mjs", ["--", process.execPath, "-e", "console.log('ran')"]);
+    assert.equal(r.status, 0, r.stderr);
+    const refused = run(work, ["push", "origin", "HEAD:refs/heads/before"]);
+    assert.notEqual(refused.status, 0);
+    assert.match(refused.stderr, /the pre-push hook refused/);
+    fs.writeFileSync(path.join(repo(work), "quick-passed"), `${git(work, "rev-parse", "HEAD^{tree}")}\n`);
+    const sent = run(work, ["push", "origin", "HEAD:refs/heads/before"]);
+    assert.equal(sent.status, 0, sent.stderr);
+  });
+});
+
+/** The git directory of the checkout `work`. */
+const repo = (work) => path.join(work, ".git");
+
+test("a refresher run by hand installs nothing", async () => {
+  await withGates(async ({ dir, work, repo: gitDir, gates, seam, current, commit, blob, git, base }) => {
+    assert.equal(await seam(), 0);
+    // From a working tree.
+    let r = spawnSync(process.execPath, [path.join(work, "tools", "gates.mjs")], { encoding: "utf8" });
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /starts only from a copy under/);
+    // An edited refresher in a staging directory, for main's next commit.
+    const next = commit("next");
+    const staging = path.join(gates, `staging-${next}-0a`);
+    for (const rel of SET.set) {
+      fs.mkdirSync(path.dirname(path.join(staging, rel)), { recursive: true });
+      fs.writeFileSync(path.join(staging, rel), blob(next, rel));
+    }
+    fs.appendFileSync(path.join(staging, "tools", "gates.mjs"), "\n// edited\n");
+    r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { encoding: "utf8" });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /writes nothing: its directory does not hold exactly the commit's set: tools\/gates\.mjs/);
+    assert.equal(current(), base);
+    fs.rmSync(staging, { recursive: true });
+    // The installed refresher, imported by a script with a local-path policy.
+    const installed = await import(pathToFileURL(path.join(gates, base, "tools", "gates.mjs")).href);
+    await assert.rejects(installed.refresh({ repo: gitDir, policy: { allowLocal: true } }), /under mente-gates\/ honours no seam argument/);
+    // This working tree's refresher, against its own repository.
+    const own = execFileSync(systemGit(), ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: TREE, env: gateEnv(), encoding: "utf8" }).trim();
+    await assert.rejects(refresh({ repo: own, policy: { allowLocal: true } }), /other than the module's own/);
+    // A worktree's refresher, against its main checkout.
+    git(work, "worktree", "add", "-q", path.join(dir, "second"), "-b", "second");
+    const second = await import(pathToFileURL(path.join(dir, "second", "tools", "gates.mjs")).href);
+    await assert.rejects(second.refresh({ repo: gitDir, policy: { allowLocal: true } }), /every worktree of it counts as its own/);
+    // A refresher copied outside any repository.
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "outside-"));
+    try {
+      for (const rel of ["tools/gates.mjs", "tools/local-limits.mjs", "tools/store-apps.mjs", "tools/capped.ps1", "tools/gate-entries/verify.mjs"]) {
+        fs.mkdirSync(path.dirname(path.join(outside, rel)), { recursive: true });
+        fs.copyFileSync(path.join(TREE, rel), path.join(outside, rel));
+      }
+      const copied = await import(pathToFileURL(path.join(outside, "tools", "gates.mjs")).href);
+      await assert.rejects(copied.refresh({ repo: gitDir, policy: { allowLocal: true } }), /outside any repository honours no seam argument/);
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+    assert.equal(current(), base);
+  });
+});
+
+test("a refresher refuses any argument, and reads only its own repository whatever GIT_ variables it starts with", async () => {
+  await withGates(async ({ dir, gates, seam, seamChild, current, commit, blob, entry, base }) => {
+    assert.equal(await seam(), 0);
+    for (const extra of [base, "https://github.com/Menteion/Mente.git", dir]) {
+      const r = spawnSync(process.execPath, [path.join(gates, base, "tools", "gates.mjs"), extra], { encoding: "utf8" });
+      assert.equal(r.status, 2);
+      assert.match(r.stderr, /takes no argument/);
+    }
+    // Another repository, whose objects and configuration the variables name.
+    const other = path.join(dir, "other.git");
+    execFileSync("git", ["init", "-q", "--bare", other], { env: fixtureEnv(dir) });
+    const variables = { GIT_DIR: other, GIT_OBJECT_DIRECTORY: path.join(other, "objects"), GIT_ALTERNATE_OBJECT_DIRECTORIES: path.join(other, "objects"), GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "core.bare", GIT_CONFIG_VALUE_0: "true" };
+    const next = commit("next");
+    const r = seamChild({}, variables);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(current(), next);
+    assert.ok(fs.readFileSync(path.join(gates, next, "tools", "gates.mjs")).equals(blob(next, "tools/gates.mjs")));
+    const ran = entry("capped.mjs", ["--", process.execPath, "-e", "0"], variables);
+    assert.equal(ran.status, 0, ran.stderr);
+  });
+});
+
+test("a locally moved origin/main, an insteadOf, a URL not https, and a remote that cannot be reached or does not answer install nothing", async () => {
+  await withGates(async ({ dir, work, git, gates, seam, seamChild, current, commit, said, remote, base }) => {
+    assert.equal(await seam(), 0);
+    // origin/main moved by update-ref to a commit whose capped.mjs differs, and a second remote whose main it is.
+    const moved = commit("moved", { "tools/capped.mjs": (old) => `${old}\n// moved\n` }, { push: false });
+    const second = path.join(dir, "second.git").replace(/\\/g, "/");
+    git(dir, "init", "-q", "--bare", "-b", "main", second);
+    git(work, "push", "-q", second, "HEAD:main");
+    git(work, "update-ref", "refs/remotes/origin/main", moved);
+    assert.equal(await seam(), 0);
+    assert.equal(current(), base);
+    assert.match(said.join("\n"), /the remote's main is/);
+    // An insteadOf to that second remote, in the repository's and the user's configuration; a
+    // positive control shows git following it.
+    const rewrite = `[url "${second}"]\n\tinsteadOf = ${remote}\n`;
+    git(work, "config", `url.${second}.insteadOf`, remote);
+    const user = path.join(dir, "user-config");
+    fs.writeFileSync(user, rewrite);
+    assert.match(git(work, "ls-remote", remote, "refs/heads/main"), new RegExp(moved), "the control did not follow the insteadOf, so this case proves nothing");
+    for (const cwd of [work, gates]) {
+      fs.rmSync(path.join(gates, "kept"), { force: true });
+      const r = seamChild({}, { GIT_CONFIG_GLOBAL: user, HOME: dir, USERPROFILE: dir, CWD: cwd });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(current(), base, `started from ${cwd}, an insteadOf installed the moved commit`);
+    }
+    git(work, "config", "--unset", `url.${second}.insteadOf`);
+    // The command admits only https: the fixture's URL is a path.
+    git(work, "update-ref", "refs/remotes/origin/main", commit("next"));
+    const r = spawnSync(process.execPath, [path.join(gates, "entry", "refresh.mjs")], { encoding: "utf8", cwd: work });
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /is not https/);
+    assert.equal(current(), base);
+    // A remote that cannot be reached.
+    fs.rmSync(path.join(gates, "kept"), { force: true });
+    fs.renameSync(remote, `${remote}.away`);
+    said.length = 0;
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /could not be asked/);
+    assert.equal(current(), base);
+    fs.renameSync(`${remote}.away`, remote);
+  });
+});
+
+test("a remote that does not answer in time installs nothing, its tree killed at the time", async () => {
+  const sockets = [];
+  const server = net.createServer((socket) => sockets.push(socket)).listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  try {
+    await withGates(async ({ seam, said, commit, current }) => {
+      const silent = `http://127.0.0.1:${server.address().port}/silent.git`;
+      // A commit that declares the silent remote, installed by the seam's bootstrap: it must confirm there.
+      commit("silent", { "tools/gate-set.json": () => `${JSON.stringify({ ...SET, url: silent }, null, 2)}\n` });
+      const started = Date.now();
+      assert.equal(await seam({ bootstrap: true, remoteMs: 2000 }), 1);
+      assert.ok(Date.now() - started < 20000, "the ask was not held to its time");
+      assert.match(said.join("\n"), /did not say which commit is its main within 2 s/);
+      assert.throws(current);
+    });
+  } finally {
+    for (const socket of sockets) socket.destroy();
+    server.close();
+  }
+});
+
+test("a moved origin/main whose gate-set.json names a local-path remote installs nothing, at a refresh and at the bootstrap", async () => {
+  await withGates(async ({ dir, work, git, gates, seam, current, commit, blob, base }) => {
+    assert.equal(await seam(), 0);
+    const second = path.join(dir, "second.git").replace(/\\/g, "/");
+    git(dir, "init", "-q", "--bare", "-b", "main", second);
+    const moved = commit("moved", { "tools/gate-set.json": () => `${JSON.stringify({ ...SET, url: second }, null, 2)}\n`, "tools/capped.mjs": (old) => `${old}\n// moved\n` }, { push: false });
+    git(work, "push", "-q", second, "HEAD:main");
+    git(work, "update-ref", "refs/remotes/origin/main", moved);
+    assert.equal(await seam(), 0);
+    assert.equal(current(), base);
+    // The bootstrap's staged refresher of that commit: the command admits only https.
+    const staging = path.join(gates, `staging-${moved}-0b`);
+    for (const rel of SET.set) {
+      fs.mkdirSync(path.dirname(path.join(staging, rel)), { recursive: true });
+      fs.writeFileSync(path.join(staging, rel), blob(moved, rel));
+    }
+    const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { encoding: "utf8" });
+    assert.equal(r.status, 1, r.stderr);
+    assert.match(r.stderr, /writes nothing: the remote's URL .* is not https/);
+    assert.equal(current(), base);
+  });
+});
+
+test("git replace of the confirmed commit changes nothing the gates install or check", async () => {
+  await withGates(async ({ work, git, gates, seam, current, commit, blob, entry }) => {
+    const main = commit("main");
+    const other = commit("other", { "tools/capped.mjs": (old) => `${old}\n// replaced\n` }, { push: false });
+    git(work, "reset", "-q", "--hard", main);
+    git(work, "replace", main, other);
+    assert.notEqual(git(work, "show", `${main}:tools/capped.mjs`), blob(main, "tools/capped.mjs").toString().trim(), "the replace did not take, so this case proves nothing");
+    assert.equal(await seam(), 0);
+    assert.equal(current(), main);
+    assert.ok(fs.readFileSync(path.join(gates, main, "tools", "capped.mjs")).equals(blob(main, "tools/capped.mjs")), "the copy holds the replacement's capped.mjs");
+    const r = entry("capped.mjs", ["--", process.execPath, "-e", "0"]);
+    assert.equal(r.status, 0, r.stderr);
+  });
+});
+
+test("a copy of a commit that is not origin/main or one of its ancestors is refused by every entry", async () => {
+  await withGates(async ({ work, git, gates, seam, commit, blob, entry, base }) => {
+    assert.equal(await seam(), 0);
+    const branch = commit("a branch", { "tools/capped.mjs": (old) => `${old}\n// branch\n` }, { push: false });
+    git(work, "reset", "-q", "--hard", base);
+    const copy = path.join(gates, branch);
+    const listing = execFileSync(systemGit(), ["--git-dir", repo(work), "ls-tree", "-r", "-z", "--full-tree", branch, "--", ...SET.set], { env: gateEnv(), encoding: "utf8" });
+    const files = filesOf(listing, SET.set);
+    for (const f of files) {
+      fs.mkdirSync(path.dirname(path.join(copy, f.path)), { recursive: true });
+      fs.writeFileSync(path.join(copy, f.path), blob(branch, f.path), { mode: f.mode === "100755" ? 0o755 : 0o644 });
+    }
+    fs.writeFileSync(path.join(copy, "manifest"), manifestText(files));
+    fs.writeFileSync(path.join(gates, "current"), `${branch}\n`);
+    for (const [name, status] of [["capped.mjs", 2], ["hook.mjs", 1], ["refresh.mjs", 2]]) {
+      const r = entry(name, name === "capped.mjs" ? ["--", process.execPath, "-e", "0"] : []);
+      assert.equal(r.status, status, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, /is not refs\/remotes\/origin\/main or one of its ancestors; Norman runs the bootstrap/);
+    }
+  });
+});
+
+test("drift of the copy is refused on every path, a manifest edited to match too, and the bootstrap clears it", async () => {
+  await withGates(async ({ gates, seam, current, entry, base }) => {
+    assert.equal(await seam(), 0);
+    drift(gates, "tools/push.mjs");
+    const paths = [["capped.mjs", 2], ["hook.mjs", 1], ["refresh.mjs", 2]];
+    for (const [name, status] of paths) {
+      const r = entry(name, name === "capped.mjs" ? ["--", process.execPath, "-e", "0"] : []);
+      assert.equal(r.status, status, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, /has drifted from its manifest: tools\/push\.mjs .*Norman runs the bootstrap/s);
+    }
+    const manifest = path.join(gates, base, "manifest");
+    const files = readManifest(fs.readFileSync(manifest, "utf8")).map((f) => (f.path === "tools/push.mjs" ? { ...f, id: blobId(fs.readFileSync(path.join(gates, base, "tools", "push.mjs"))) } : f));
+    fs.writeFileSync(manifest, manifestText(files));
+    for (const [name, status] of paths) {
+      const r = entry(name, name === "capped.mjs" ? ["--", process.execPath, "-e", "0"] : []);
+      assert.equal(r.status, status, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, /disagrees with that commit's tree/);
+    }
+    assert.equal(await seam({ bootstrap: true }), 0);
+    assert.equal(current(), base);
+    for (const [name] of paths) assert.equal(entry(name, name === "capped.mjs" ? ["--", process.execPath, "-e", "0"] : []).status, 0, name);
+  });
+});
+
+/**
+ * Why the set under `root` is not its own load closure: each file it imports or loads by path,
+ * in the forms its files use (static and dynamic imports of a literal path, path.join or
+ * path.resolve of HERE and a file name, new URL of a literal path and import.meta.url, PowerShell's
+ * Join-Path $PSScriptRoot, and sh's "$(dirname "$0")/<file>"), that lies outside it.
+ */
+function closureProblems(root, set) {
+  const inSet = new Set(set);
+  const problems = [];
+  for (const rel of set) {
+    const text = fs.readFileSync(path.join(root, ...rel.split("/")), "utf8");
+    const loads = [];
+    const forms = [
+      /\bimport\s[^;]*?\bfrom\s+["']([^"']+)["']/g,
+      /\bimport\s+["']([^"']+)["']/g,
+      /\bimport\(\s*["']([^"']+)["']\s*\)/g,
+      /path\.(?:join|resolve)\(\s*HERE\s*,\s*["']([^"']+\.[A-Za-z0-9]+)["']\s*\)/g,
+      /new URL\(\s*["']([^"']+)["']\s*,\s*import\.meta\.url\s*\)/g,
+      /Join-Path \$PSScriptRoot '([^']+)'/g,
+      /"\$\(dirname "\$0"\)\/([^"]+)"/g,
+    ];
+    for (const form of forms) for (const m of text.matchAll(form)) loads.push(m[1]);
+    for (const load of loads) {
+      if (load.startsWith("node:")) continue;
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(rel), load));
+      if (!inSet.has(target)) problems.push(`${rel} loads ${load}, which is not in the set`);
+    }
+  }
+  return problems;
+}
+
+test("the set is its own load closure, of files of mode 100644 or 100755, and a refresh refuses a commit whose set holds anything else", async () => {
+  assert.deepEqual(closureProblems(TREE, SET.set), []);
+  const listed = execFileSync("git", ["ls-files", "-s", "--", ...SET.set], { cwd: TREE, encoding: "utf8" }).trim().split("\n");
+  assert.equal(listed.length, SET.set.length, "a file of the set is not tracked");
+  for (const line of listed) assert.match(line, /^100(644|755) /, line);
+  for (const rel of fs.readdirSync(path.join(TREE, "tools", "gate-entries"), { recursive: true })) {
+    const file = `tools/gate-entries/${String(rel).replace(/\\/g, "/")}`;
+    if (fs.statSync(path.join(TREE, file)).isFile()) assert.ok(SET.set.includes(file), `${file} is not in the set`);
+  }
+  // Plants: a module that imports a file outside the set, and one that loads one by path.
+  const planted = fs.mkdtempSync(path.join(os.tmpdir(), "closure-"));
+  try {
+    for (const rel of SET.set) {
+      fs.mkdirSync(path.dirname(path.join(planted, rel)), { recursive: true });
+      fs.copyFileSync(path.join(TREE, rel), path.join(planted, rel));
+    }
+    fs.appendFileSync(path.join(planted, "tools", "capped.mjs"), '\nimport "./outside.mjs";\n');
+    fs.appendFileSync(path.join(planted, "tools", "store-apps.mjs"), '\nconst X = path.join(HERE, "outside.ps1");\n');
+    assert.deepEqual(closureProblems(planted, SET.set), ["tools/capped.mjs loads ./outside.mjs, which is not in the set", "tools/store-apps.mjs loads outside.ps1, which is not in the set"]);
+  } finally {
+    fs.rmSync(planted, { recursive: true, force: true });
+  }
+  // A commit whose set holds a symlink, and one whose set holds a submodule.
+  await withGates(async ({ work, git, seam, current, base }) => {
+    assert.equal(await seam(), 0);
+    for (const [mode, type] of [["120000", "a symlink"], ["160000", "a submodule"]]) {
+      const id = mode === "160000" ? base : git(work, "hash-object", "-w", "--stdin");
+      git(work, "update-index", "--cacheinfo", `${mode},${id},tools/raw-build.mjs`);
+      git(work, "commit", "-q", "-m", type);
+      git(work, "push", "-q", "origin", "main");
+      git(work, "fetch", "-q", "origin");
+      await assert.rejects(seam(), /tools\/raw-build\.mjs is a \w+ of mode \d+, not a file of mode 100644 or 100755/, type);
+      assert.equal(current(), base);
+      git(work, "reset", "-q", "--hard", base);
+      git(work, "push", "-q", "-f", "origin", "main");
+      git(work, "fetch", "-q", "origin");
+    }
+  });
+});
+
+test("a copy file whose executable bit was dropped is refused", { skip: posixOnly }, async () => {
+  await withGates(async ({ gates, seam, entry, base }) => {
+    assert.equal(await seam(), 0);
+    fs.chmodSync(path.join(gates, base, "tools", "git-hooks", "pre-push"), 0o644);
+    const r = entry("capped.mjs", ["--", process.execPath, "-e", "0"]);
+    assert.equal(r.status, 2);
+    assert.match(r.stderr, /tools\/git-hooks\/pre-push is not executable, though its mode is 100755/);
+  });
+});
+
+/** The text of every call of `name` in `text`, its parentheses balanced. */
+function calls(text, name) {
+  const out = [];
+  for (const m of text.matchAll(new RegExp(`\\b${name}\\(`, "g"))) {
+    let depth = 0;
+    for (let i = m.index + name.length; i < text.length; i++) {
+      if (text[i] === "(") depth += 1;
+      else if (text[i] === ")" && --depth === 0) {
+        out.push(text.slice(m.index, i + 1));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+test("no PATH, NODE_OPTIONS or certificate variable reaches a process the gates start", async () => {
+  await withGates(async ({ dir, work, git, run, gates, seam, commit }) => {
+    assert.equal(await seam(), 0);
+    commit("next");
+    // A git on PATH that leaves a trace, and a module NODE_OPTIONS preloads, which says where it ran.
+    const bin = path.join(dir, "bin");
+    fs.mkdirSync(bin);
+    const trace = path.join(dir, "git-ran");
+    fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\necho ran > "${trace.replace(/\\/g, "/")}"\nexit 1\n`, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "git.cmd"), `@echo ran > "${trace}"\r\n@exit /b 1\r\n`);
+    const log = path.join(dir, "preloaded");
+    const marker = path.join(dir, "marker.cjs");
+    fs.writeFileSync(marker, `require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(1)) + "\\n");\n`);
+    const variables = { PATH: `${bin}${path.delimiter}${process.env.PATH}`, NODE_OPTIONS: `--require ${JSON.stringify(marker)}`, SSL_CERT_FILE: marker, SSL_CERT_DIR: dir, CURL_CA_BUNDLE: marker };
+    const r = spawnSync(process.execPath, [path.join(gates, "entry", "refresh.mjs")], { encoding: "utf8", cwd: work, env: { ...process.env, ...variables } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(trace), "a git found on PATH ran");
+    const preloaded = fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(preloaded, [[path.join(gates, "entry", "refresh.mjs")]], "NODE_OPTIONS reached a process the refresh entry started");
+    // The hook's entry removes NODE_OPTIONS before node runs.
+    fs.rmSync(log, { force: true });
+    git(work, "config", "core.hooksPath", path.join(gates, "entry", "hooks").replace(/\\/g, "/"));
+    fs.writeFileSync(path.join(repo(work), "quick-passed"), `${git(work, "rev-parse", "HEAD^{tree}")}\n`);
+    const pushed = run(work, ["push", "origin", "HEAD:refs/heads/topic"], { NODE_OPTIONS: variables.NODE_OPTIONS });
+    assert.equal(pushed.status, 0, pushed.stderr);
+    assert.ok(!fs.existsSync(log), "NODE_OPTIONS reached the hook's node");
+  });
+  // Every process the refresher and the entries start has the gates' environment, the one place
+  // that removes the certificate variables; none hands on this process's own.
+  for (const rel of ["tools/gates.mjs", "tools/gate-entries/verify.mjs", "tools/gate-entries/refresh.mjs"]) {
+    const text = fs.readFileSync(path.join(TREE, rel), "utf8");
+    for (const name of ["spawn", "spawnSync", "inTime"]) {
+      for (const call of calls(text, name)) assert.match(call, /gateEnv\(\)|handDown\(|\benv\b/, `${rel}: ${call}`);
+    }
+    assert.doesNotMatch(text.replace(/export function gateEnv\(env = process\.env\)/, "").replace(/systemGit = \(env = process\.env\)/, "").replace(/gitLocations\(env = process\.env\)/, ""), /process\.env/, `${rel} reads process.env`);
+  }
+});
+
+test("two refreshes at once leave one valid copy", async () => {
+  await withGates(async ({ repo: gitDir, gates, seam, current, commit, copies, env, base }) => {
+    assert.equal(await seam(), 0);
+    const next = commit("next");
+    const start = () => spawn(process.execPath, ["--input-type=module", "-e", `import { refresh } from ${JSON.stringify(GATES_MODULE)}; process.exit(await refresh({ repo: ${JSON.stringify(gitDir)}, policy: { allowLocal: true } }));`], { env, stdio: "ignore" });
+    const both = [start(), start()];
+    const codes = await Promise.all(both.map((child) => new Promise((resolve) => child.on("exit", resolve))));
+    assert.deepEqual(codes, [0, 0]);
+    assert.equal(current(), next);
+    assert.deepEqual(copies(), [base, next].sort());
+    assert.equal(verifyCopy(gates).refusal, undefined);
+  });
+});
+
+test("a refresher that hangs holding the lock is killed at its time, and meanwhile a start runs the current copy and a bootstrap gives up", async () => {
+  await withGates(async ({ repo: gitDir, gates, seam, said, current, commit, copies, env, base }) => {
+    assert.equal(await seam(), 0);
+    const next = commit("next");
+    const hanging = [process.execPath, "--input-type=module", "-e", `import { refresh } from ${JSON.stringify(GATES_MODULE)}; await refresh({ repo: ${JSON.stringify(gitDir)}, policy: { allowLocal: true }, hang: "locked" });`];
+    const job = process.platform === "win32" ? capped(hanging, { processGB: 4, jobGB: 8, minutes: 1 }) : null;
+    const runner = spawn(process.execPath, ["-e", TREE_RUNNER], { env: { ...env, ...(job ? job.env : {}), TREE_ARGS: JSON.stringify(job ? [job.cmd, ...job.args] : hanging), TREE_TIMEOUT: "12000" }, stdio: ["ignore", "pipe", "ignore"] });
+    let out = "";
+    runner.stdout.setEncoding("utf8").on("data", (d) => (out += d));
+    const done = new Promise((resolve) => runner.on("exit", resolve));
+    for (let i = 0; i < 100 && !lockHolder(path.join(gates, "lock")).includes("a refresh to"); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.match(lockHolder(path.join(gates, "lock")), /a refresh to/);
+    said.length = 0;
+    assert.equal(await seam({ waitMs: 800 }), 0);
+    assert.match(said.join("\n"), /a refresh holds the lock \(pid \d+ since .*\), so this start writes nothing and runs the current copy/);
+    said.length = 0;
+    assert.equal(await seam({ bootstrap: true, bootstrapWaitMs: 800 }), 1);
+    assert.match(said.join("\n"), /the bootstrap gives up and writes nothing: a refresh holds the lock \(pid \d+/);
+    assert.equal(current(), base);
+    await done;
+    assert.equal(JSON.parse(out).timedOut, true, "the hanging refresher was not killed at its time");
+    const lock = await takeLock(path.join(gates, "lock"), { waitMs: 3000, label: "after" });
+    assert.ok(lock, "the lock stayed taken after the hanging refresher was killed");
+    lock.release();
+    assert.equal(await seam(), 0);
+    assert.equal(current(), next);
+    assert.ok(!copies().some((name) => name.startsWith("staging-")));
+  });
+});
+
+test("a refresh's time limit covers both asks of the remote, the wait and the write, and a waiter's bound is shorter", () => {
+  assert.ok(REFRESH_MS >= 2 * (GET_URL_MS + REMOTE_MS) + WAIT_MS + WRITE_MS);
+  assert.ok(REFRESH_MS > 2 * REMOTE_MS + WRITE_MS);
+  assert.ok(WAIT_MS < REFRESH_MS);
+});
+
+test("with no git of the list found, the current copy stays and says how to fix the list, and the entries hold it to its manifest", async () => {
+  await withGates(async ({ work, git, gates, seam, said, current, commit, base }) => {
+    assert.equal(await seam(), 0);
+    const next = commit("next");
+    // The ref packed, its loose file removed: the files still say where main is, and since when.
+    git(work, "pack-refs", "--all");
+    fs.rmSync(path.join(repo(work), "refs", "remotes", "origin", "main"), { force: true });
+    assert.equal(localMain(repo(work)), next);
+    assert.equal(await seam({ noGit: true }), 0);
+    const words = said.join("\n");
+    assert.match(words, /no git is found at .*so the current copy stays; refs\/remotes\/origin\/main has named another commit since \d{4}-/s);
+    assert.match(words, /Add the location to gitLocations in tools\/gate-entries\/verify\.mjs, then run the bootstrap/);
+    assert.equal(current(), base);
+    const checked = verifyCopy(gates, { bin: null });
+    assert.equal(checked.refusal, undefined);
+    assert.match(checked.notes.join("\n"), /no git is found .* held to its manifest alone/s);
+    drift(gates, "tools/capped.mjs");
+    assert.match(verifyCopy(gates, { bin: null }).refusal, /has drifted from its manifest: tools\/capped\.mjs/);
+  });
+});
+
+test("a refresh killed at any step leaves the lock free and a state the next refresh completes", async () => {
+  await withGates(async ({ gates, seam, seamChild, current, commit }) => {
+    assert.equal(await seam(), 0);
+    for (const step of ["halfway", "ready", "manifest", "rename", ...ENTRIES.map((name) => `entry:${name}`), "current"]) {
+      const next = commit(step);
+      const killed = seamChild({ stopAt: step });
+      assert.notEqual(killed.status, 0, `${step}: the refresh was not killed: ${killed.stderr}`);
+      const lock = await takeLock(path.join(gates, "lock"), { waitMs: 3000, label: "after a kill" });
+      assert.ok(lock, `${step}: the lock stayed taken after the kill`);
+      lock.release();
+      assert.equal(await seam(), 0, step);
+      assert.equal(current(), next, step);
+      const checked = verifyCopy(gates);
+      assert.equal(checked.refusal, undefined, `${step}: ${checked.refusal}`);
+    }
+  });
+});
+
+test("a refresh while a file of the old copy is in use succeeds and leaves it, and an entry Windows refuses to replace leaves current until the next start", { skip: windowsOnly }, async () => {
+  await withGates(async ({ gates, seam, said, current, commit, base }) => {
+    assert.equal(await seam(), 0);
+    const used = path.join(gates, base, "tools", "capped.ps1");
+    const before = fs.readFileSync(used);
+    const fd = fs.openSync(used, fs.constants.O_RDONLY | 0x10000000);
+    try {
+      for (const message of ["second", "third"]) {
+        const next = commit(message);
+        assert.equal(await seam(), 0);
+        assert.equal(current(), next);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    assert.ok(fs.readFileSync(used).equals(before));
+    const hook = path.join(gates, "entry", "hooks", "pre-push");
+    fs.appendFileSync(path.join(gates, current(), "manifest"), "");
+    const held = current();
+    const next = commit("fourth", { "tools/gate-entries/hooks/pre-push": (old) => `${old}# changed\n` });
+    const lockFd = fs.openSync(hook, fs.constants.O_RDONLY | 0x10000000);
+    try {
+      said.length = 0;
+      assert.equal(await seam(), 0);
+      assert.match(said.join("\n"), /installed but not yet current: Windows refused to replace the entries hooks\/pre-push/);
+      assert.equal(current(), held);
+    } finally {
+      fs.closeSync(lockFd);
+    }
+    assert.equal(await seam(), 0);
+    assert.equal(current(), next);
+  });
+});
+
+test("of the copy a refresh replaces, only the refresher and its closure run", async () => {
+  await withGates(async ({ dir, work, git, run, gates, seam, current, commit }) => {
+    const mark = path.join(dir, "imported").replace(/\\/g, "/");
+    const marked = commit("marked", { "tools/push.mjs": (old) => `import { writeFileSync as markImported } from "node:fs";\nmarkImported(${JSON.stringify(mark)}, "");\n${old}` });
+    assert.equal(await seam(), 0);
+    assert.equal(current(), marked);
+    commit("next");
+    const r = spawnSync(process.execPath, [path.join(gates, "entry", "refresh.mjs")], { encoding: "utf8", cwd: work });
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(!fs.existsSync(mark), "a refresh imported the old copy's push.mjs");
+    // A positive control: the copy's hook does import it.
+    git(work, "config", "core.hooksPath", path.join(gates, "entry", "hooks").replace(/\\/g, "/"));
+    run(work, ["push", "origin", "HEAD:refs/heads/topic"]);
+    assert.ok(fs.existsSync(mark), "the control did not import push.mjs, so this case proves nothing");
+  });
+});
+
+test("an installed refresher with a committed bug leaves the current copy, and the bootstrap recovers it", async () => {
+  await withGates(async ({ work, gates, seam, current, commit }) => {
+    const broken = commit("broken", { "tools/gates.mjs": (old) => String(old).replace("function confirm(ctx, url) {", 'function confirm(ctx, url) {\n  return { refused: "a planted bug" };') });
+    assert.equal(await seam(), 0);
+    assert.equal(current(), broken);
+    const fixed = commit("fixed");
+    const r = spawnSync(process.execPath, [path.join(gates, "entry", "refresh.mjs")], { encoding: "utf8", cwd: work });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(current(), broken);
+    assert.equal(await seam({ bootstrap: true }), 0);
+    assert.equal(current(), fixed);
+  });
+});
+
+test("an entry of another interface version reports itself as stale, the exempt refresh entry still runs, and the refresh clears it", async () => {
+  await withGates(async ({ gates, seam, entry }) => {
+    assert.equal(await seam(), 0);
+    const verify = path.join(gates, "entry", "verify.mjs");
+    fs.writeFileSync(verify, String(fs.readFileSync(verify)).replace(`export const INTERFACE = ${INTERFACE};`, `export const INTERFACE = ${INTERFACE + 1};`));
+    for (const [name, status] of [["capped.mjs", 2], ["hook.mjs", 1]]) {
+      const r = entry(name, name === "capped.mjs" ? ["--", process.execPath, "-e", "0"] : []);
+      assert.equal(r.status, status, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, /the entry is stale; run node tools\/quick\.mjs/);
+    }
+    const refreshed = entry("refresh.mjs");
+    assert.equal(refreshed.status, 0, refreshed.stderr);
+    assert.match(refreshed.stderr, /restored the entries/);
+    assert.equal(entry("capped.mjs", ["--", process.execPath, "-e", "0"]).status, 0);
+  });
+});
+
+test("offline, a start asks no remote while origin/main names the copy, and asks once while it names another", async () => {
+  await withGates(async ({ remote, seam, said, current, commit, base }) => {
+    assert.equal(await seam(), 0);
+    fs.renameSync(remote, `${remote}.away`);
+    said.length = 0;
+    assert.equal(await seam(), 0);
+    assert.deepEqual(said, [], "a start asked the remote while origin/main named the copy");
+    fs.renameSync(`${remote}.away`, remote);
+    commit("next");
+    fs.renameSync(remote, `${remote}.away`);
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /could not be asked .*since \d{4}-/s);
+    said.length = 0;
+    assert.equal(await seam(), 0);
+    assert.match(said.join("\n"), /as it did at the last ask/);
+    assert.equal(current(), base);
+  });
+});
+
+test("the refresher's command reads no variable, so nothing but the seam admits a URL that is not https", () => {
+  const text = fs.readFileSync(path.join(TREE, "tools", "gates.mjs"), "utf8");
+  assert.doesNotMatch(text, /process\.env/);
+  assert.match(text, /lockFile: path\.join\(gates, "lock"\), say, allowLocal: false, seam: false/);
 });

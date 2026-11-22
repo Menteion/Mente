@@ -13,10 +13,12 @@
 //   remote names the same commit. An answer that keeps the current copy is remembered for that
 //   local commit for a while, so an offline machine waits out the time once.
 // - The refresher of the copy in use writes nothing but a staging directory of the new set, under
-//   the lock, then starts the new set's refresher, handing the lock down. That one confirms the
-//   commit itself, checks its whole directory against the commit's tree, and installs: the
-//   manifest, the rename to the commit's name, the entries, then `current`, so that a kill at any
-//   step leaves a state the next refresh completes.
+//   the lock, then starts the new set's refresher, handing the lock down. That one checks its whole
+//   directory against the commit's tree, confirms the commit with the remote itself, and installs:
+//   the manifest, the rename to the commit's name, the entries, then `current`, so that a kill at
+//   any step leaves a state the next refresh completes.
+// - With nothing to install, it restores the entries of the current copy, so that the refresh a
+//   stale entry names clears it.
 // - A refresh runs under a time limit with a tree kill, its work in a child process of its own.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -26,7 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { handDown, inTime, inheritedLock, lockHolder, takeLock } from "./local-limits.mjs";
-import { COMMIT, MAIN_REF, REFRESH, bootstrapLine, declaredUrl, filesOf, gateEnv, git, gitLocations, laggingSince, localMain, manifestText, mismatch, readManifest, setPath, systemGit } from "./gate-entries/verify.mjs";
+import { COMMIT, MAIN_REF, bootstrapLine, declaredUrl, filesOf, gateEnv, git, gitLocations, laggingSince, localMain, manifestText, mismatch, readManifest, setPath, systemGit } from "./gate-entries/verify.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -35,13 +37,14 @@ const HERE = path.dirname(SELF);
 export const REMOTE_MS = 60000;
 /// How long `git ls-remote --get-url`, a local process, has.
 export const GET_URL_MS = 15000;
+/// How long a start of quick, cargo or mn waits for the lock before it runs the current copy.
+export const WAIT_MS = 20000;
 /// How long writing a set may take.
 export const WRITE_MS = 60000;
 /// The time limit of a refresh: both refreshers' asks of the remote, the confirming one's and the
-/// new set's, plus writing a set, so that a slow but legitimate refresh is not killed at every start.
-export const REFRESH_MS = 2 * (GET_URL_MS + REMOTE_MS) + WRITE_MS;
-/// How long a start of quick, cargo or mn waits for the lock before it runs the current copy.
-export const WAIT_MS = 20000;
+/// new set's, the wait for the lock, and writing a set, so that a slow but legitimate refresh is
+/// not killed at every start.
+export const REFRESH_MS = 2 * (GET_URL_MS + REMOTE_MS) + WAIT_MS + WRITE_MS;
 /// How long an answer that keeps the current copy is remembered for its local commit.
 export const REMEMBER_MS = 10 * 60000;
 
@@ -81,27 +84,32 @@ function replaceFile(file, data, mode) {
   }
 }
 
+/// The git the context runs: the system's, or none where no git of the list is found (or the
+/// seam says none is).
+const binOf = (ctx) => (ctx.noGit ? null : systemGit());
+
 /// The set `commit` declares, from its objects: its URL and its files, each a blob of mode 100644
 /// or 100755 (verify.mjs, filesOf); throws, naming why it cannot be installed.
-function setOf(common, commit) {
-  const declared = JSON.parse(git(common, ["cat-file", "blob", `${commit}:tools/gate-set.json`]));
+function setOf(ctx, commit) {
+  const declared = JSON.parse(git(ctx.common, ["cat-file", "blob", `${commit}:tools/gate-set.json`], { bin: binOf(ctx) }));
   if (!Array.isArray(declared.set) || !declared.set.every(setPath) || !declared.set.includes("tools/gate-set.json") || !declared.set.includes("tools/gates.mjs")) {
     throw new Error(`the tools/gate-set.json of ${commit.slice(0, 12)} declares no set the gates can install`);
   }
-  return { url: declared.url, files: filesOf(git(common, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...declared.set]), declared.set) };
+  return { url: declared.url, files: filesOf(git(ctx.common, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...declared.set], { bin: binOf(ctx) }), declared.set) };
 }
 
 /// Writes `files` into the new directory `dir`, each with exactly the bytes `git cat-file blob`
 /// gives (never filtered, converted or checked out, so its id in node is its id in the tree) and
 /// the mode the tree records.
-function writeSet(common, files, dir) {
+function writeSet(ctx, files, dir) {
   fs.mkdirSync(dir);
   for (const f of files) {
     const at = path.join(dir, ...f.path.split("/"));
     fs.mkdirSync(path.dirname(at), { recursive: true });
     const mode = f.mode === "100755" ? 0o755 : 0o644;
-    fs.writeFileSync(at, git(common, ["cat-file", "blob", f.id], { encoding: "buffer" }), { mode });
+    fs.writeFileSync(at, git(ctx.common, ["cat-file", "blob", f.id], { encoding: "buffer", bin: binOf(ctx) }), { mode });
     if (!WINDOWS) fs.chmodSync(at, mode);
+    ctx.halfway?.();
   }
 }
 
@@ -155,22 +163,24 @@ function remember(gates, local, why) {
  * The commit the remote at `url` names main, asked by the system's git in an empty directory this
  * creates outside the common git directory, with GIT_CEILING_DIRECTORIES at its parent, so that git
  * finds no repository and no repository's configuration reaches it; `ls-remote --get-url` must give
- * back `url` itself; each within its time, its whole process tree killed when the time passes.
- * Resolves { main } or { refused } with why. Only the seam's policy admits a URL that is not https.
+ * back `url` itself; each within its time, its whole process tree killed when the time passes. On
+ * Windows the TLS backend is schannel, so the system's certificate store decides what https trusts.
+ * Returns { main } or { refused } with why. Only the seam's policy admits a URL that is not https.
  */
-function confirm(url, allowLocal) {
-  if (typeof url !== "string" || (!allowLocal && !url.startsWith("https://"))) return { refused: `the remote's URL ${JSON.stringify(url)} is not https` };
-  const bin = systemGit();
+function confirm(ctx, url) {
+  if (typeof url !== "string" || (!ctx.allowLocal && !url.startsWith("https://"))) return { refused: `the remote's URL ${JSON.stringify(url)} is not https` };
+  const bin = binOf(ctx);
   if (!bin) return { refused: `no git is found at ${gitLocations().join(" or ")}` };
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "mente-gates-ls-"));
   try {
     const env = { ...gateEnv(), GIT_CEILING_DIRECTORIES: path.dirname(empty) };
     const tls = WINDOWS ? ["-c", "http.sslBackend=schannel"] : [];
-    const asked = inTime([bin, "--no-replace-objects", ...tls, "ls-remote", "--get-url", "--", url], GET_URL_MS, { env, cwd: empty });
+    const asked = inTime([bin, "--no-replace-objects", ...tls, "ls-remote", "--get-url", "--", url], ctx.getUrlMs ?? GET_URL_MS, { env, cwd: empty });
     if (asked.timedOut || asked.code !== 0) return { refused: `git could not say which URL ${url} is: ${asked.timedOut ? "it took too long" : asked.err.trim().split(/\r?\n/)[0]}` };
     if (asked.out.trim() !== url) return { refused: `asking ${url} would ask ${asked.out.trim()} instead` };
-    const r = inTime([bin, "--no-replace-objects", ...tls, "ls-remote", "--", url, "refs/heads/main"], REMOTE_MS, { env, cwd: empty });
-    if (r.timedOut) return { refused: `${url} did not say which commit is its main within ${REMOTE_MS / 1000} s` };
+    const remoteMs = ctx.remoteMs ?? REMOTE_MS;
+    const r = inTime([bin, "--no-replace-objects", ...tls, "ls-remote", "--", url, "refs/heads/main"], remoteMs, { env, cwd: empty });
+    if (r.timedOut) return { refused: `${url} did not say which commit is its main within ${remoteMs / 1000} s` };
     if (r.code !== 0) return { refused: `${url} could not be asked for its main: ${r.err.trim().split(/\r?\n/)[0]}` };
     const line = r.out.split(/\r?\n/).find((l) => /\trefs\/heads\/main$/.test(l));
     if (!line || !COMMIT.test(line.split("\t")[0])) return { refused: `${url} has no main` };
@@ -181,9 +191,9 @@ function confirm(url, allowLocal) {
 }
 
 /// Whether the repository holds `commit`.
-function hasCommit(common, commit) {
+function hasCommit(ctx, commit) {
   try {
-    git(common, ["cat-file", "-e", `${commit}^{commit}`]);
+    git(ctx.common, ["cat-file", "-e", `${commit}^{commit}`], { bin: binOf(ctx) });
     return true;
   } catch {
     return false;
@@ -196,15 +206,49 @@ function lagWords(common, current) {
   return since ? `; ${MAIN_REF} has named another commit since ${since.toISOString()}` : "";
 }
 
+/// Whether the entry `to` holds `bytes` and, off Windows, the executable bit of `mode`.
+function entryHolds(to, bytes, mode) {
+  try {
+    return fs.readFileSync(to).equals(bytes) && (WINDOWS || Boolean(fs.statSync(to).mode & 0o100) === (mode === "100755"));
+  } catch {
+    return false;
+  }
+}
+
+/// Replaces each entry that is not the file of `copy`'s tools/gate-entries/, each by a new file
+/// renamed over it; returns the entries Windows refused to replace, in use.
+function writeEntries(ctx, copy, files) {
+  const refused = [];
+  for (const name of ENTRIES) {
+    const rel = `tools/gate-entries/${name}`;
+    const file = files.find((f) => f.path === rel);
+    if (!file) throw new Error(`the set holds no ${rel}`);
+    const bytes = fs.readFileSync(path.join(copy, ...rel.split("/")));
+    const to = path.join(ctx.gates, "entry", ...name.split("/"));
+    if (!entryHolds(to, bytes, file.mode)) {
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      try {
+        replaceFile(to, bytes, file.mode === "100755" ? 0o755 : 0o644);
+      } catch (e) {
+        if (!["EPERM", "EBUSY", "EACCES"].includes(e.code)) throw e;
+        refused.push(name);
+      }
+    }
+    ctx.stopSync?.(`entry:${name}`);
+  }
+  return refused;
+}
+
 /**
- * The refresh the refresher of the copy in use makes: nothing when the local origin/main names
- * `current`; otherwise, unless an answer is remembered, the remote is asked, and only a commit it
- * names and the local origin/main names too is readied and handed to its own refresher.
+ * The refresh the refresher of the copy in use makes. When the local origin/main names `current`,
+ * it asks no remote and only restores the current copy's entries. Otherwise, unless an answer is
+ * remembered, it asks the remote, and readies only a commit the remote names and the local
+ * origin/main names too, handing it to that commit's own refresher.
  */
 async function refreshFrom(ctx) {
   const { common, gates, url } = ctx;
   const current = readCurrent(gates);
-  if (!systemGit()) {
+  if (!binOf(ctx)) {
     ctx.say(`no git is found at ${gitLocations().join(" or ")}, so the current copy stays${lagWords(common, current)}. Add the location to gitLocations in tools/gate-entries/verify.mjs, then run the bootstrap:\n\n${bootstrapLine(url)}\n`);
     return 0;
   }
@@ -213,7 +257,7 @@ async function refreshFrom(ctx) {
     ctx.say(`this repository has no ${MAIN_REF}, so the current copy stays; fetch first`);
     return 0;
   }
-  if (local === current) return 0;
+  if (local === current) return restoreEntries(ctx, current);
   const lag = lagWords(common, current);
   const kept = remembered(gates, local);
   if (kept) {
@@ -225,10 +269,10 @@ async function refreshFrom(ctx) {
     ctx.say(`the current copy${current ? ` of ${current.slice(0, 12)}` : ""} stays: ${why}${lag}`);
     return 0;
   };
-  const asked = confirm(url, ctx.allowLocal);
+  const asked = confirm(ctx, url);
   if (asked.refused) return keep(asked.refused);
   if (asked.main !== local) {
-    if (!hasCommit(common, asked.main)) return keep(`the remote's main (${asked.main.slice(0, 12)}) is not in this repository; fetch first`);
+    if (!hasCommit(ctx, asked.main)) return keep(`the remote's main (${asked.main.slice(0, 12)}) is not in this repository; fetch first`);
     return keep(`${MAIN_REF} names ${local.slice(0, 12)}, and the remote's main is ${asked.main.slice(0, 12)}`);
   }
   const lock = await takeLock(ctx.lockFile, { waitMs: ctx.waitMs, label: `a refresh to ${local.slice(0, 12)}` });
@@ -247,18 +291,45 @@ async function refreshFrom(ctx) {
   }
 }
 
+/// Restores the entries of the current copy, under the lock, where any differs from that copy's
+/// tools/gate-entries/: the refresh a stale or edited entry names.
+async function restoreEntries(ctx, current) {
+  const copy = path.join(ctx.gates, current);
+  let files;
+  try {
+    files = readManifest(fs.readFileSync(path.join(copy, "manifest"), "utf8"));
+  } catch {
+    return 0;
+  }
+  if (mismatch(copy, files) !== null) return 0;
+  const differs = ENTRIES.some((name) => {
+    const file = files.find((f) => f.path === `tools/gate-entries/${name}`);
+    return !file || !entryHolds(path.join(ctx.gates, "entry", ...name.split("/")), fs.readFileSync(path.join(copy, "tools", "gate-entries", ...name.split("/"))), file.mode);
+  });
+  if (!differs) return 0;
+  const lock = await takeLock(ctx.lockFile, { waitMs: ctx.waitMs, label: `entries of ${current.slice(0, 12)}` });
+  if (!lock) return 0;
+  try {
+    const refused = writeEntries(ctx, copy, files);
+    ctx.say(refused.length > 0 ? `Windows refused to restore the entries ${refused.join(", ")}, in use; the next start tries again` : `restored the entries of the copy of ${current.slice(0, 12)}`);
+    return 0;
+  } finally {
+    lock.release();
+  }
+}
+
 /// The directory of `commit`'s set, ready for its refresher: an existing copy of it that holds its
 /// files and manifest, or a staging directory written from its objects and checked against its
 /// tree; an existing copy that does not hold them is moved aside.
 function ready(ctx, commit) {
-  const { files } = setOf(ctx.common, commit);
+  const { files } = setOf(ctx, commit);
   const target = path.join(ctx.gates, commit);
   if (fs.existsSync(target)) {
     if (holds(target, files)) return target;
     moveAside(ctx.gates, target, commit);
   }
   const staging = path.join(ctx.gates, `staging-${commit}-${unique()}`);
-  writeSet(ctx.common, files, staging);
+  writeSet(ctx, files, staging);
   const wrong = mismatch(staging, files, []);
   if (wrong) throw new Error(`the staged set of ${commit.slice(0, 12)} does not match its tree: ${wrong}`);
   return staging;
@@ -266,10 +337,10 @@ function ready(ctx, commit) {
 
 /**
  * The install the new set's refresher makes, the lock held, from `dir` (its own directory in the
- * command; the seam's argument in the tests): it confirms the commit its directory names with the
- * remote itself, at the URL its own set declares, and writes only when the remote and the local
- * origin/main name that commit and `dir` holds exactly the commit's set. Then the manifest, the
- * rename to the commit's name, the entries, and `current` last, once every entry is replaced.
+ * command; the seam's argument in the tests): it writes only when `dir` holds exactly the set of
+ * the commit its name names, and the remote, asked at the URL its own set declares, and the local
+ * origin/main name that commit. Then the manifest, the rename to the commit's name, the entries,
+ * and `current` last, once every entry is replaced.
  */
 async function installAt(ctx, dir) {
   const commit = commitOf(path.basename(dir));
@@ -277,25 +348,19 @@ async function installAt(ctx, dir) {
     ctx.say(`the refresher of ${commit.slice(0, 12)} writes nothing: ${why}`);
     return 1;
   };
-  let url;
-  try {
-    url = declaredUrl(dir);
-  } catch (e) {
-    return nothing(`its tools/gate-set.json cannot be read: ${e.message}`);
-  }
-  const asked = confirm(url, ctx.allowLocal);
-  if (asked.refused) return nothing(asked.refused);
-  const local = localMain(ctx.common);
-  if (asked.main !== commit || local !== commit) return nothing(`the remote's main is ${asked.main.slice(0, 12)}, and ${MAIN_REF} ${local ? local.slice(0, 12) : "names nothing"}`);
   let files;
   try {
-    files = setOf(ctx.common, commit).files;
+    files = setOf(ctx, commit).files;
   } catch (e) {
     return nothing(e.message);
   }
   const wrong = mismatch(dir, files);
   if (wrong) return nothing(`its directory does not hold exactly the commit's set: ${wrong}`);
   if (!ctx.seam && path.resolve(HERE, "..") !== path.resolve(dir)) return nothing(`it does not run from ${dir}`);
+  const asked = confirm(ctx, declaredUrl(dir));
+  if (asked.refused) return nothing(asked.refused);
+  const local = localMain(ctx.common);
+  if (asked.main !== commit || local !== commit) return nothing(`the remote's main is ${asked.main.slice(0, 12)}, and ${MAIN_REF} ${local ? local.slice(0, 12) : "names nothing"}`);
   replaceFile(path.join(dir, "manifest"), manifestText(files));
   await ctx.stop?.("manifest");
   const target = path.join(ctx.gates, commit);
@@ -309,21 +374,7 @@ async function installAt(ctx, dir) {
     }
   }
   await ctx.stop?.("rename");
-  const refused = [];
-  for (const name of ENTRIES) {
-    const rel = `tools/gate-entries/${name}`;
-    const file = files.find((f) => f.path === rel);
-    if (!file) return nothing(`its set holds no ${rel}`);
-    const to = path.join(ctx.gates, "entry", ...name.split("/"));
-    fs.mkdirSync(path.dirname(to), { recursive: true });
-    try {
-      replaceFile(to, fs.readFileSync(path.join(installed, ...rel.split("/"))), file.mode === "100755" ? 0o755 : 0o644);
-    } catch (e) {
-      if (!["EPERM", "EBUSY", "EACCES"].includes(e.code)) throw e;
-      refused.push(name);
-    }
-    await ctx.stop?.(`entry:${name}`);
-  }
+  const refused = writeEntries(ctx, installed, files);
   if (refused.length > 0) {
     ctx.say(`the copy of ${commit.slice(0, 12)} is installed but not yet current: Windows refused to replace the entries ${refused.join(", ")}, in use; the next start of quick, cargo or mn tries again`);
     return 0;
@@ -448,36 +499,62 @@ function seamRefusal(repo) {
  * The seam: a refresh of the repository whose git directory is `repo`, as its current copy's
  * refresher would make it, with `policy.allowLocal` admitting the fixtures' local-path remotes,
  * and the new set installed in this process instead of by its own refresher, since the command
- * admits only https. With no copy installed, it installs the commit the local origin/main names,
- * as the bootstrap would. `stopAt` names a step at which this process is killed, as a kill would
- * end it (locked, ready, manifest, rename, entry:<name>, current); `hang` makes it hang there.
- * Honoured only as seamRefusal says; resolves to the status the command would end with.
+ * admits only https. With no copy installed, or with `bootstrap`, it installs the commit the local
+ * origin/main names, as the bootstrap would. `stopAt` names a step at which this process is killed,
+ * as a kill would end it (halfway, locked, ready, manifest, rename, entry:<name>, current); `hang`
+ * makes it hang there. `remoteMs` and `getUrlMs` shorten the remote's times, and `noGit` stands for
+ * a machine where no git of the list is found. Honoured only as seamRefusal says; resolves to the
+ * status the command would end with.
  */
-export async function refresh({ repo, policy = {}, stopAt = null, hang = null, waitMs = WAIT_MS, bootstrapWaitMs = REFRESH_MS, say = (line) => console.error(`mente-gates: ${line}`) } = {}) {
+export async function refresh(options = {}) {
+  const { repo, policy = {}, stopAt = null, hang = null, bootstrap = false, say = (line) => console.error(`mente-gates: ${line}`) } = options;
   const why = seamRefusal(repo);
   if (why) throw new Error(why);
   const common = commonDir({ gitDir: repo });
   const gates = path.join(common, "mente-gates");
   fs.mkdirSync(gates, { recursive: true });
-  const ctx = { gates, common, lockFile: path.join(gates, "lock"), say, allowLocal: Boolean(policy.allowLocal), seam: true, waitMs, bootstrapWaitMs };
+  const ctx = {
+    gates,
+    common,
+    lockFile: path.join(gates, "lock"),
+    say,
+    allowLocal: Boolean(policy.allowLocal),
+    seam: true,
+    waitMs: options.waitMs ?? WAIT_MS,
+    bootstrapWaitMs: options.bootstrapWaitMs ?? REFRESH_MS,
+    remoteMs: options.remoteMs,
+    getUrlMs: options.getUrlMs,
+    noGit: Boolean(options.noGit),
+  };
+  const kill = () => process.kill(process.pid, "SIGKILL");
+  ctx.stopSync = (step) => {
+    if (step === stopAt) kill();
+  };
   ctx.stop = (step) => {
     if (step === hang) {
       setInterval(() => {}, 1000);
       return new Promise(() => {});
     }
-    if (step === stopAt) process.kill(process.pid, "SIGKILL");
+    ctx.stopSync(step);
     return undefined;
   };
+  if (stopAt === "halfway") {
+    let written = 0;
+    ctx.halfway = () => {
+      written += 1;
+      if (written === 2) kill();
+    };
+  }
   ctx.startNew = (dir) => installAt(ctx, dir);
   const current = readCurrent(gates);
-  if (current) return refreshFrom({ ...ctx, url: declaredUrl(path.join(gates, current)) });
+  if (current && !bootstrap) return refreshFrom({ ...ctx, url: declaredUrl(path.join(gates, current)) });
   const local = localMain(common);
   if (!local) {
     say(`this repository has no ${MAIN_REF}`);
     return 1;
   }
   const staging = path.join(gates, `staging-${local}-${unique()}`);
-  writeSet(common, setOf(common, local).files, staging);
+  writeSet(ctx, setOf(ctx, local).files, staging);
   return bootstrapFrom(ctx, staging);
 }
 

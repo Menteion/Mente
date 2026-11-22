@@ -61,12 +61,11 @@ export const systemGit = (env = process.env) => gitLocations(env).find((at) => f
 export const blobId = (bytes) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 
 /**
- * Runs the system's git on the repository `gitDir`, with the gates' environment, git's replace
- * refs ignored and pathspecs read literally: its standard output, a string or with `encoding`
- * "buffer" the bytes, or throws with git's words and its status.
+ * Runs `bin`, the system's git unless given, on the repository `gitDir`, with the gates'
+ * environment, git's replace refs ignored and pathspecs read literally: its standard output, a
+ * string or with `encoding` "buffer" the bytes, or throws with git's words and its status.
  */
-export function git(gitDir, args, { encoding = "utf8", cwd } = {}) {
-  const bin = systemGit();
+export function git(gitDir, args, { encoding = "utf8", cwd, bin = systemGit() } = {}) {
   if (!bin) throw Object.assign(new Error(`no git is found at ${gitLocations().join(" or ")}`), { code: "NOGIT" });
   const r = spawnSync(bin, ["--git-dir", gitDir, "--no-replace-objects", "--literal-pathspecs", ...args], { env: gateEnv(), encoding: encoding === "buffer" ? "buffer" : encoding, cwd, maxBuffer: 1 << 28, windowsHide: true });
   if (r.error) throw r.error;
@@ -218,9 +217,10 @@ export const declaredUrl = (copy) => JSON.parse(fs.readFileSync(path.join(copy, 
  * `exempt` (the refresh entry), the copy's interface version must be INTERFACE.
  *
  * Returns { copy, commit, notes } to run it, or { refusal, command } with the one command that
- * clears the refusal: the bootstrap for no copy or a bad one, the refresh for a stale entry.
+ * clears the refusal: the bootstrap for no copy or a bad one, the refresh for a stale entry. `bin`
+ * is the system's git unless given; null stands for a machine where none of the list is found.
  */
-export function verifyCopy(gates, { exempt = false } = {}) {
+export function verifyCopy(gates, { exempt = false, bin = systemGit() } = {}) {
   const common = path.dirname(gates);
   const bootstrap = (why) => ({ refusal: why, command: "bootstrap" });
   let commit;
@@ -246,9 +246,9 @@ export function verifyCopy(gates, { exempt = false } = {}) {
   } catch (e) {
     return bootstrap(`the copy of ${commit.slice(0, 12)} has no tools/gate-set.json the entries can read: ${e.message}`);
   }
-  if (systemGit()) {
+  if (bin) {
     try {
-      const tree = filesOf(git(common, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...declared.set]), declared.set);
+      const tree = filesOf(git(common, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...declared.set], { bin }), declared.set);
       if (manifestText(tree) !== manifestText(files)) return bootstrap(`the manifest of the copy of ${commit.slice(0, 12)} disagrees with that commit's tree`);
     } catch (e) {
       return bootstrap(`the copy of ${commit.slice(0, 12)} cannot be held to its commit: ${e.message}`);
@@ -257,7 +257,7 @@ export function verifyCopy(gates, { exempt = false } = {}) {
     if (!main) return { refusal: `this repository has no ${MAIN_REF}, which the copy's commit must be or precede`, command: "fetch" };
     let ancestor = false;
     try {
-      git(common, ["merge-base", "--is-ancestor", commit, main]);
+      git(common, ["merge-base", "--is-ancestor", commit, main], { bin });
       ancestor = true;
     } catch (e) {
       if (e.status !== 1) return bootstrap(`whether the copy's commit ${commit.slice(0, 12)} precedes ${MAIN_REF} is unknown: ${e.message}`);
