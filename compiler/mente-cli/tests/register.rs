@@ -946,3 +946,202 @@ fn test_the_reopen_rule_rejects_a_decision_without_its_condition() {
     };
     assert!(reads("", &stray)[0].contains("historic marker pinned"));
 }
+
+/// The text of each live brief under `root`, the files of `briefs/` but its archive, whose rounds
+/// are done.
+fn live_briefs(root: &Path) -> Vec<String> {
+    let dir = root.join(records::BRIEFS.dir);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x == records::BRIEFS.extension)
+        })
+        .filter_map(|e| fs::read_to_string(e.path()).ok())
+        .collect()
+}
+
+/// The fixes the message of an unplaced entry names, as the register's rule "A decision has its
+/// place in the plan" gives them.
+const PLACES: &str = "link it from an item of a list in ROADMAP.md, a milestone's line **Decided first:** or a live brief's awaits, or mark it done once carried out (docs/design-review.md, Rules for entries: A decision has its place in the plan)";
+
+/// The blocks of `roadmap` that can place a decision, each as one line of text: every item of a
+/// list, `-`, `*`, `+` or a number and `.`, and every paragraph that starts `**Decided first:**`,
+/// each with the lines it wraps onto, up to a blank line, the next item, a heading or a fence.
+/// What a code fence holds is no block, nor is anything under the heading `Measurement protocols`
+/// down to the next heading of its level or a higher one.
+fn plan_blocks(roadmap: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut open: Option<String> = None;
+    let mut fence: Option<&str> = None;
+    let mut skipped: Option<usize> = None;
+    let item = |t: &str| {
+        let digits = t.chars().take_while(char::is_ascii_digit).count();
+        ["- ", "* ", "+ "].iter().any(|m| t.starts_with(m))
+            || (digits > 0 && t[digits..].starts_with(". "))
+    };
+    for line in roadmap.lines() {
+        let text = line.trim_start();
+        if let Some(marker) = fence {
+            if text.starts_with(marker) {
+                fence = None;
+            }
+            continue;
+        }
+        let level = line.chars().take_while(|c| *c == '#').count();
+        let heading = level > 0 && line[level..].starts_with(' ');
+        let starts_fence = text.starts_with("```") || text.starts_with("~~~");
+        let starts_block = item(text) || text.starts_with("**Decided first:**");
+        if heading || starts_fence || starts_block || text.is_empty() {
+            blocks.extend(open.take());
+        }
+        if starts_fence {
+            fence = Some(&text[..3]);
+        } else if heading {
+            if skipped.is_some_and(|l| level <= l) {
+                skipped = None;
+            }
+            if skipped.is_none() && line[level..].trim() == "Measurement protocols" {
+                skipped = Some(level);
+            }
+        } else if skipped.is_some() {
+        } else if starts_block {
+            open = Some(text.to_string());
+        } else if let Some(block) = open.as_mut().filter(|_| !text.is_empty()) {
+            block.push(' ');
+            block.push_str(text);
+        }
+    }
+    blocks.extend(open);
+    blocks
+}
+
+/// Each decided entry of `register` that nothing in the plan places, by its line and key, with its
+/// fixes: no block of `roadmap` ([`plan_blocks`]) and no brief of `briefs` holds
+/// `design-review.md#<key>` with the key whole, so that no decision drops out of the plan (the
+/// register's rule "A decision has its place in the plan"). A brief's `awaits` counts.
+fn unplaced(register: &str, roadmap: &str, briefs: &[String]) -> Vec<String> {
+    let (read, _) = entries(register);
+    let blocks = plan_blocks(roadmap);
+    read.iter()
+        .filter(|e| status_word(&e.status) == "decided")
+        .filter(|e| {
+            let link = format!("design-review.md#{}", e.key);
+            let links = |text: &str| {
+                text.match_indices(&link).any(|(at, _)| {
+                    !text[at + link.len()..]
+                        .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '-')
+                })
+            };
+            !blocks.iter().any(|b| links(b)) && !briefs.iter().any(|b| links(b))
+        })
+        .map(|e| format!("line {}: {}: {}", e.line, e.key, PLACES))
+        .collect()
+}
+
+/// Every decided entry has its place in the plan: an item of `ROADMAP.md`, a milestone's line
+/// `**Decided first:**` or a live brief links it, so that a decision is carried out where the
+/// plan does its work.
+#[test]
+fn test_every_decided_entry_has_its_place_in_the_plan() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let register = fs::read_to_string(root.join("docs/design-review.md")).unwrap();
+    let roadmap = fs::read_to_string(root.join("ROADMAP.md")).unwrap();
+    let found = unplaced(&register, &roadmap, &live_briefs(&root));
+    assert!(
+        found.is_empty(),
+        "decided entries nothing in the plan places:\n{}",
+        found.join("\n")
+    );
+    assert!(register.contains("- **A decision has its place in the plan**"));
+}
+
+/// The rule finds a decided entry that only prose, a longer key, an archived brief, a code fence or
+/// the measurement protocols would name, and accepts one that an item of any list, the line an
+/// item wraps onto, a `**Decided first:**` line or a live brief links; its message names the
+/// fixes (the review of PR 177).
+#[test]
+fn test_a_decided_entry_without_a_place_is_found() {
+    let decided = |key: &str| {
+        format!(
+            "| `{}` | P. | **Decided (Norman, 2026-11-17).** R. **Reopen if:** X. | decided |\n",
+            key
+        )
+    };
+    let mut register = "| Key | Problem | Proposed resolution | Status |\n\
+        | :--- | :--- | :--- | :--- |\n"
+        .to_string();
+    for key in [
+        "decided-first",
+        "in-roadmap",
+        "in-brief",
+        "in-prose",
+        "longer",
+        "archived",
+        "in-star",
+        "in-plus",
+        "ordered",
+        "wrapped",
+        "in-fence",
+        "in-protocols",
+        "after-protocols",
+    ] {
+        register.push_str(&decided(key));
+    }
+    register.push_str("| `finished` | P. | Done. | done |\n");
+    let link = |key: &str| format!("[`{k}`](docs/design-review.md#{k})", k = key);
+    let roadmap = format!(
+        "## Stage 1\n\n### M2\n\n\
+        **Decided first:** {}.\n\n\
+        - [ ] The work ({}).\n\
+        - [x] Its sibling, after {}.\n\n\
+        * A star item, {}.\n\n\
+        + A plus item, {}.\n\n\
+        1. An ordered item, {}.\n\n\
+        - An item that wraps\n  onto a line that names {}.\n\n\
+        Prose that names {}.\n\n\
+        ```text\n- {}\n```\n\n\
+        ## Measurement protocols\n\n### A protocol\n\n- Its step, {}.\n\n\
+        ## Stage 2\n\n- Back in the plan, {}.\n",
+        link("decided-first"),
+        link("in-roadmap"),
+        link("longer-key"),
+        link("in-star"),
+        link("in-plus"),
+        link("ordered"),
+        link("wrapped"),
+        link("in-prose"),
+        link("in-fence"),
+        link("in-protocols"),
+        link("after-protocols"),
+    );
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("register-plan");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("briefs/archive")).unwrap();
+    fs::write(
+        dir.join("briefs/a-task.md"),
+        "---\nid: a-task\nawaits: [docs/design-review.md#in-brief]\n---\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("briefs/archive/done-task.md"),
+        "---\nid: done-task\nawaits: [docs/design-review.md#archived]\n---\n",
+    )
+    .unwrap();
+    let briefs = live_briefs(&dir);
+    assert_eq!(briefs.len(), 1);
+    let found: Vec<String> = unplaced(&register, &roadmap, &briefs);
+    let keys: Vec<&str> = found
+        .iter()
+        .map(|f| f.split(": ").nth(1).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        keys,
+        ["in-prose", "longer", "archived", "in-fence", "in-protocols"]
+    );
+    assert_eq!(found[0], format!("line 6: in-prose: {}", PLACES));
+}
