@@ -1444,10 +1444,8 @@ pub fn cmd_independent(args: &[String]) {
                     std::process::exit(2);
                 }
             }
-            let status = independent_status(&w);
-            if status != 0 {
-                std::process::exit(status);
-            }
+            // Exiting 0 is returning: the status decides alone, with no test of it here.
+            std::process::exit(independent_status(&w));
         }
         Err(e) => {
             eprintln!("error: {}", e);
@@ -3166,7 +3164,12 @@ pub fn outer(x: u8) -> u8 = inner(x)
         let bound =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/smt-known/loop-past-the-bound.mn");
         let safe = dir.join("safe.mn");
-        fs::write(&safe, "module m\npub fn safe(d: u8[1..=9]) -> u8 = 7 % d\n").unwrap();
+        // `one`'s divisor never fails, with no path cut off: unreachable.
+        fs::write(
+            &safe,
+            "module m\npub fn safe(d: u8[1..=9]) -> u8 = 7 % d\npub fn one(x: u8) -> u8 = x / 1\n",
+        )
+        .unwrap();
         let files = [
             bound.clone(),
             lacked.clone(),
@@ -3211,7 +3214,11 @@ pub fn outer(x: u8) -> u8 = inner(x)
             )
         );
         assert!(
-            w.queries > 0 && w.beyond_bound > 0 && w.beyond_lacked > 0 && w.no_site > 0,
+            w.queries > 0
+                && w.unreachable > 0
+                && w.beyond_bound > 0
+                && w.beyond_lacked > 0
+                && w.no_site > 0,
             "{:#?}",
             w
         );
