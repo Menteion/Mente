@@ -24,5 +24,5 @@
     ".github/scripts/policy/toolchain.mjs",
     ".github/scripts/policy/workflows.mjs"
   ],
-  "checks": 76
+  "checks": 77
 }
