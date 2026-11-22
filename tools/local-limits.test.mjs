@@ -18,6 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gatesDir } from "./local-limits.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
@@ -214,20 +215,26 @@ test("when a parent that is not node ends, the wrapper ends the command too", { 
  * hooks alone (local-limits.mjs, requireHooks), which they read from their own checkout after the
  * runner, so that this proof of the runner holds whatever this machine's hooks are.
  */
+/// The gates' stable runner entry of this checkout, which the runner line names.
+const ENTRY = path.join(gatesDir(ROOT), "entry", "capped.mjs").replace(/\\/g, "/");
+
 const pastRunner = (r) => r.status === 0 || (r.status === 2 && /core\.hooksPath/.test(r.stderr) && !/cargo's runner|_RUNNER is set/.test(r.stderr));
 
-test("the tools refuse to run until cargo's runner is the capped one, and name the lines to add", { skip }, () => {
+test("the tools refuse to run until cargo's runner is the gates' capped one, and name the lines to add", { skip }, (t) => {
   // The review of round 4: CLAUDE.md called cargo's runner the wall, which nothing set or checked.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cargo-home-"));
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER"));
   const cargo = () => spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home }, encoding: "utf8", timeout: 60000 });
   const none = cargo();
+  // The tools refresh the gates before they read the runner: with no copy installed, they refuse
+  // for that alone, and this proof waits for the bootstrap.
+  if (/no copy of main's gates is installed/.test(none.stderr)) return t.skip("no copy of main's gates is installed here: the bootstrap has not run");
   assert.equal(none.status, 2, `${none.stdout}${none.stderr}`);
-  assert.match(none.stderr, /\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*\/tools\/capped\.mjs", "--mente-only", "--"\]/);
+  assert.match(none.stderr, /\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*\/mente-gates\/entry\/capped\.mjs", "--mente-only", "--"\]/);
   assert.ok(none.stderr.includes(path.join(home, "config.toml")), none.stderr);
   for (const [runner, what] of [
     ['["node", "C:/nowhere/tools/capped.mjs", "--mente-only", "--"]', "a capped.mjs that does not exist"],
-    ['["node", "' + path.join(HERE, "capped.mjs").replace(/\\/g, "/") + '", "--"]', "no --mente-only"],
+    ['["node", "' + ENTRY + '", "--"]', "no --mente-only"],
     ['"wine"', "another runner"],
   ]) {
     fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ${runner}\n`);
@@ -236,11 +243,11 @@ test("the tools refuse to run until cargo's runner is the capped one, and name t
     assert.match(refused.stderr, /cargo's runner on this laptop is/, `the tools refused ${what} for another reason than the runner`);
   }
   // The capped runner, but for another target: cargo would not use it here.
-  fs.writeFileSync(path.join(home, "config.toml"), `[target.aarch64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
+  fs.writeFileSync(path.join(home, "config.toml"), `[target.aarch64-pc-windows-msvc]\nrunner = ["node", "${ENTRY}", "--mente-only", "--"]\n`);
   const elsewhere = cargo();
   assert.equal(elsewhere.status, 2, "the tools ran with the capped runner set for another target");
   assert.match(elsewhere.stderr, /cargo's runner on this laptop is/, "the tools refused the runner of another target for another reason");
-  fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
+  fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${ENTRY}", "--mente-only", "--"]\n`);
   const held = cargo();
   assert.ok(pastRunner(held), `${held.stdout}${held.stderr}`);
   if (held.status === 0) assert.match(held.stdout, /^cargo \d/);
@@ -250,15 +257,15 @@ test("the tools refuse to run until cargo's runner is the capped one, and name t
     fs.writeFileSync(path.join(home, "config.toml"), config);
     return spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home, CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: value }, encoding: "utf8", timeout: 60000 });
   };
-  const capped = `node ${path.join(HERE, "capped.mjs").replace(/\\/g, "/")} --mente-only --`;
+  const capped = `node ${ENTRY} --mente-only --`;
   assert.ok(pastRunner(variable(capped, "")), "the capped runner set by CARGO_TARGET_..._RUNNER was refused");
-  const good = `[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`;
+  const good = `[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${ENTRY}", "--mente-only", "--"]\n`;
   const over = variable("wine", good);
   assert.equal(over.status, 2, "another runner set by CARGO_TARGET_..._RUNNER passed over a capped one in the file");
   // The refusal names the variable, which is what to change, not the file, which is right (the
   // review of PR 195's last round).
   assert.match(over.stderr, /CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER is set to "wine"/);
-  assert.match(over.stderr, /\nCARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=node .*\/tools\/capped\.mjs --mente-only --\n/);
+  assert.match(over.stderr, /\nCARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=node .*\/mente-gates\/entry\/capped\.mjs --mente-only --\n/);
 });
 
 test("the hook's command refuses when the guard cannot load", () => {

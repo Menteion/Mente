@@ -32,7 +32,7 @@
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";
-import { PASSED, requireHooks } from "./local-limits.mjs";
+import { PASSED, refreshGates, requireHooks } from "./local-limits.mjs";
 
 /**
  * git's output, line by line, with `env` added to its environment and `input` on its standard
@@ -165,6 +165,7 @@ if (process.argv.includes("--list")) {
   reportTree(before, true);
   process.exit(0);
 }
+if (!refreshGates({ cwd: process.cwd() })) process.exit(2);
 if (!requireRunner()) process.exit(2);
 if (!requireHooks({ cwd: process.cwd() })) process.exit(2);
 const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);

@@ -15,9 +15,9 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { LOCK_FD_VARIABLE, PASSED, TREE_RUNNER, capped, lockHolder, takeLock } from "./local-limits.mjs";
+import { PASSED, capped } from "./local-limits.mjs";
 import { INTERFACE, blobId, filesOf, gateEnv, gitLocations, localMain, manifestText, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
-import { ENTRIES, GET_URL_MS, REFRESH_MS, REMOTE_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
+import { ENTRIES, GET_URL_MS, LOCK_FD_VARIABLE, REFRESH_MS, REMOTE_MS, TREE_RUNNER, WAIT_MS, WRITE_MS, lockHolder, refresh, takeLock } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
@@ -442,7 +442,8 @@ test("the settings refuse the ways around the hook, and only those", () => {
 
 // The gates' processes (briefs/gate-tools-from-main.md, "How the refresher's processes are run").
 
-const LIMITS = new URL("./local-limits.mjs", import.meta.url).href;
+/// The module of the lock, which the lock's programs below import as `L`.
+const LIMITS = new URL("./gates.mjs", import.meta.url).href;
 
 test("the gates' environment drops git's, node's and the certificate variables, and closes the system and user configuration", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gate-env-"));
@@ -495,7 +496,7 @@ test("a blob's id is git's, for any bytes, line ends kept as they are", () => {
   }
 });
 
-/** The source of a node program that imports local-limits.mjs as `L`, then runs `code`. */
+/** The source of a node program that imports gates.mjs as `L`, then runs `code`. */
 const source = (code) => `import * as L from ${JSON.stringify(LIMITS)};\n${code}`;
 
 /** A node program of `code` (source), started with `options`. */
@@ -1079,11 +1080,21 @@ test("no PATH, NODE_OPTIONS or certificate variable reaches a process the gates 
   // Every process the refresher and the entries start has the gates' environment, the one place
   // that removes the certificate variables; none hands on this process's own.
   for (const rel of ["tools/gates.mjs", "tools/gate-entries/verify.mjs", "tools/gate-entries/refresh.mjs"]) {
-    const text = fs.readFileSync(path.join(TREE, rel), "utf8");
+    // The tree runner's own program spawns its command with the environment inTime built from
+    // its caller's.
+    const text = fs.readFileSync(path.join(TREE, rel), "utf8").replace(/export const TREE_RUNNER = `[\s\S]*?`;/, "");
     for (const name of ["spawn", "spawnSync", "inTime"]) {
       for (const call of calls(text, name)) assert.match(call, /gateEnv\(\)|handDown\(|\benv\b/, `${rel}: ${call}`);
     }
-    assert.doesNotMatch(text.replace(/export function gateEnv\(env = process\.env\)/, "").replace(/systemGit = \(env = process\.env\)/, "").replace(/gitLocations\(env = process\.env\)/, ""), /process\.env/, `${rel} reads process.env`);
+    // Allowed: the defaults of gateEnv and of where git is looked for, which are given this
+    // process's environment to clean or read LOCALAPPDATA from; the handoff's one variable, which
+    // inheritedLock reads and checks against the descriptor itself.
+    const allowed = text
+      .replace(/export function gateEnv\(env = process\.env\)/, "")
+      .replace(/systemGit = \(env = process\.env\)/, "")
+      .replace(/gitLocations\(env = process\.env\)/, "")
+      .replace(/export function inheritedLock\(file, env = process\.env\)/, "");
+    assert.doesNotMatch(allowed, /process\.env/, `${rel} reads process.env`);
   }
 });
 
@@ -1277,8 +1288,8 @@ test("offline, a start asks no remote while origin/main names the copy, and asks
   });
 });
 
-test("the refresher's command reads no variable, so nothing but the seam admits a URL that is not https", () => {
-  const text = fs.readFileSync(path.join(TREE, "tools", "gates.mjs"), "utf8");
+test("the refresher's command reads no variable but the handoff's, so nothing but the seam admits a URL that is not https", () => {
+  const text = fs.readFileSync(path.join(TREE, "tools", "gates.mjs"), "utf8").replace(/export function inheritedLock\(file, env = process\.env\)/, "").replace(/export const TREE_RUNNER = `[\s\S]*?`;/, "");
   assert.doesNotMatch(text, /process\.env/);
   assert.match(text, /lockFile: path\.join\(gates, "lock"\), say, allowLocal: false, seam: false/);
 });

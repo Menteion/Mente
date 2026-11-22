@@ -17,12 +17,11 @@
 // machine this guards.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { bootstrapLine, declaredUrl, gateEnv, systemGit } from "./gate-entries/verify.mjs";
 import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "./store-apps.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -39,32 +38,79 @@ export const BUILD = Object.freeze({ processGB: 8, jobGB: 16, minutes: 30 });
 /// with the tree of each commit a push would send.
 export const PASSED = "quick-passed";
 /**
- * The directory core.hooksPath is to name for the repository of `cwd`: the main checkout's
- * tools/git-hooks, as an absolute path. A relative one is read against the work tree a push runs
- * in, so a worktree of a branch from before the hook, or a push by --git-dir, ran none (the third
- * review of #203); every checkout runs the main checkout's hook, whatever branch it holds, as
- * cargo's runner is the main checkout's tools/capped.mjs (runnerLine).
+ * The directory of the gates' copies and stable entries for the repository of `cwd`: mente-gates/
+ * in its common git directory, the same for every worktree (briefs/gate-tools-from-main.md). The
+ * tools give their own checkout; nothing here reads this module's own place, which inside a copy
+ * would name the copy.
  */
-export function hooksDir(cwd = path.resolve(HERE, "..")) {
-  const top = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-  return path.join(mainCheckout(top), "tools", "git-hooks");
+export function gatesDir(cwd = process.cwd()) {
+  try {
+    return path.join(execFileSync(systemGit() ?? "git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, env: gateEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).trim(), "mente-gates");
+  } catch (e) {
+    throw new Error(String(e.stderr || e.message).trim());
+  }
+}
+
+/// The directory core.hooksPath names: the stable hook entry of the gates in `gates`, a path that
+/// never changes, so that Norman writes it once.
+export const hooksDir = (gates) => path.join(gates, "entry", "hooks");
+
+/// The file of cargo's configuration on this laptop that holds its runner.
+const cargoConfig = (env = process.env) => path.join(env.CARGO_HOME || path.join(os.homedir(), ".cargo"), "config.toml");
+
+/// The bootstrap line, with the URL this checkout's tools/gate-set.json declares.
+function bootstrapWords() {
+  try {
+    return bootstrapLine(declaredUrl(path.resolve(HERE, "..")));
+  } catch {
+    return "the bootstrap line of CLAUDE.md's Verification section";
+  }
 }
 
 /**
- * Whether the repository of `cwd` runs its own git hooks: core.hooksPath names hooksDir, which
- * holds the pre-push hook (tools/git-hooks/pre-push), refusing a push of a tree the quick checks
- * have not passed. If not, says what to do, as requireRunner does for cargo's runner (Norman,
- * 2026-11-22), and returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run nothing until it
- * does. The settings' guard refuses a session's write of core.hooksPath (tools/push.mjs), so the
- * command is Norman's to run. The repository is the tools' own checkout, wherever they are run
- * from (cargo.mjs and mn.mjs); quick.mjs names the one it checks.
+ * Refreshes the gates of the repository of `cwd` (briefs/gate-tools-from-main.md, "Who writes it"):
+ * runs the stable refresh entry, by this node and with the gates' environment, which checks the
+ * copy in use and runs its refresher, before requireRunner and requireHooks, since the runner line
+ * and the hooks name entries a first install writes. With no copy installed, says the bootstrap
+ * and Norman's two lines and returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run
+ * nothing until then; false too when the entry refuses, having said the one command that clears it.
  */
-export function requireHooks({ cwd = path.resolve(HERE, ".."), say = (line) => console.error(line) } = {}) {
+export function refreshGates({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
+  let gates;
+  try {
+    gates = gatesDir(cwd);
+  } catch (e) {
+    say(`local-limits: git could not name the repository of ${cwd}, so its gates are unknown, and nothing here runs: ${e.message}`);
+    return false;
+  }
+  const entry = path.join(gates, "entry", "refresh.mjs");
+  if (!fs.existsSync(entry)) {
+    say(`local-limits: no copy of main's gates is installed in ${gates}, so nothing here runs until Norman, once, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nthen sets cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n\nand git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n`);
+    return false;
+  }
+  const r = spawnSync(process.execPath, [entry], { stdio: "inherit", env: gateEnv(), cwd, windowsHide: true });
+  if (r.error) {
+    say(`local-limits: the refresh entry did not start: ${r.error.message}`);
+    return false;
+  }
+  return r.status === 0;
+}
+
+/**
+ * Whether the repository of `cwd` runs the gates' pre-push hook: core.hooksPath names the stable
+ * hook entry (hooksDir), as an absolute path, and it holds the hook, which runs the copy's
+ * tools/git-hooks/pre-push, refusing a push of a tree the quick checks have not passed. If not,
+ * says what to do, as requireRunner does for cargo's runner (Norman, 2026-11-22), and returns
+ * false, so that tools/quick.mjs, cargo.mjs and mn.mjs run nothing until it does. The settings'
+ * guard refuses a session's write of core.hooksPath (tools/push.mjs), so the command is Norman's to
+ * run. cargo.mjs and mn.mjs give their own checkout; quick.mjs, the one it checks.
+ */
+export function requireHooks({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
   let want;
   try {
-    want = hooksDir(cwd);
+    want = hooksDir(gatesDir(cwd));
   } catch (e) {
-    say(`local-limits: git could not name the repository of ${cwd}, so whether its pre-push hook runs is unknown, and nothing here runs: ${String(e.stderr || e.message).trim()}`);
+    say(`local-limits: git could not name the repository of ${cwd}, so whether its pre-push hook runs is unknown, and nothing here runs: ${e.message}`);
     return false;
   }
   let value = "";
@@ -75,11 +121,11 @@ export function requireHooks({ cwd = path.resolve(HERE, ".."), say = (line) => c
   }
   const fold = (p) => (WINDOWS ? path.resolve(p).toLowerCase() : path.resolve(p));
   if (value === "" || !path.isAbsolute(value) || fold(value) !== fold(want)) {
-    say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, not the main checkout's hooks, so git's pre-push hook, which refuses a push of a tree the quick checks have not passed, does not run for every checkout, and nothing here runs until it does. Norman runs, once, in his own terminal:\n\ngit config core.hooksPath ${want.replace(/\\/g, "/")}\n`);
+    say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, not the gates' stable hook entry, so git's pre-push hook, which refuses a push of a tree the quick checks have not passed, does not run main's gates for every checkout, and nothing here runs until it does. Norman runs, once, in his own terminal:\n\ngit config core.hooksPath ${want.replace(/\\/g, "/")}\n`);
     return false;
   }
   if (!fs.existsSync(path.join(want, "pre-push"))) {
-    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook: the main checkout is on a commit from before the hook (#203). Bring it up to main; nothing here runs until then.`);
+    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook; Norman runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n`);
     return false;
   }
   return true;
@@ -188,24 +234,9 @@ export const RUNNER_TARGET = "x86_64-pc-windows-msvc";
 /// The variable that names that runner over every configuration file.
 export const RUNNER_VARIABLE = `CARGO_TARGET_${RUNNER_TARGET.toUpperCase().replace(/-/g, "_")}_RUNNER`;
 
-/// The main checkout of this repository, whose tools/capped.mjs cargo's runner names: the directory
-/// a worktree's .git file points into, or `root` itself.
-export function mainCheckout(root = path.resolve(HERE, "..")) {
-  try {
-    const dotgit = path.join(root, ".git");
-    if (fs.statSync(dotgit).isFile()) {
-      const at = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotgit, "utf8"))?.[1];
-      const main = at ? path.resolve(root, at).replace(/[\\/]\.git[\\/]worktrees[\\/][^\\/]+$/, "") : null;
-      if (main && main !== path.resolve(root, at)) return main;
-    }
-  } catch {
-    // A checkout whose .git cannot be read is taken as the main one.
-  }
-  return root;
-}
-
-/// The line cargo's configuration needs under [target.<RUNNER_TARGET>].
-export const runnerLine = (main = mainCheckout()) => `runner = ["node", ${JSON.stringify(path.join(main, "tools", "capped.mjs").replace(/\\/g, "/"))}, "--mente-only", "--"]`;
+/// The line cargo's configuration needs under [target.<RUNNER_TARGET>]: the stable runner entry of
+/// the gates in `gates`, a path that never changes, so that Norman writes it once.
+export const runnerLine = (gates) => `runner = ["node", ${JSON.stringify(path.join(gates, "entry", "capped.mjs").replace(/\\/g, "/"))}, "--mente-only", "--"]`;
 
 /// The runner a configuration file's text names for RUNNER_TARGET, its words, or null: under the
 /// table [target.<RUNNER_TARGET>], or as the dotted key before any table.
@@ -258,180 +289,30 @@ export function cargoRunner(cwd = process.cwd(), env = process.env) {
   return null;
 }
 
-/// Whether cargo, on this laptop, runs every test binary and program it starts through
-/// tools/capped.mjs, however it was started: the tools refuse to run until it does, and say which
+/// Whether cargo, on this laptop, runs every test binary and program it starts through the gates'
+/// stable runner entry, <common git directory>/mente-gates/entry/capped.mjs, which runs the copy's
+/// tools/capped.mjs, however cargo was started: the tools refuse to run until it does, and say which
 /// lines to add where (the review of round 4: CLAUDE.md claimed a runner nothing set or checked).
 /// Off Windows, where no job object bounds anything, it holds.
 export function requireRunner({ cwd = process.cwd(), env = process.env, say = (line) => console.error(line) } = {}) {
   if (!WINDOWS) return true;
   const words = cargoRunner(cwd, env);
-  const held = Array.isArray(words) && words.length === 4 && /^node(\.exe)?$/i.test(path.basename(words[0])) && /[\\/]tools[\\/]capped\.mjs$/.test(words[1]) && fs.existsSync(words[1]) && words[2] === "--mente-only" && words[3] === "--";
+  const held = Array.isArray(words) && words.length === 4 && /^node(\.exe)?$/i.test(path.basename(words[0])) && /[\\/]mente-gates[\\/]entry[\\/]capped\.mjs$/.test(words[1]) && fs.existsSync(words[1]) && words[2] === "--mente-only" && words[3] === "--";
+  let gates;
+  try {
+    gates = gatesDir(cwd);
+  } catch {
+    gates = "<common git directory>/mente-gates";
+  }
   if (held) return true;
   // The variable cargo reads before every file: when it names the runner, it is what to change
   // (the review of PR 195's last round).
   if (env[RUNNER_VARIABLE]) {
-    say(`local-limits: ${RUNNER_VARIABLE} is set to ${JSON.stringify(env[RUNNER_VARIABLE])}, which cargo uses as its runner over every configuration file, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Unset it, or set it to:\n\n${RUNNER_VARIABLE}=node ${path.join(mainCheckout(), "tools", "capped.mjs").replace(/\\/g, "/")} --mente-only --\n`);
+    say(`local-limits: ${RUNNER_VARIABLE} is set to ${JSON.stringify(env[RUNNER_VARIABLE])}, which cargo uses as its runner over every configuration file, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Unset it, or set it to:\n\n${RUNNER_VARIABLE}=node ${path.join(gates, "entry", "capped.mjs").replace(/\\/g, "/")} --mente-only --\n`);
     return false;
   }
-  const home = env.CARGO_HOME || path.join(os.homedir(), ".cargo");
-  say(`local-limits: cargo's runner on this laptop is ${words ? JSON.stringify(words) : "not set"}, so a test binary cargo starts would run unbounded, and nothing here runs until it is the capped one. Add these two lines to ${path.join(home, "config.toml")}:\n\n[target.${RUNNER_TARGET}]\n${runnerLine()}\n`);
+  say(`local-limits: cargo's runner on this laptop is ${words ? JSON.stringify(words) : "not set"}, so a test binary cargo starts would run unbounded, and nothing here runs until it is the gates' capped one. Add these two lines to ${cargoConfig(env)}:\n\n[target.${RUNNER_TARGET}]\n${runnerLine(gates)}\n`);
   return false;
-}
-
-// The processes of the gates' refresher (briefs/gate-tools-from-main.md): a command's whole
-// process tree held to a time, and the lock of a refresh, which the operating system releases when
-// its holder ends. Their environment, where git is and a blob's id are in
-// tools/gate-entries/verify.mjs, which the stable entries share.
-
-/**
- * A runner of one command whose whole process tree is held to a time, run by `node -e`. A time
- * limit on the command alone would kill git and leave its transport, git-remote-http, holding its
- * connection (the eighth review of #203). The tree is never found by process ids, which Windows
- * reuses and does not clear from a dead parent's children (the ninth review):
- * - on posix the command leads a process group of its own, killed whole whenever its time passes
- *   before the runner has seen it close, even once git has exited while a transport holds its pipes:
- *   a group's id is not reused while any member lives (the tenth review);
- * - on Windows the command is tools/capped.ps1, which runs git in a job object that ends every
- *   process in it when the job's owner ends (capped); killing that one direct child, by its own
- *   handle, ends exactly the job's members.
- * It reports once, as JSON: the command's status, output, and whether its time passed.
- */
-export const TREE_RUNNER = `
-const { spawn } = require("node:child_process");
-const [cmd, ...args] = JSON.parse(process.env.TREE_ARGS);
-const windows = process.platform === "win32";
-const child = spawn(cmd, args, { detached: !windows, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-let out = "", err = "", timedOut = false, finished = false;
-child.stdout.setEncoding("utf8").on("data", (d) => (out += d));
-child.stderr.setEncoding("utf8").on("data", (d) => (err += d));
-const timer = setTimeout(() => {
-  timedOut = true;
-  if (windows) {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-  } else {
-    try { process.kill(-child.pid, "SIGKILL"); } catch {}
-  }
-}, Number(process.env.TREE_TIMEOUT));
-const done = (code) => {
-  if (finished) return;
-  finished = true;
-  clearTimeout(timer);
-  process.stdout.write(JSON.stringify({ code, out, err, timedOut }));
-};
-child.on("close", (code) => done(code));
-child.on("error", (e) => { err += String(e.message); done(-1); });
-`;
-
-/**
- * Runs `run` in `cwd` with `env`, its whole process tree held to `timeoutMs` (TREE_RUNNER): on
- * Windows inside capped.ps1's job, whose own limit, in whole minutes, is a backstop behind the
- * runner's time. Returns { code, out, err, timedOut }; throws only where the runner itself fails.
- */
-export function inTime(run, timeoutMs, { env = process.env, cwd } = {}) {
-  const job = WINDOWS ? capped(run, { processGB: 4, jobGB: 8, minutes: Math.ceil(timeoutMs / 60000) + 1 }) : null;
-  const r = spawnSync(process.execPath, ["-e", TREE_RUNNER], {
-    encoding: "utf8",
-    cwd,
-    env: { ...env, ...(job ? job.env : {}), TREE_ARGS: JSON.stringify(job ? [job.cmd, ...job.args] : run), TREE_TIMEOUT: String(timeoutMs) },
-    timeout: timeoutMs + 30000,
-    windowsHide: true,
-  });
-  if (r.error) throw r.error;
-  return JSON.parse(r.stdout);
-}
-
-/// The variable by which a refresher tells the refresher it starts that the descriptor LOCK_FD it
-/// hands down holds the lock (briefs/gate-tools-from-main.md, "The lock").
-export const LOCK_FD_VARIABLE = "MENTE_GATES_LOCK_FD";
-/// The descriptor a handed-down lock arrives on: the first after standard input, output and error.
-export const LOCK_FD = 3;
-
-/// The name of the socket that is the lock of the file `file` on Linux, in the abstract namespace,
-/// which no file stands for and the kernel frees when the last descriptor of it closes.
-const lockSocket = (file) => `\0mente-gates-lock:${createHash("sha1").update(path.resolve(file)).digest("hex")}`;
-
-/// The lock of `file` taken now, as { fd, release }, or null while another holds it.
-function tryLock(file) {
-  if (WINDOWS) {
-    let fd;
-    try {
-      fd = fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_CREAT | EXCLUSIVE);
-    } catch (e) {
-      if (e.code === "EBUSY") return Promise.resolve(null);
-      throw e;
-    }
-    return Promise.resolve({ fd, release: () => fs.closeSync(fd) });
-  }
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", (e) => (e.code === "EADDRINUSE" ? resolve(null) : reject(e)));
-    server.listen({ path: lockSocket(file) }, () => {
-      server.unref();
-      resolve({ fd: server._handle.fd, release: () => server.close() });
-    });
-  });
-}
-
-/**
- * Takes the lock of `file`: an open handle the operating system releases when its holder ends,
- * however it ends, so that a kill, Ctrl-C or a reset leaves it free. On Windows it is `file`
- * opened with no sharing, as the build slots are; on Linux, a socket in the abstract namespace
- * named from `file`. Waits at most `waitMs` while another holds it. Resolves to { fd, release }
- * and writes `<file>.who` (`label`, this process and since when), or to null when the time passed.
- */
-export async function takeLock(file, { waitMs, label, pollMs = 250 }) {
-  const until = Date.now() + waitMs;
-  for (;;) {
-    const lock = await tryLock(file);
-    if (lock) {
-      fs.writeFileSync(`${file}.who`, `pid ${process.pid} since ${new Date().toISOString()}: ${label}\n`);
-      return lock;
-    }
-    const left = until - Date.now();
-    if (left <= 0) return null;
-    await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, left)));
-  }
-}
-
-/// Who holds the lock of `file`, as its holder wrote it, or "unknown".
-export function lockHolder(file) {
-  try {
-    return fs.readFileSync(`${file}.who`, "utf8").trim();
-  } catch {
-    return "unknown";
-  }
-}
-
-/// The options by which a process hands the lock `lock` down to a process it starts with `stdio`:
-/// the lock's descriptor as LOCK_FD, and LOCK_FD_VARIABLE saying so.
-export const handDown = (lock, stdio, env) => ({ stdio: [...stdio, lock.fd], env: { ...env, [LOCK_FD_VARIABLE]: String(LOCK_FD) } });
-
-/**
- * Whether this process holds the lock of `file` by the descriptor its starter handed down: the
- * variable names LOCK_FD, and that descriptor is the lock itself, the same file on Windows, the
- * same socket on Linux (/proc/self/fd and /proc/net/unix), never only a claim.
- */
-export function inheritedLock(file, env = process.env) {
-  if (env[LOCK_FD_VARIABLE] !== String(LOCK_FD)) return false;
-  try {
-    if (WINDOWS) {
-      const held = fs.fstatSync(LOCK_FD, { bigint: true });
-      const named = fs.statSync(file, { bigint: true });
-      return held.ino === named.ino && held.dev === named.dev;
-    }
-    const inode = /^socket:\[(\d+)\]$/.exec(fs.readlinkSync(`/proc/self/fd/${LOCK_FD}`))?.[1];
-    if (!inode) return false;
-    const name = `@${lockSocket(file).slice(1)}`;
-    return fs
-      .readFileSync("/proc/net/unix", "utf8")
-      .split("\n")
-      .some((line) => {
-        const fields = line.trim().split(/\s+/);
-        return fields[6] === inode && fields[7] === name;
-      });
-  } catch {
-    return false;
-  }
 }
 
 /// The most minutes `--minutes` may give a run.

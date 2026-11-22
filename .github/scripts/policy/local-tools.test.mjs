@@ -139,8 +139,13 @@ export function localLimitsProblems({ quick, limits, capped, mn, cargo, map }) {
   let close = at;
   while (close >= 0 && close < l.length && l[close].v !== "]") close++;
   if (at < 0 || l.slice(at + 3, close).some((t) => !(t.t === "str" || t.v === "CAPPED" || t.v === ","))) problems.push("tools/local-limits.mjs hands capped.ps1 arguments past its own options, which PowerShell's parser would change");
-  const spawns = callArguments(l, "spawnSync");
-  if (spawns.length !== 1 || spawns[0][0]?.map((t) => t.v).join("") !== "spawned.cmd" || spawns[0][1]?.map((t) => t.v).join("") !== "spawned.args") problems.push("tools/local-limits.mjs starts a process other than the one runCapped chose");
+  // runCapped's process, and the gates' refresh entry (refreshGates), which the tools run before
+  // their slot, by this node, with the gates' environment, under the refresher's own time limit
+  // (briefs/gate-tools-from-main.md, "Who writes it").
+  const spawns = callArguments(l, "spawnSync").map((args) => args.map((arg) => (arg ?? []).map((t) => t.v).join("")));
+  const bounded = spawns.filter((args) => args[0] === "spawned.cmd" && args[1] === "spawned.args");
+  const refreshed = spawns.filter((args) => args[0] === "process.execPath" && args[1] === "[entry]" && /env:gateEnv\(\)/.test(args[2] ?? ""));
+  if (spawns.length !== 2 || bounded.length !== 1 || refreshed.length !== 1) problems.push("tools/local-limits.mjs starts a process other than the one runCapped chose and the gates' refresh entry");
   if (!holds(l, ["const", "{", "cmd", ",", "args", ",", "env", "}", "=", "capped", "(", "run", ",", "limits", ")"])) problems.push("tools/local-limits.mjs runs a command other than capped() gives");
   // The Store's pwsh, started in a job, takes every process it starts out of it (Norman,
   // 2026-11-22): a capped run refuses it as its program, and its PATH holds no WindowsApps
@@ -165,6 +170,10 @@ export function localLimitsProblems({ quick, limits, capped, mn, cargo, map }) {
     const first = (name) => t.findIndex((x, i) => x.t === "id" && x.v === name && t[i + 1]?.v === "(" && t[i - 1]?.v !== ".");
     const required = first("requireRunner");
     if (required < 0 || required > first("acquireSlot")) problems.push(`${file} does not require cargo's runner before it takes a slot`);
+    // The runner line and the hooks name the gates' stable entries, which a first refresh writes
+    // (briefs/gate-tools-from-main.md, "Who writes it").
+    const refreshed = first("refreshGates");
+    if (refreshed < 0 || refreshed > required) problems.push(`${file} does not refresh the gates before it requires cargo's runner`);
   }
   for (const s of ["capped.mjs", "x86_64-pc-windows-msvc", "config.toml"]) if (!strings.has(s)) problems.push(`tools/local-limits.mjs does not name ${s} in the runner it requires`);
   // The line it tells the laptop to add, and what it takes for that runner, both with --mente-only.
@@ -224,7 +233,12 @@ check("the quick checks run every command in one of the machine's build slots, u
     ["quick", "if (!requireRunner()) process.exit(2);\n", "", "quick.mjs with no runner required"],
     ["cargo", "if (!requireRunner()) process.exit(2);\n", "", "cargo.mjs with no runner required"],
     ["mn", "if (!requireRunner()) process.exit(2);\n", "", "mn.mjs with no runner required"],
+    ["quick", "if (!refreshGates({ cwd: process.cwd() })) process.exit(2);\n", "", "quick.mjs with no refresh of the gates"],
+    ["cargo", "if (!refreshGates({ cwd: ROOT })) process.exit(2);\n", "", "cargo.mjs with no refresh of the gates"],
+    ["mn", "if (!refreshGates({ cwd: ROOT })) process.exit(2);\nif (!requireRunner()) process.exit(2);", "if (!requireRunner()) process.exit(2);\nif (!refreshGates({ cwd: ROOT })) process.exit(2);", "mn.mjs refreshing the gates after the runner"],
     ["limits", '"--mente-only", "--"]`;', '"--"]`;', "a runner line without --mente-only"],
+    ["limits", "const r = spawnSync(process.execPath, [entry], { stdio: \"inherit\", env: gateEnv(), cwd, windowsHide: true });", "const r = spawnSync(process.execPath, [entry], { stdio: \"inherit\", env: process.env, cwd, windowsHide: true });", "the refresh entry with this process's environment"],
+    ["limits", "const r = spawnSync(process.execPath, [entry], { stdio: \"inherit\", env: gateEnv(), cwd, windowsHide: true });", "const r = spawnSync(process.execPath, [entry], { stdio: \"inherit\", env: gateEnv(), cwd, windowsHide: true });\n  spawnSync(\"git\", [\"gc\"]);", "a third process"],
   ];
   for (const [part, from, to, what] of plants) {
     assert.equal(texts[part].split(from).length, 2, `the plant "${what}" finds no place in ${part}`);

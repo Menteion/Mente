@@ -11,12 +11,13 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUILD, PROBE, acquireSlot, minutesFrom, requireHooks, requireRunner, runCapped } from "./local-limits.mjs";
+import { BUILD, PROBE, acquireSlot, minutesFrom, refreshGates, requireHooks, requireRunner, runCapped } from "./local-limits.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { args, limits } = minutesFrom(process.argv.slice(2), PROBE);
+if (!refreshGates({ cwd: ROOT })) process.exit(2);
 if (!requireRunner()) process.exit(2);
-if (!requireHooks()) process.exit(2);
+if (!requireHooks({ cwd: ROOT })) process.exit(2);
 const slot = acquireSlot(`mn ${args.join(" ")} (tools/mn.mjs)`);
 let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });
 if (status === 0) {

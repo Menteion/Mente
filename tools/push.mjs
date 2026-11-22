@@ -22,7 +22,8 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { PASSED, inTime } from "./local-limits.mjs";
+import { inTime } from "./gates.mjs";
+import { PASSED } from "./local-limits.mjs";
 import { simpleCommands } from "./raw-build.mjs";
 
 /** What the guard asks a session to run when it refuses. */
