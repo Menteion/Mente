@@ -287,6 +287,7 @@ const CANDIDATES: &[&str] = &[
     "guard of a loop's body whose condition may leave",
     "conjunct of a loop's condition that calls a function whose ensures bounds its argument",
     "break in the condition of a loop inside a loop",
+    "guard of a loop's body that reads, after an and, a remainder of a binding the round assigned",
 ];
 
 /// A condition that assigns or passes a place `mut`, anywhere inside it, which the checker
@@ -1028,6 +1029,63 @@ fn reached_no_candidates(
     }
     let any_in =
         |found: &[mente_syntax::Span], c: mente_syntax::Span| found.iter().any(|&s| within(s, c));
+    // A guard `p and q` in a loop's body whose `q` holds a remainder of a name the body assigns
+    // before the guard.
+    let assigned: Vec<(&str, mente_syntax::Span)> = tree
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::Assign { place, .. } => match &tree.expr(*place).kind {
+                ExprKind::Name(n) => Some((n.as_str(), s.span)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let remainders_of: Vec<(&str, mente_syntax::Span)> = tree
+        .exprs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ExprKind::Binary {
+                op: mente_syntax::tree::BinaryOp::Rem,
+                lhs,
+                ..
+            } => match &tree.expr(*lhs).kind {
+                ExprKind::Name(n) => Some((n.as_str(), e.span)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    for s in &tree.stmts {
+        let StmtKind::Guard { cond, .. } = &s.kind else {
+            continue;
+        };
+        let ExprKind::Binary {
+            op: mente_syntax::tree::BinaryOp::And,
+            rhs,
+            ..
+        } = &tree.expr(*cond).kind
+        else {
+            continue;
+        };
+        let right = tree.expr(*rhs).span;
+        let Some(body) = bodies.iter().find(|&&b| within(s.span, b)) else {
+            continue;
+        };
+        let stale = remainders_of.iter().any(|&(n, at)| {
+            within(at, right)
+                && assigned
+                    .iter()
+                    .any(|&(m, a)| m == n && within(a, *body) && a.end <= s.span.start)
+        });
+        if stale {
+            seen.insert(
+                "guard of a loop's body that reads, after an and, a remainder of a binding the round assigned"
+                    .to_string(),
+            );
+        }
+    }
     for s in &tree.stmts {
         match &s.kind {
             StmtKind::While { cond, .. } => {

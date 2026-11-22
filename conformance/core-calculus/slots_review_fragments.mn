@@ -1,0 +1,24 @@
+// expect: pass
+module conformance
+// Slots one run makes in turn, each copied into its binding: a layout of fixed slots leaves holes
+// that item 25's count of what is held at once does not, so native code's slots passed the frame
+// by up to 18 percent here (the review of pull request 183, 2026-11-22). They build, within the
+// measured bound, and agree on every path.
+
+pub fn kib(x: u8) -> u8 {
+  val a: [1024]u8 = [x; 1024]
+  val b: [2048]u8 = [x; 2048]
+  a[1] ^ b[2]
+}
+
+pub fn small(x: u8) -> u8 {
+  val a: [16]u8 = [x; 16]
+  val b: [32]u8 = [x; 32]
+  a[1] ^ b[2]
+}
+
+pub fn hundreds(x: u8) -> u8 {
+  val a: [100]u8 = [x; 100]
+  val b: [200]u8 = [x; 200]
+  a[1] ^ b[2]
+}

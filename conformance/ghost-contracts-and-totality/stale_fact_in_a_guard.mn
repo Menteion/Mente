@@ -1,0 +1,74 @@
+// expect: pass
+module conformance
+// A condition is decided on the evaluations its state ran (spec item 2): a loop's candidate,
+// a remainder evaluated at the head, decides no later guard, so a round that changes `x` decides
+// its guard on `x` as it is. Tier 1 once kept the head's `x % 4 <= 1` and decided the `else` on
+// it: there `w` was 0, and `a[w]` lost its check, which `f(3, 1, 1)` fails. The forms: a
+// remainder, an `if`-valued conjunct, an `or` under the `and`, and a `not`.
+pub fn remainder(v: u8, w: u8[0..=1], n: u8) -> u8 {
+  var x: u8 = 0
+  var i: u8 = 0
+  val a: [1]u8 = [5]
+  var r: u8 = 0
+  while i < n {
+    x = v
+    guard w > 0 and x % 4 <= 1 else {
+      r = a[w]
+      break
+    }
+    x = 0
+    i += 1
+  }
+  r
+}
+
+pub fn branch(v: u8, w: u8[0..=1], n: u8) -> u8 {
+  var x: u8 = 0
+  var i: u8 = 0
+  val a: [1]u8 = [5]
+  var r: u8 = 0
+  while i < n {
+    x = v
+    guard w > 0 and (if x > 1 { 1 } else { 0 }) == 0 else {
+      r = a[w]
+      break
+    }
+    x = 0
+    i += 1
+  }
+  r
+}
+
+pub fn either(v: u8, w: u8[0..=1], n: u8) -> u8 {
+  var x: u8 = 0
+  var i: u8 = 0
+  val a: [1]u8 = [5]
+  var r: u8 = 0
+  while i < n {
+    x = v
+    guard w > 0 and (x % 4 <= 1 or w > 5) else {
+      r = a[w]
+      break
+    }
+    x = 0
+    i += 1
+  }
+  r
+}
+
+pub fn negated(v: u8, w: u8[0..=1], n: u8) -> u8 {
+  var x: u8 = 0
+  var i: u8 = 0
+  val a: [1]u8 = [5]
+  var r: u8 = 0
+  while i < n {
+    x = v
+    guard not (w == 0) and x % 4 <= 1 else {
+      r = a[w]
+      break
+    }
+    x = 0
+    i += 1
+  }
+  r
+}

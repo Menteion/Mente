@@ -31,7 +31,7 @@ use cranelift_codegen::isa::unwind::UnwindInfo;
 use cranelift_codegen::isa::{self, OwnedTargetIsa, TargetIsa};
 use cranelift_codegen::settings::{self, Configurable, OptLevel};
 use cranelift_codegen::{CompiledCode, Context};
-use cranelift_module::{FuncId, Module};
+use cranelift_module::{FuncId, FuncOrDataId, Module};
 use cranelift_object::object;
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use object::write::SymbolId;
@@ -41,6 +41,7 @@ mod elf;
 pub mod link;
 pub mod lower;
 pub mod native;
+mod slots;
 #[cfg(test)]
 mod test_program;
 
@@ -250,8 +251,7 @@ struct CompiledFunction {
     size: u32,
     ranges: Vec<CodeRange>,
     unwind: Option<UnwindInfo>,
-    /// The bytes of its stack slots, which tests read.
-    #[cfg(test)]
+    /// The bytes of its stack slots, which [`native::slot_frames`] reads.
     stack_slots: u32,
 }
 
@@ -405,6 +405,17 @@ impl ObjectWriter {
     }
 
     /// The module that declares the object's functions and data, and builds their signatures.
+    /// The bytes of the stack slots of the function defined as `symbol`, if one was.
+    pub fn stack_slot_bytes(&self, symbol: &str) -> Option<u32> {
+        let Some(FuncOrDataId::Func(id)) = self.module.get_name(symbol) else {
+            return None;
+        };
+        self.functions
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.stack_slots)
+    }
+
     pub fn module(&self) -> &ObjectModule {
         &self.module
     }
@@ -479,7 +490,6 @@ impl ObjectWriter {
             size,
             ranges,
             unwind,
-            #[cfg(test)]
             stack_slots: ctx.func.sized_stack_slots.values().map(|s| s.size).sum(),
         });
         Ok(())

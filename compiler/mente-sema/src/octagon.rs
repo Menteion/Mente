@@ -15,10 +15,24 @@
 //! cost linear time where the matrix costs quadratic, so that Tier 1's cost stays bounded however
 //! large a function grows. A relation between two variables then narrows each one's bounds by
 //! the other's, once, and is dropped, which is sound and only weaker.
+//!
+//! Each variable may carry a stamp: the evaluation whose value it holds, which Tier 1 gives a
+//! site variable, the value of a remainder, an `if`, a `match`, an index, a field or a call, each
+//! time it evaluates that expression. A term of a value names the evaluation it reads. Every
+//! method that takes terms reads them, and stops the compile, in every build, where a term names
+//! one evaluation and the state holds another, two joined, or one the term does not name: no
+//! value is read from an evaluation the state does not hold (`spec/ghost-contracts-and-
+//! totality.md`, item 2, `no-site-value-from-another-evaluation`). The bounds themselves never
+//! depend on the stamps, and two octagons that differ in stamps alone are equal.
+
+use std::sync::Arc;
 
 /// The most variables an octagon relates; past them it is a box. The largest function of the
 /// repository's corpus has 53 (Norman's decision, `tier1-variable-cap`).
 pub const RELATIONAL_LIMIT: usize = 128;
+
+/// The stamp of a variable whose value came from two evaluations, joined.
+pub const MIXED: u32 = u32::MAX;
 
 /// No bound. Sums saturate here; a bound at or beyond it is no bound, so the 128-bit types,
 /// whose ranges reach past it, are unbounded in the domain.
@@ -123,22 +137,38 @@ impl std::fmt::Display for Exact {
     }
 }
 
-/// One term of a linear expression: `+x` or `-x`.
+/// One term of a linear expression: `+x` or `-x`, and the evaluation of `x` it reads, 0 for
+/// a variable no evaluation stamps ([`Octagon::stamp`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Term {
     pub var: usize,
     pub neg: bool,
+    pub at: u32,
 }
 
 impl Term {
     pub fn pos(var: usize) -> Term {
-        Term { var, neg: false }
+        Term {
+            var,
+            neg: false,
+            at: 0,
+        }
+    }
+
+    /// `+x`, read as evaluation `at` of it.
+    pub fn of(var: usize, at: u32) -> Term {
+        Term {
+            var,
+            neg: false,
+            at,
+        }
     }
 
     pub fn negated(self) -> Term {
         Term {
             var: self.var,
             neg: !self.neg,
+            at: self.at,
         }
     }
 
@@ -162,13 +192,18 @@ pub struct Octagon {
     /// The matrix's limit: an entry at it is no bound. [`INF`] for every octagon Tier 1
     /// makes; a test makes one with a small limit, and takes every constant around it.
     inf: i128,
+    /// Each variable's stamp: the evaluation whose value it holds, 0 for none, [`MIXED`] for two
+    /// joined; none until one is given.
+    stamps: Option<Box<[u32]>>,
+    /// What each variable is, for the internal error a stale read stops the compile with.
+    names: Option<Arc<[String]>>,
 }
 
 /// A variable's lower and upper bounds beyond the matrix's reach.
 type FarBounds = (Option<Exact>, Option<Exact>);
 
 /// Two octagons are equal when they hold the same bounds: a table of far bounds made but empty
-/// is no table.
+/// is no table, and the stamps and names are no bounds.
 impl PartialEq for Octagon {
     fn eq(&self, other: &Octagon) -> bool {
         self.n == other.n
@@ -199,6 +234,8 @@ impl Octagon {
                 empty: false,
                 far: None,
                 inf,
+                stamps: None,
+                names: None,
             };
         }
         let mut m = vec![inf; d * d];
@@ -212,6 +249,8 @@ impl Octagon {
             empty: false,
             far: None,
             inf,
+            stamps: None,
+            names: None,
         }
     }
 
@@ -235,7 +274,7 @@ impl Octagon {
         }
         if let Some(l) = lower {
             match l.to_i128().filter(|_| !l.is_far()) {
-                Some(c) => self.add_lin(&[Term::pos(var).negated()], -c),
+                Some(c) => self.add_lin_of(&[Term::pos(var).negated()], -c),
                 None => {
                     let kept = &mut self.far_mut()[var].0;
                     *kept = Some(kept.map_or(l, |k| k.max(l)));
@@ -244,7 +283,7 @@ impl Octagon {
         }
         if let Some(u) = upper {
             match u.to_i128().filter(|_| !u.is_far()) {
-                Some(c) => self.add_lin(&[Term::pos(var)], c),
+                Some(c) => self.add_lin_of(&[Term::pos(var)], c),
                 None => {
                     let kept = &mut self.far_mut()[var].1;
                     *kept = Some(kept.map_or(u, |k| k.min(u)));
@@ -261,6 +300,29 @@ impl Octagon {
     /// The bounds of `var` kept beyond the matrix's reach alone.
     pub fn far_bounds(&self, var: usize) -> (Option<Exact>, Option<Exact>) {
         self.far_of(var)
+    }
+
+    /// [`Octagon::far_bounds`] of a term's variable, the term read ([`Octagon::read`]).
+    pub fn far_bounds_of(&self, t: Term) -> (Option<Exact>, Option<Exact>) {
+        self.read(&[t]);
+        self.far_of(t.var)
+    }
+
+    /// [`Octagon::add_exact`] to a term's variable, the term read as [`Octagon::add_lin`]
+    /// reads it.
+    pub fn add_exact_of(&mut self, t: Term, lower: Option<Exact>, upper: Option<Exact>) {
+        self.narrowed_by(&[t]);
+        self.add_exact(t.var, lower, upper);
+    }
+
+    /// Reads `terms` where they narrow the state ([`Octagon::read`]): each variable then holds
+    /// the evaluation its term names, which the read leaves as it was or, where the state held
+    /// none, gives it, so that a later term of another evaluation is refused there.
+    fn narrowed_by(&mut self, terms: &[Term]) {
+        self.read(terms);
+        for t in terms {
+            self.stamp(t.var, t.at);
+        }
     }
 
     /// The bounds of `var`, exactly, from the matrix and beyond it; `None` for none.
@@ -336,7 +398,7 @@ impl Octagon {
                 // `s + t <= c` and `-t <= u` give `s <= c + u`; with no `u`, the sum saturates
                 // at `INF`, no bound, which `bound_box` passes over.
                 for (a, b) in [(*s, *t), (*t, *s)] {
-                    let v = add(self.inf, c, self.upper(&[b.negated()]));
+                    let v = add(self.inf, c, self.upper_of(&[b.negated()]));
                     self.bound_box(a.node(), 2 * v);
                 }
             }
@@ -422,8 +484,16 @@ impl Octagon {
     }
 
     /// Adds `terms <= c`, for at most two terms; a longer sum is ignored, which is sound. A
-    /// constant beyond [`BIG`] is weakened to no bound, or to `-BIG`.
+    /// constant beyond [`BIG`] is weakened to no bound, or to `-BIG`. It reads its terms
+    /// ([`Octagon::read`]), and a term that narrows a variable no evaluation holds stamps it
+    /// with its own, so that a later term of another evaluation is refused there.
     pub fn add_lin(&mut self, terms: &[Term], c: i128) {
+        self.narrowed_by(terms);
+        self.add_lin_of(terms, c);
+    }
+
+    /// [`Octagon::add_lin`], its terms read.
+    fn add_lin_of(&mut self, terms: &[Term], c: i128) {
         if c >= (self.inf / 2) || self.empty {
             return;
         }
@@ -478,8 +548,15 @@ impl Octagon {
         }
     }
 
-    /// The least upper bound of `terms` (at most two), or `INF`.
+    /// The least upper bound of `terms` (at most two), or `INF`, its terms read
+    /// ([`Octagon::read`]).
     pub fn upper(&self, terms: &[Term]) -> i128 {
+        self.read(terms);
+        self.upper_of(terms)
+    }
+
+    /// [`Octagon::upper`], its terms read, or the octagon's own.
+    fn upper_of(&self, terms: &[Term]) -> i128 {
         match terms {
             [] => 0,
             [t] => {
@@ -495,29 +572,33 @@ impl Octagon {
             [s, t] if self.boxed => match (s.var == t.var, s.neg == t.neg) {
                 (true, true) => self.unary(s.node()),
                 (true, false) => 0,
-                (false, _) => add(self.inf, self.upper(&[*s]), self.upper(&[*t])),
+                (false, _) => add(self.inf, self.upper_of(&[*s]), self.upper_of(&[*t])),
             },
             [s, t] => self.at(t.node() ^ 1, s.node()),
             _ => self.inf,
         }
     }
 
-    /// Whether `terms <= c` holds in every point of the octagon.
+    /// Whether `terms <= c` holds in every point of the octagon, its terms read.
     pub fn implies(&self, terms: &[Term], c: i128) -> bool {
-        self.empty || self.upper(terms) <= c
+        self.read(terms);
+        self.empty || self.upper_of(terms) <= c
     }
 
     /// The bounds of one variable, with `-INF` and `INF` for none.
     pub fn bounds(&self, var: usize) -> (i128, i128) {
-        let hi = self.upper(&[Term::pos(var)]);
-        let lo = self.upper(&[Term::pos(var).negated()]);
+        let hi = self.upper_of(&[Term::pos(var)]);
+        let lo = self.upper_of(&[Term::pos(var).negated()]);
         crate::bounds::held(self.inf, (if lo >= self.inf { -self.inf } else { -lo }, hi))
     }
 
-    /// Forgets everything known about `var`.
+    /// Forgets everything known about `var`, the evaluation it held included.
     pub fn forget(&mut self, var: usize) {
         if let Some(f) = &mut self.far {
             f[var] = (None, None);
+        }
+        if let Some(s) = &mut self.stamps {
+            s[var] = 0;
         }
         if self.boxed {
             self.m[2 * var] = self.inf;
@@ -571,6 +652,106 @@ impl Octagon {
             empty: false,
             far,
             inf: self.inf,
+            stamps: self.joined_stamps(other),
+            names: self.names.clone().or_else(|| other.names.clone()),
+        }
+    }
+
+    /// Each variable's stamp after a join: one evaluation where both sides hold it, or one holds
+    /// it and the other none, and [`MIXED`] where they hold two.
+    fn joined_stamps(&self, other: &Octagon) -> Option<Box<[u32]>> {
+        if self.stamps.is_none() && other.stamps.is_none() {
+            return None;
+        }
+        Some(
+            (0..self.n)
+                .map(|v| match (self.stamp_of(v), other.stamp_of(v)) {
+                    (a, b) if a == b => a,
+                    (0, b) => b,
+                    (a, 0) => a,
+                    (_, _) => MIXED,
+                })
+                .collect(),
+        )
+    }
+
+    /// The evaluation whose value `var` holds: 0 for none, [`MIXED`] for two joined.
+    pub fn stamp_of(&self, var: usize) -> u32 {
+        self.stamps.as_ref().map_or(0, |s| s[var])
+    }
+
+    /// Stamps `var` with evaluation `at`, once that evaluation has given it its value. A write
+    /// forgets its variable first, so the state holds no evaluation of it, or already this one;
+    /// a variable that holds another, or two joined, stops the compile, in every build, with an
+    /// internal error that names it: its bounds would be the earlier evaluation's under the new
+    /// stamp, the stale fact the stamps exist to refuse.
+    pub fn stamp(&mut self, var: usize, at: u32) {
+        let held = self.stamp_of(var);
+        if held != 0 && held != at {
+            panic!(
+                "internal error: {} is given a new evaluation where the state holds an earlier one, which its write did not forget (ghost-contracts-and-totality.md, item 2, no-site-value-from-another-evaluation)",
+                self.name_of(var)
+            );
+        }
+        self.set_stamp(var, at);
+    }
+
+    /// Sets `var`'s stamp to `at`, whatever it held: a replay's rebasing alone, and
+    /// [`Octagon::stamp`] once it has checked.
+    fn set_stamp(&mut self, var: usize, at: u32) {
+        if at == 0 && self.stamps.is_none() {
+            return;
+        }
+        let n = self.n;
+        self.stamps
+            .get_or_insert_with(|| vec![0; n].into_boxed_slice())[var] = at;
+    }
+
+    /// What `var` is, as the internal errors of the stamps name it.
+    fn name_of(&self, var: usize) -> String {
+        self.names
+            .as_ref()
+            .and_then(|n| n.get(var).cloned())
+            .unwrap_or_else(|| format!("variable {}", var))
+    }
+
+    /// For a state computed from entry `from` and replayed at entry `to`, which hold the same
+    /// bounds: each variable that holds `from`'s evaluation, left as it was entered, holds
+    /// `to`'s. A variable that holds two joined keeps them.
+    pub fn restamp(&mut self, from: &Octagon, to: &Octagon) {
+        for v in 0..self.n {
+            let held = self.stamp_of(v);
+            if held != MIXED && held == from.stamp_of(v) {
+                self.set_stamp(v, to.stamp_of(v));
+            }
+        }
+    }
+
+    /// Names each variable for the internal error a stale read stops the compile with.
+    pub fn name(&mut self, names: Arc<[String]>) {
+        self.names = Some(names);
+    }
+
+    /// Reads `terms`: each names the evaluation the state holds, or the state holds none of its
+    /// variable. Anything else stops the compile, in every build, with an internal error that
+    /// names the variable: a value read from an evaluation the state does not hold would be
+    /// decided on another value.
+    fn read(&self, terms: &[Term]) {
+        for t in terms {
+            let held = self.stamp_of(t.var);
+            if held == 0 || held == t.at {
+                continue;
+            }
+            let what = match (t.at, held) {
+                (0, _) => "is read with no evaluation named, where the state holds one",
+                (_, MIXED) => "is read as one evaluation, where the state holds two joined",
+                (_, _) => "is read as one evaluation, where the state holds another",
+            };
+            panic!(
+                "internal error: {} {} (ghost-contracts-and-totality.md, item 2, no-site-value-from-another-evaluation)",
+                self.name_of(t.var),
+                what
+            );
         }
     }
 
@@ -583,6 +764,7 @@ impl Octagon {
         let term = |node: usize| Term {
             var: node / 2,
             neg: node % 2 == 1,
+            at: 0,
         };
         let mut out = Vec::new();
         if self.boxed {
@@ -626,7 +808,7 @@ impl Octagon {
             for tv in [Term::pos(var), Term::pos(var).negated()] {
                 for tw in [Term::pos(w), Term::pos(w).negated()] {
                     // `tv + tw <= c` bounds `tv` by `c` less the least value of `tw`.
-                    let c = self.upper(&[tv, tw]);
+                    let c = self.upper_of(&[tv, tw]);
                     let least = if tw.neg { whi.map(Exact::negated) } else { wlo };
                     let Some(b) = least
                         .filter(|_| c < self.inf)
@@ -677,7 +859,11 @@ mod tests {
         Term::pos(v)
     }
     fn nx(v: usize) -> Term {
-        Term { var: v, neg: true }
+        Term {
+            var: v,
+            neg: true,
+            at: 0,
+        }
     }
 
     /// An exact integer orders, shifts and converts across the whole range of the 128-bit
@@ -892,6 +1078,7 @@ mod tests {
         let t = |r: &mut Rng| Term {
             var: r.below(n as u64) as usize,
             neg: r.below(2) == 1,
+            at: 0,
         };
         let terms = if r.below(3) == 0 {
             vec![t(r)]
@@ -921,7 +1108,7 @@ mod tests {
         const LIMIT: i128 = 8;
         const WINDOW: i128 = 14;
         let mut r = Rng(0x2545_f491_4f6c_dd1d);
-        let term = |var: usize, neg: bool| Term { var, neg };
+        let term = |var: usize, neg: bool| Term { var, neg, at: 0 };
         let mut shapes: Vec<Vec<Term>> = Vec::new();
         for a in [false, true] {
             shapes.push(vec![term(0, a)]);
@@ -1231,5 +1418,123 @@ mod tests {
         assert_eq!(one.upper(&[x(0), x(1)]), INF);
         assert_eq!(one.upper(&[nx(1), x(0)]), INF);
         assert_eq!(one.bounds(0), (-INF, -3));
+    }
+
+    /// Each variable's stamp is the evaluation whose value it holds: a join keeps one held on
+    /// both sides, or on one beside none, and marks two `MIXED`; forgetting a variable clears
+    /// it; narrowing one no evaluation holds stamps it with the term's; a replay rebases what a
+    /// loop left as it was entered, and keeps two joined; and neither the bounds nor equality
+    /// read the stamps.
+    #[test]
+    fn test_stamps_follow_the_evaluations_a_state_holds() {
+        let mut a = Octagon::new(3);
+        a.stamp(0, 4);
+        a.stamp(1, 5);
+        let mut b = Octagon::new(3);
+        b.stamp(0, 4);
+        b.stamp(1, 6);
+        b.stamp(2, 7);
+        let joined = a.join(&b);
+        let stamps = |o: &Octagon| (o.stamp_of(0), o.stamp_of(1), o.stamp_of(2));
+        assert_eq!(stamps(&joined), (4, MIXED, 7));
+        assert_eq!(stamps(&a.join(&Octagon::new(3))), (4, 5, 0));
+        assert_eq!(Octagon::new(3).join(&Octagon::new(3)).stamps, None);
+        assert_eq!(a, Octagon::new(3));
+        let mut forgot = a.clone();
+        forgot.forget(0);
+        assert_eq!(stamps(&forgot), (0, 5, 0));
+        let mut unstamped = Octagon::new(1);
+        unstamped.stamp(0, 0);
+        assert_eq!(unstamped.stamps, None);
+        // A term of the evaluation held is read; one narrowing a variable none holds stamps it.
+        let mut n = Octagon::new(2);
+        n.add_lin(&[Term::of(0, 9)], 3);
+        assert_eq!(n.stamp_of(0), 9);
+        assert_eq!(n.upper(&[Term::of(0, 9)]), 3);
+        assert!(n.implies(&[Term::of(0, 9)], 3));
+        n.add_exact_of(Term::of(1, 2), None, Some(Exact::from_i128(BIG + 1)));
+        assert_eq!(n.stamp_of(1), 2);
+        assert_eq!(
+            n.far_bounds_of(Term::of(1, 2)),
+            (None, Some(Exact::from_i128(BIG + 1)))
+        );
+        // A replay at another entry: the evaluation carried through is the new entry's, none
+        // where that entry holds none, and what the loop gave or joined stays.
+        let mut exit = a.clone();
+        exit.stamp(2, 8);
+        let mut to = Octagon::new(3);
+        to.stamp(0, 11);
+        exit.restamp(&a, &to);
+        assert_eq!(stamps(&exit), (11, 0, 8));
+        let mut mixed = joined.clone();
+        to.stamp(1, 12);
+        mixed.restamp(&joined, &to);
+        assert_eq!(stamps(&mixed), (11, MIXED, 0));
+        // A write that forgets first stamps anew; one that stamps the evaluation held again is
+        // no write.
+        let mut write = a.clone();
+        write.forget(1);
+        write.stamp(1, 13);
+        write.stamp(1, 13);
+        assert_eq!(write.stamp_of(1), 13);
+    }
+
+    /// A write that stamps a variable still holding an earlier evaluation stops the compile:
+    /// the writer that skips its forget, planted.
+    #[test]
+    #[should_panic(
+        expected = "internal error: the value of `x % 4` is given a new evaluation where the state holds an earlier one, which its write did not forget"
+    )]
+    fn test_a_write_that_keeps_an_earlier_evaluation_stops_the_compile() {
+        let mut o = Octagon::new(1);
+        o.name(Arc::from(vec!["the value of `x % 4`".to_string()]));
+        o.stamp(0, 4);
+        o.add_lin(&[Term::of(0, 4)], 3);
+        o.stamp(0, 5);
+    }
+
+    /// A term read as an evaluation the state does not hold stops the compile, naming the
+    /// variable: another evaluation, two joined, or one the term does not name.
+    #[test]
+    #[should_panic(
+        expected = "internal error: the value of `x % 4` is read as one evaluation, where the state holds another (ghost-contracts-and-totality.md, item 2, no-site-value-from-another-evaluation)"
+    )]
+    fn test_a_term_of_another_evaluation_stops_the_compile() {
+        let mut o = Octagon::new(1);
+        o.name(Arc::from(vec!["the value of `x % 4`".to_string()]));
+        o.stamp(0, 4);
+        o.upper(&[Term::of(0, 5)]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: variable 0 is read as one evaluation, where the state holds two joined"
+    )]
+    fn test_a_term_where_two_evaluations_are_joined_stops_the_compile() {
+        let mut a = Octagon::new(1);
+        a.stamp(0, 4);
+        let mut b = Octagon::new(1);
+        b.stamp(0, 5);
+        a.join(&b).implies(&[Term::of(0, 4)], 0);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: variable 0 is read with no evaluation named, where the state holds one"
+    )]
+    fn test_a_term_naming_no_evaluation_stops_the_compile() {
+        let mut o = Octagon::new(1);
+        o.stamp(0, 4);
+        o.add_lin(&[Term::pos(0)], 1);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "internal error: variable 0 is read as one evaluation, where the state holds another"
+    )]
+    fn test_a_far_bound_of_another_evaluation_stops_the_compile() {
+        let mut o = Octagon::new(1);
+        o.stamp(0, 4);
+        o.far_bounds_of(Term::of(0, 5));
     }
 }
