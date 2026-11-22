@@ -63,7 +63,9 @@ A git missing from the list never blocks a push or a test, nor the push that wou
 - a refresh keeps the current copy and says where it looked;
 - the entries check the copy against its manifest alone, run it, and say that git was not found.
 
-That lag never ends by itself. A merged fix to the list does not lift it, since the installed refresher keeps the old list. So the message says: add the location to the list, then run the bootstrap. It also shows how long the copy has lagged `origin/main`: since the reflog of `refs/remotes/origin/main` first named a commit other than `current`. The tools read the ref and its reflog as files, which needs no git.
+That lag never ends by itself. A merged fix to the list does not lift it, since the installed refresher keeps the old list. So the message says: add the location to the list, then run the bootstrap. It also shows how long the copy has lagged `origin/main`: since the reflog of `refs/remotes/origin/main` first named a commit other than `current`. The tools read the ref and its reflog as files, which needs no git:
+- the ref from its loose file, or from `packed-refs` when the loose file is gone, since `git gc` or `pack-refs` can leave a ref only there;
+- the reflog from `logs/refs/remotes/origin/main`, which packing leaves in place.
 
 Every git command runs with `--no-replace-objects`, so that `git replace` changes nothing it reads. Further:
 - `git ls-remote` runs in an empty directory the refresher creates for it, by an exclusive create, outside the common git directory. The refresher sets `GIT_CEILING_DIRECTORIES` to that directory's parent itself. So git finds no repository, and no repository's configuration reaches it, wherever the refresher was started from.
@@ -238,7 +240,7 @@ They are the branch's own tools, which its own changes test. What judges every b
   - a bootstrap whose bound runs out writes nothing and names the process that holds the lock.
 - [ ] The refresh's time limit exceeds both `ls-remote` times plus the time to write a set, and a waiter's bound is shorter than that limit. A test reads the constants.
 - [ ] With no git of the list found, a push and a test go on, each planted:
-  - a refresh keeps the current copy and says where it looked, that the list is fixed by adding the location and running the bootstrap, and since when the copy has lagged `origin/main`;
+  - a refresh keeps the current copy and says where it looked, that the list is fixed by adding the location and running the bootstrap, and since when the copy has lagged `origin/main`. It reads that from the files even with `refs/remotes/origin/main` packed and its loose file removed, planted;
   - the entries refuse a copy with one drifted byte, by the blob ids they compute in node. Otherwise they run it, and say that git was not found.
 - [ ] A refresh killed at each step leaves the lock free and a state the next refresh completes, each planted. The steps are: while it readies the new set; after the new set's refresher has started; after the rename; after each entry; after `current` switches, before the sweep.
 - [ ] A refresh while a file of the old copy is in use succeeds and leaves that file alone. Windows alone refuses to replace a file in use, so this is a local proof that the quick map runs, skipped on Linux. So is the proof that an entry whose rename Windows refuses leaves `current` unswitched, and that the next start's refresh completes it.
