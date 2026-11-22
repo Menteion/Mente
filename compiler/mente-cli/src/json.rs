@@ -169,3 +169,28 @@ fn json_string(chars: &[char], at: &mut usize) -> Result<String, String> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse, Json};
+
+    fn string(text: &str) -> String {
+        match parse(text) {
+            Ok(Json::Str(s)) => s,
+            other => panic!("{text}: {other:?}"),
+        }
+    }
+
+    /// A `\u` escape of a high surrogate joins the low one escaped right after it into one
+    /// character, as `JSON.parse` does. Any other escape stands alone, even one a low surrogate
+    /// follows, and so does a high surrogate that no `\u` escape follows at once; a lone surrogate
+    /// is no character and reads as U+FFFD.
+    #[test]
+    fn test_only_a_high_surrogate_and_the_low_one_after_it_make_one_character() {
+        assert_eq!(string(r#""\uD83D\uDE00""#), "\u{1F600}");
+        assert_eq!(string(r#""\u0041\uDC00""#), "A\u{FFFD}");
+        assert_eq!(string(r#""\uD800\u0041""#), "\u{FFFD}A");
+        assert_eq!(string(r#""\uD800x\uDC00""#), "\u{FFFD}x\u{FFFD}");
+        assert_eq!(string(r#""\u0041xuDC00""#), "AxuDC00");
+    }
+}

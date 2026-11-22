@@ -6,7 +6,7 @@
 # Cargo.toml's [profile.release] turns on. Each crate's tests run on their own and their output is
 # read apart, so that what one crate's tests print never counts for another: every crate must show
 # its own test passing, once. Every required job that builds in release runs it
-# (.github/gate-commands.txt, .github/scripts/policy.test.mjs).
+# (.github/gate-commands.txt, .github/scripts/policy/).
 set -euo pipefail
 test=overflow_traps::test_arithmetic_overflow_panics_in_this_crate
 log="${RUNNER_TEMP:-/tmp}/overflow-proof.txt"

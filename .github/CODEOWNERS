@@ -1,7 +1,7 @@
 # The gate files: what decides whether a change may merge into `main`, and the rules and philosophy
 # it enforces, which a pull request could otherwise weaken unseen (docs/design-review.md,
 # guard-per-problem). A change to any of them needs its owner's review once the ruleset requires
-# review from Code Owners. The workflow policy test (.github/scripts/policy.test.mjs, GATE_FILES)
+# review from Code Owners. The workflow policy test (.github/scripts/policy/pins.mjs, GATE_FILES)
 # keeps this list equal to its own and checks that every gate input it reads has an owner.
 
 # The workflows, the required checks, the instruments' path lists, the scripts that decide, and

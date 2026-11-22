@@ -7,11 +7,9 @@
 //! record's key (Norman, 2026-11-17): two changes in flight that each add a record then never touch
 //! one file, and a record is found by its name. [`KINDS`] declares every kind kept so, [`SHARED`]
 //! every file that still holds many records, each with why it is not yet a kind, and
-//! [`DOCUMENTS`] every set of documents that are no records, each with why. Every document of the
-//! tree, a file written in prose or markup whatever its markup ([`is_document`]), belongs to
-//! exactly one of them ([`undeclared`]), so that a new directory of records cannot stand
-//! undeclared, its names unread. Within a kind's directory every file, of any extension, is a
-//! record or refused ([`entries`]).
+//! [`DOCUMENTS`] every set of Markdown documents that are no records, each with why. Every Markdown
+//! file of the tree belongs to exactly one of them ([`undeclared`]), so that a new directory of
+//! records cannot stand undeclared, its names unread.
 //!
 //! `mn pressure` (`pressure.rs`) ranks the files by how many merged pull requests changed them
 //! and says what each is here. A file it ranks high that holds records and is in neither list is
@@ -114,29 +112,14 @@ pub const SHARED: &[Shared] = &[
         why: "it becomes one file a program in a pull request of its own",
     },
     Shared {
-        file: "compiler/mente-cli/tests/golden/objects-aarch64-linux.txt",
-        records: "the size and digest of each program's object file for AArch64 Linux",
-        why: "it becomes one file a program with the other golden outputs, in a pull request of its own",
-    },
-    Shared {
-        file: "compiler/mente-cli/tests/golden/objects-x86_64-linux.txt",
-        records: "the size and digest of each program's object file for x86-64 Linux",
-        why: "it becomes one file a program with the other golden outputs, in a pull request of its own",
-    },
-    Shared {
-        file: "compiler/mente-cli/tests/golden/objects-x86_64-windows.txt",
-        records: "the size and digest of each program's object file for x86-64 Windows",
-        why: "it becomes one file a program with the other golden outputs, in a pull request of its own",
-    },
-    Shared {
         file: "compiler/mente-cli/tests/mutants/equivalent.txt",
         records: "the equivalent mutants of the MIR mutation gate, each with its reason",
         why: "it becomes one file a mutant, its reason in the front matter, in a pull request of its own",
     },
 ];
 
-/// A set of documents that are no records: each file matches one of its patterns, where `*`
-/// stands for any characters of one name and `**` for any number of directories.
+/// A set of Markdown documents that are no records: each file matches one of its patterns, where
+/// `*` stands for any characters of one name and `**` for any number of directories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Documents {
     /// The files of the set, from the repository's root.
@@ -147,38 +130,13 @@ pub struct Documents {
     pub why: &'static str,
 }
 
-/// Every set of documents that are no records. No two sets, kinds or shared files claim one file.
+/// Every set of Markdown documents that are no records. No two sets, kinds or shared files claim
+/// one file.
 pub const DOCUMENTS: &[Documents] = &[
     Documents {
         patterns: &["README.md", "CLAUDE.md", "SECURITY.md"],
         what: "the repository's front pages",
         why: "each is the one page of its subject, read whole",
-    },
-    Documents {
-        patterns: &["LICENSE-APACHE", "LICENSE-MIT", ".github/CODEOWNERS"],
-        what: "the licenses and the code owners",
-        why: "each is the one text of its subject, read whole by people and by GitHub",
-    },
-    Documents {
-        patterns: &[
-            ".config/approved-crates.txt",
-            ".config/ignored-tests.txt",
-            ".github/gate-commands.txt",
-            ".github/instrument-paths.txt",
-            ".github/required-checks.txt",
-        ],
-        what: "the lists the checks are configured by",
-        why: "each is one list, read whole by the test or the script its header names",
-    },
-    Documents {
-        patterns: &["compiler/mente-cli/src/front-matter/*.txt"],
-        what: "the front matter reader's cases, a file a case",
-        why: "they are fixtures of one reader, each named by its key, which `test_front_matter_reads_every_case_of_its_fixtures` holds",
-    },
-    Documents {
-        patterns: &["conformance/core-calculus/stack-budget-programs.txt"],
-        what: "the programs the reviews of the stack budget used",
-        why: "written once from the reviews of one pull request, a fixture its test reads whole",
     },
     Documents {
         patterns: &["spec/*.md"],
@@ -197,6 +155,7 @@ pub const DOCUMENTS: &[Documents] = &[
     },
     Documents {
         patterns: &[
+            ".github/scripts/policy/README.md",
             "benchmark/README.md",
             "compiler/mente-cli/src/front-matter/README.md",
             "conformance/README.md",
@@ -229,32 +188,10 @@ pub const DOCUMENTS: &[Documents] = &[
     },
 ];
 
-/// The extensions of a document, a file written in prose or markup: Markdown, plain text,
-/// reStructuredText, AsciiDoc and Org, each by any of its usual spellings, in any case.
-pub const DOCUMENT_EXTENSIONS: &[&str] = &[
-    "md", "markdown", "mdown", "mkd", "mdx", "txt", "text", "rst", "adoc", "asciidoc", "org",
-];
-
-/// Whether the file `name` is a document: its extension one of [`DOCUMENT_EXTENSIONS`], or no
-/// extension at all, as `LICENSE-MIT` or a record named `0001` has. A name that starts with `.`
-/// (`.gitkeep`, `.gitignore`) is a tool's configuration, none.
-pub fn is_document(name: &str) -> bool {
-    if name.starts_with('.') {
-        return false;
-    }
-    match Path::new(name).extension() {
-        None => true,
-        Some(e) => DOCUMENT_EXTENSIONS
-            .iter()
-            .any(|d| e.eq_ignore_ascii_case(d)),
-    }
-}
-
-/// Every document under `root` ([`is_document`]), its path from there with `/` between names,
-/// that no kind, shared file or set of documents claims, or that more than one claims: each with
-/// what to do. The walk leaves out `.git`, `target`, `node_modules` and every directory that
-/// holds a `.git` of its own, a worktree or another repository. It reads the files on disk, so a
-/// document some tool wrote and git ignores elsewhere is read too.
+/// Every Markdown file under `root`, its path from there with `/` between names, that no kind,
+/// shared file or set of documents claims, or that more than one claims: each with what to do.
+/// The walk leaves out `.git`, `target`, `node_modules` and every directory that holds a `.git`
+/// of its own, a worktree or another repository.
 pub fn undeclared(
     root: &Path,
     kinds: &[Kind],
@@ -263,7 +200,7 @@ pub fn undeclared(
 ) -> Vec<String> {
     let mut files = Vec::new();
     let mut problems = Vec::new();
-    document_files(root, "", &mut files, &mut problems);
+    markdown_files(root, "", &mut files, &mut problems);
     files.sort();
     for file in files {
         let mut claims: Vec<String> = Vec::new();
@@ -285,7 +222,7 @@ pub fn undeclared(
         match claims.len() {
             1 => {}
             0 => problems.push(format!(
-                "{}: a document nothing declares: declare its directory in records.rs as a kind of record, whose files are then named by keys (`KINDS`), or as a set of documents with why they are none (`DOCUMENTS`)",
+                "{}: a Markdown file nothing declares: declare its directory in records.rs as a kind of record, whose files are then named by keys (`KINDS`), or as a set of documents with why they are none (`DOCUMENTS`)",
                 file
             )),
             _ => problems.push(format!(
@@ -298,9 +235,9 @@ pub fn undeclared(
     problems
 }
 
-/// The documents under `dir`, whose path from the root starts with `prefix`, into `out`, and
+/// The Markdown files under `dir`, whose path from the root starts with `prefix`, into `out`, and
 /// each directory that cannot be read into `problems`.
-fn document_files(dir: &Path, prefix: &str, out: &mut Vec<String>, problems: &mut Vec<String>) {
+fn markdown_files(dir: &Path, prefix: &str, out: &mut Vec<String>, problems: &mut Vec<String>) {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -318,9 +255,12 @@ fn document_files(dir: &Path, prefix: &str, out: &mut Vec<String>, problems: &mu
             let skipped = matches!(name.as_str(), ".git" | "target" | "node_modules")
                 || path.join(".git").exists();
             if !skipped {
-                document_files(&path, &format!("{}{}/", prefix, name), out, problems);
+                markdown_files(&path, &format!("{}{}/", prefix, name), out, problems);
             }
-        } else if is_document(&name) {
+        } else if Path::new(&name)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("md"))
+        {
             out.push(format!("{}{}", prefix, name));
         }
     }

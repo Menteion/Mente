@@ -18,7 +18,7 @@
 # path that the record already holds. Against that, on Linux, that code runs in a sandbox, where it
 # can write none of these (.github/scripts/test-sandbox.sh); on Windows the guard is still the
 # review of the change (docs/design-review.md, untrusted-test-isolation).
-# The workflow policy (.github/scripts/policy.test.mjs) pins this script and the steps that run
+# The workflow policy (.github/scripts/policy/) pins this script and the steps that run
 # it, and runs it against a changed tool.
 set -euo pipefail
 posix() { if [ -x /usr/bin/cygpath ]; then /usr/bin/cygpath -u "$1"; else printf '%s\n' "$1"; fi; }
