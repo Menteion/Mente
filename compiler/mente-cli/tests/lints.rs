@@ -1631,13 +1631,6 @@ const ALLOWED: &[(&str, &str, &str, &str, &str)] = &[
     ),
     (
         "mente-sema/src/tier1.rs",
-        "rem",
-        "let-else",
-        "let Site::Value(var) = self.sites[e.0 as usize]",
-        "a remainder without a variable of its own is its interval, which is sound",
-    ),
-    (
-        "mente-sema/src/tier1.rs",
         "rest",
         "let-else",
         "let Ty::Struct(s) = Ty::of(ct, p.ty)",
