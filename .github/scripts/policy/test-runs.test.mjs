@@ -337,32 +337,22 @@ const stopOfTimeout = (value) => {
   return Number(m[1]) * Number(m[2]);
 };
 
-check("every test is held well within its stop on every runner, in the run's own seconds", () => {
-  // The report nextest writes is the one the check reads, and the stops are nextest's own.
+check("every test's share of its stop is reported on every runner, and only a broken report fails", () => {
+  // The report nextest writes is the one the step reads, and the stops are nextest's own.
   const junitPath = /"([^"]*)"/.exec(NEXTEST_VALUES.get("profile.ci.junit/path"))[1];
   assert.equal(times.REPORT, `target/nextest/ci/${junitPath}`, "lib/test-times.mjs reads another report than the ci profile's");
   assert.equal(times.DEFAULT_STOP, stopOfTimeout(NEXTEST_VALUES.get("profile.default/slow-timeout")), "the default stop is not nextest's");
   assert.equal(times.LONGER_STOP, stopOfTimeout(NEXTEST_VALUES.get("profile.default.overrides/slow-timeout")), "the longer stop is not nextest's");
   assert.deepEqual([...times.longerTests(read(".config/nextest.toml"))].sort(), SLOW_TESTS.map(([p, n]) => `${p} ${n}`).sort(), "lib/test-times.mjs gives the longer stop to other tests than SLOW_TESTS");
-  // Within HEADROOM on the faster of two machines about twice apart, a test stays under its stop on
-  // the slower, and STALE lies below HEADROOM, so that an acceptance does not lapse and return.
-  assert.ok(times.HEADROOM * 2 < 1, "HEADROOM leaves a machine twice as slow no room under the stop");
-  assert.ok(times.STALE < times.HEADROOM, "an acceptance lapses at a share it is needed at");
-  // The Rust jobs judge the report right after their tests, with their runner alone, and hold no
-  // permission past the workflow's.
-  const ci = workflows().find((w) => w.file === "ci.yml");
-  const rust = ci.doc.jobs.rust;
+  // The Rust jobs report right after their tests, with their runner alone, on every runner of the
+  // matrix, and nothing on the step forgives its failure.
+  const rust = workflows().find((w) => w.file === "ci.yml").doc.jobs.rust;
   const all = steps(rust);
-  const judgeStep = all[all.findIndex((s) => s.run === NEXTEST_STEP) + 1];
-  assert.equal(judgeStep?.run, "node .github/scripts/test-times.mjs\n/usr/bin/bash .github/scripts/tools.sh verify\n", "the step right after the Rust jobs' tests does not judge their times as test-times.mjs does");
-  assert.deepEqual(judgeStep.env, { TEST_TIMES_RUNNER: "${{ matrix.os }}" }, "the step that judges the times has another environment than its runner");
-  assert.deepEqual(Object.keys(judgeStep).sort(), ["env", "name", "run"], "the step that judges the times carries more than its name, environment and script");
-  assert.equal(rust.permissions, undefined, "the Rust jobs hold permissions of their own");
-  const runners = rust.strategy.matrix.include.map((m) => m.os).sort();
-  assert.deepEqual([...times.RUNNERS].sort(), runners, "lib/test-times.mjs knows other runners than the Rust jobs run on");
-  // The acceptances of the repository read, each naming its owner and its fix.
-  const acceptances = times.acceptedShares(read(times.ACCEPTANCES));
-  assert.ok(acceptances.every((a) => runners.includes(a.runner)));
+  const reportStep = all[all.findIndex((s) => s.run === NEXTEST_STEP) + 1];
+  assert.equal(reportStep?.run, "node .github/scripts/test-times.mjs\n/usr/bin/bash .github/scripts/tools.sh verify\n", "the step right after the Rust jobs' tests does not report their times as test-times.mjs does");
+  assert.deepEqual(reportStep.env, { TEST_TIMES_RUNNER: "${{ matrix.os }}" }, "the step that reports the times has another environment than its runner");
+  assert.deepEqual(Object.keys(reportStep).sort(), ["env", "name", "run"], "the step that reports the times carries more than its name, environment and script");
+  assert.equal(rust["continue-on-error"], undefined, "the Rust jobs forgive a failed step");
 
   // The report as nextest writes it: a failed, errored or skipped test has no time of its own, and
   // the count read is the count stated.
@@ -371,70 +361,64 @@ check("every test is held well within its stop on every runner, in the run's own
   assert.throws(() => times.junitTimes(xml.replace('tests="5"', 'tests="6"')), /states 4 tests that passed, and 3 were read/);
   assert.throws(() => times.junitTimes('<testsuites tests="0"></testsuites>'), /states 0/);
   assert.throws(() => times.junitTimes('<testsuite><testcase name="t" time="1"/></testsuite>'), /binary, name and time/);
-  // The acceptances' form: a runner, the test, a share past HEADROOM and under 1, the owner and the
-  // fix.
-  assert.deepEqual(times.acceptedShares("ubuntu-24.04 mente-cli::reproducible test_mir_is_reproducible 0.9  # someone: a fix\n").map((a) => [a.runner, a.id, a.share]), [["ubuntu-24.04", "mente-cli::reproducible test_mir_is_reproducible", 0.9]]);
-  for (const bad of ["ubuntu-24.04 a b 0.9\n", "ubuntu-24.04 a b 0.9  # no owner named\n", "ubuntu-24.04 a b 0.4  # o: f\n", "ubuntu-24.04 a b 1  # o: f\n", "macos-15 a b 0.9  # o: f\n", "ubuntu-24.04 a 0.9  # o: f\n"]) {
-    assert.throws(() => times.acceptedShares(bad), /near-limit-tests\.txt:1/, bad);
-  }
   // The stops: a test the longer group names is held to 180 s, any other to 40.
   const longer = new Set(["mente-cli mir_run::coverage::slow"]);
   assert.equal(times.stopOf("mente-cli::bin/mn mir_run::coverage::slow", longer), times.LONGER_STOP);
   assert.equal(times.stopOf("mente-cli::reproducible slow", longer), times.DEFAULT_STOP);
 
-  // Planted: past HEADROOM of its stop a test fails, in the run's own seconds, unless accepted on
-  // its runner; an acceptance lapses only under STALE, and one naming a test the run lacks names
-  // nothing.
-  const run = (secs) => new Map([["mente-cli::reproducible t", secs], ["mente-cli::bin/mn mir_run::coverage::slow", 80]]);
-  const failedOf = (v) => v.failed.map((r) => r.id);
-  assert.deepEqual(failedOf(times.judge(run(17.9), longer, [], "windows-2025")), [], "a test at 45% of its stop fails");
-  assert.deepEqual(failedOf(times.judge(run(18.1), longer, [], "windows-2025")), ["mente-cli::reproducible t"], "a test past 45% of its stop passes");
-  assert.deepEqual(failedOf(times.judge(new Map([["mente-cli::bin/mn mir_run::coverage::slow", 82]]), longer, [], "ubuntu-24.04")), ["mente-cli::bin/mn mir_run::coverage::slow"], "a test of the longer group past 45% of 180 s passes");
-  const near = [{ runner: "windows-2025", id: "mente-cli::reproducible t", share: 0.9, why: "o: f", line: 1 }];
-  assert.deepEqual(failedOf(times.judge(run(30), longer, near, "windows-2025")), [], "a test accepted near its limit fails");
-  assert.deepEqual(failedOf(times.judge(run(37), longer, near, "windows-2025")), ["mente-cli::reproducible t"], "a test past its accepted share passes");
-  assert.deepEqual(failedOf(times.judge(run(30), longer, near, "ubuntu-24.04")), ["mente-cli::reproducible t"], "another runner's acceptance holds here");
-  assert.equal(times.judge(run(11.9), longer, near, "windows-2025").stale.length, 1, "an acceptance of a test under 30% of its stop is not stale");
-  assert.equal(times.judge(run(12.1), longer, near, "windows-2025").stale.length, 0, "an acceptance of a test past 30% of its stop lapses");
-  assert.equal(times.judge(new Map([["mente-cli::reproducible other", 1]]), longer, near, "windows-2025").missing.length, 1, "an acceptance of a test the run lacks is not missing");
+  // Planted: a notice past NOTICE of a test's stop, none at it, the longer group by its own stop,
+  // highest first, and the message escaped as GitHub reads a workflow command.
+  const noticed = (current) => times.report("windows-2025", times.shares(new Map(Object.entries(current)), longer)).lines.filter((l) => l.startsWith("::notice "));
+  assert.deepEqual(noticed({ "mente-cli::reproducible t": 18 }), [], "a test at 45% of its stop draws a notice");
+  assert.deepEqual(noticed({ "mente-cli::reproducible t": 18.1 }), ["::notice title=A test near its stop::mente-cli::reproducible t took 18.1 s on windows-2025, 45%25 of its stop of 40 s"], "a test past 45% of its stop draws no notice, or one GitHub misreads");
+  assert.deepEqual(noticed({ "mente-cli::bin/mn mir_run::coverage::slow": 80 }), [], "a test of the longer group is held to the default stop");
+  assert.equal(noticed({ "mente-cli::bin/mn mir_run::coverage::slow": 82 }).length, 1, "a test of the longer group past 45% of 180 s draws no notice");
+  assert.deepEqual(times.shares(new Map([["b t", 2], ["a t", 30], ["c t", 2]]), longer).map((r) => r.id), ["a t", "b t", "c t"]);
+  assert.equal(times.commandData("50%\r\n"), "50%25%0D%0A");
+  // The summary lists LISTED tests at least, and every test past NOTICE.
+  const many = (n, secs) => new Map(Array.from({ length: n }, (_, k) => [`mente-sema t${k}`, secs]));
+  const rowsOf = (current) => times.report("ubuntu-24.04", times.shares(current, longer)).summary.split("\n").filter((l) => l.startsWith("| `")).length;
+  assert.equal(rowsOf(many(40, 1)), times.LISTED);
+  assert.equal(rowsOf(many(40, 30)), 40);
 
   // Pull request 183 against main before it, from the Rust jobs' logs: its merge-queue run
   // (44993192856) took 36.3 s for the diagnostics test on Windows and 37.0 s on AArch64, 91 and 92%
-  // of the stop, where main at fe887e5 took 11.5 and 5.3 s. It fails on both, with no baseline
-  // needed; main before it passes.
-  const nextestLonger = times.longerTests(read(".config/nextest.toml"));
+  // of the stop, where main at fe887e5 took 11.5 and 5.3 s. The report shows it on both runners and
+  // nothing before it, and fails neither.
   const diagnostics = "mente-cli::reproducible test_diagnostics_are_reproducible";
-  for (const [runner, before, after] of [["windows-2025", 11.501, 36.254], ["ubuntu-24.04-arm", 5.343, 36.966]]) {
-    assert.deepEqual(failedOf(times.judge(new Map([[diagnostics, before]]), nextestLonger, [], runner)), [], `main before 183 fails on ${runner}`);
-    assert.deepEqual(failedOf(times.judge(new Map([[diagnostics, after]]), nextestLonger, [], runner)), [diagnostics], `183 passes on ${runner}`);
-  }
-
-  // The whole check over files of its own: a stale or missing acceptance fails a pull request and
-  // the queue, and is reported on main; an unknown runner and an argument are refused.
-  const fake = (current, acceptances) => {
+  const fake = (xml) => {
     const out = [];
     const err = [];
+    const summary = [];
     const io = {
-      read: (f) => (f === times.REPORT ? junitOf(current) : f === times.ACCEPTANCES ? acceptances : read(f)),
-      exists: (f) => f === times.ACCEPTANCES,
+      read: (f) => {
+        if (f !== times.REPORT) return read(f);
+        if (xml === undefined) throw new Error(`ENOENT: no such file, open '${f}'`);
+        return xml;
+      },
       out: (s) => out.push(s),
       err: (s) => err.push(s),
-      summary: () => {},
+      summary: (s) => summary.push(s),
     };
-    return { io, out, err };
+    return { io, out, err, summary };
   };
-  const verdict = (runner, current, acceptances = "", event = "pull_request") => {
-    const f = fake(current, acceptances);
-    return { code: times.main([], { TEST_TIMES_RUNNER: runner, GITHUB_EVENT_NAME: event }, f.io), out: f.out.join("\n"), err: f.err.join("\n") };
+  const run = (runner, xml, args = []) => {
+    const f = fake(xml);
+    return { code: times.main(args, { TEST_TIMES_RUNNER: runner }, f.io), out: f.out.join("\n"), err: f.err.join("\n"), summary: f.summary.join("") };
   };
-  const line = `windows-2025 ${diagnostics} 0.95  # someone: a fix\n`;
-  assert.equal(verdict("windows-2025", { [diagnostics]: 36.254 }).code, 1, "183's time passes the whole check");
-  assert.equal(verdict("windows-2025", { [diagnostics]: 36.254 }, line).code, 0, "183's time accepted near its limit fails");
-  const lapsed = verdict("windows-2025", { [diagnostics]: 11.501 }, line);
-  assert.equal(lapsed.code, 1, "a lapsed acceptance passes a pull request");
-  assert.match(lapsed.err, /no longer needed: remove the line/);
-  assert.equal(verdict("windows-2025", { [diagnostics]: 11.501 }, line, "push").code, 0, "a lapsed acceptance fails main");
-  assert.equal(verdict("windows-2025", { "mente-cli::reproducible renamed": 20 }, line).code, 1, "an acceptance of a test the run lacks passes a pull request");
-  assert.equal(verdict("macos-15", { [diagnostics]: 1 }).code, 1, "a runner the check does not know passes");
-  assert.equal(times.main(["extra"], { TEST_TIMES_RUNNER: "windows-2025" }, fake({ [diagnostics]: 1 }, "").io), 2, "an argument passes");
+  for (const [runner, before, after] of [["windows-2025", 11.501, 36.254], ["ubuntu-24.04-arm", 5.343, 36.966]]) {
+    const was = run(runner, junitOf({ [diagnostics]: before, "mente-sema t": 1 }));
+    assert.equal(was.code, 0);
+    assert.doesNotMatch(was.out, /::notice /, `main before 183 draws a notice on ${runner}`);
+    const is = run(runner, junitOf({ [diagnostics]: after, "mente-sema t": 1 }));
+    assert.equal(is.code, 0, `183's time fails the job on ${runner}: the times are a report`);
+    assert.match(is.out, new RegExp(`::notice title=A test near its stop::${diagnostics} took 3\\d\\.\\d s on ${runner}, 9\\d%25 of its stop of 40 s`), `183 draws no notice on ${runner}`);
+    assert.match(is.summary, new RegExp(`\\| \`${diagnostics}\` \\| 3\\d\\.\\d \\| 40 \\| \\*\\*9\\d%\\*\\* \\|`), `183's share is not in the summary on ${runner}`);
+  }
+  // Only a broken report fails: one missing, one whose count is not the count read, or an argument.
+  const missing = run("ubuntu-24.04", undefined);
+  assert.equal(missing.code, 1, "a missing report passes");
+  assert.match(missing.err, /^::error title=No report of the tests' times::target\/nextest\/ci\/junit\.xml could not be read in full: ENOENT/);
+  assert.equal(run("ubuntu-24.04", junitOf({ "mente-sema t": 1 }, 2)).code, 1, "a report whose count is not the count read passes");
+  assert.equal(run("ubuntu-24.04", junitOf({ "mente-sema t": 1 }), ["extra"]).code, 2, "an argument passes");
 });

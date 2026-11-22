@@ -72,8 +72,8 @@ all-cores = { max-threads = 1 }
 fail-fast = false
 
 [profile.ci.junit]
-# Each test's time, in target/nextest/ci/junit.xml, which the Rust jobs upload and judge against
-# main's own green runs on the same runner (.github/scripts/lib/test-times.mjs).
+# Each test's time, in target/nextest/ci/junit.xml, which the Rust jobs report as each test's share
+# of its stop, in the job's summary (.github/scripts/lib/test-times.mjs).
 path = "junit.xml"
 
 [profile.mutants]
