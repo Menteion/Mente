@@ -733,16 +733,28 @@ fn conformance_programs() -> Vec<(String, String)> {
 /// functions; the seed of each program's arguments is the length of its name and text, so that
 /// a run is the same everywhere.
 /// The parts the conformance suite's test is split into, so that none holds most of its time
-/// limit (`.config/nextest.toml`): each part takes the programs whose index in the sorted list
-/// leaves its number when divided by them, which spreads every directory across the parts.
-const PARTS: usize = 4;
+/// limit (`.config/nextest.toml`). The last takes the programs whose values reach the 4 GiB a
+/// value may hold ([`wide`]): MIR and native code copy their arguments whole, so each costs as
+/// much as many others together, and side by side they cost one of them. Each other part takes
+/// the rest whose index in the sorted list leaves its number when divided by their count, which
+/// spreads every directory across them.
+const PARTS: usize = 5;
+
+/// Whether a conformance program is one of the values within 4 GiB, by its name.
+fn wide(name: &str) -> bool {
+    name.ends_with("_within_4_gib.mn")
+}
 
 /// Part `k` of `PARTS` of the conformance programs that must pass.
 fn conformance_part(k: usize) -> Vec<(String, String)> {
-    conformance_programs()
-        .into_iter()
+    let all = conformance_programs();
+    if k + 1 == PARTS {
+        return all.into_iter().filter(|(name, _)| wide(name)).collect();
+    }
+    all.into_iter()
+        .filter(|(name, _)| !wide(name))
         .enumerate()
-        .filter(|(i, _)| i % PARTS == k)
+        .filter(|(i, _)| i % (PARTS - 1) == k)
         .map(|(_, p)| p)
         .collect()
 }
@@ -1114,34 +1126,43 @@ mod tests {
 
     /// Every conformance program that must pass of part `k`, with generated arguments for its
     /// public functions, prints the same on the four paths, and the reference interpreter's
-    /// runs lie within Tier 1's states (`containment`).
-    fn conformance_part_agrees(k: usize) {
+    /// runs lie within Tier 1's states (`containment`): the oracle saw values, and points too
+    /// where `points`, a part whose programs have statements.
+    fn conformance_part_agrees(k: usize, calls: u64, points: bool) {
         let report = run_programs(conformance_part(k), FEW, true);
         println!("{}", report.summary());
         assert!(report.failures.is_empty(), "{}", report.failures());
         assert!(report.rejected.is_empty(), "{}", report.summary());
-        assert!(report.calls >= 25, "{}", report.summary());
-        assert!(report.contained.0 > 0, "{}", report.summary());
+        assert!(report.calls >= calls, "{}", report.summary());
+        assert!(report.contained.1 > 0, "{}", report.summary());
+        assert!(!points || report.contained.0 > 0, "{}", report.summary());
     }
 
     #[test]
-    fn test_three_paths_agree_on_the_conformance_suite_part_1_of_4() {
-        conformance_part_agrees(0);
+    fn test_three_paths_agree_on_the_conformance_suite_part_1_of_5() {
+        conformance_part_agrees(0, 25, true);
     }
 
     #[test]
-    fn test_three_paths_agree_on_the_conformance_suite_part_2_of_4() {
-        conformance_part_agrees(1);
+    fn test_three_paths_agree_on_the_conformance_suite_part_2_of_5() {
+        conformance_part_agrees(1, 25, true);
     }
 
     #[test]
-    fn test_three_paths_agree_on_the_conformance_suite_part_3_of_4() {
-        conformance_part_agrees(2);
+    fn test_three_paths_agree_on_the_conformance_suite_part_3_of_5() {
+        conformance_part_agrees(2, 25, true);
     }
 
     #[test]
-    fn test_three_paths_agree_on_the_conformance_suite_part_4_of_4() {
-        conformance_part_agrees(3);
+    fn test_three_paths_agree_on_the_conformance_suite_part_4_of_5() {
+        conformance_part_agrees(3, 25, true);
+    }
+
+    /// The values within 4 GiB, side by side; their functions are expressions, with no
+    /// statement.
+    #[test]
+    fn test_three_paths_agree_on_the_conformance_suite_part_5_of_5() {
+        conformance_part_agrees(4, 3, false);
     }
 
     /// The parts hold every conformance program that must pass, each once: a program in no part
@@ -1158,7 +1179,16 @@ mod tests {
             .collect();
         assert!(!all.is_empty());
         assert_eq!(parts, all);
-        assert_eq!(PARTS, 4, "the tests above name four parts");
+        assert_eq!(PARTS, 5, "the tests above name five parts");
+        // The last part holds every value within 4 GiB, and none of the others does.
+        let last = conformance_part(PARTS - 1);
+        assert!(!last.is_empty() && last.iter().all(|(name, _)| wide(name)));
+        assert_eq!(
+            last.len(),
+            all.iter().filter(|name| wide(name)).count(),
+            "{:?}",
+            last
+        );
     }
 
     /// The tracer only observes: the reference interpreter's traced run, whose outcome the other

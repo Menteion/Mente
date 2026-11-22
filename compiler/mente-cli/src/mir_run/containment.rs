@@ -45,6 +45,82 @@ struct Record {
     bounds: Vec<(usize, Option<Exact>, Option<Exact>)>,
     /// `a + b <= c`, each term a position and whether it is negated.
     relations: Vec<(Term, Term, i128)>,
+    /// The same constraints as `i128`s, for the check every event runs, `None` for no bound;
+    /// none when a bound does not fit one.
+    fast: Option<Fast>,
+}
+
+/// A record's constraints as `i128`s.
+#[derive(Clone, Debug, Default)]
+struct Fast {
+    bounds: Vec<(usize, i128, i128)>,
+    relations: Vec<(Term, Term, i128)>,
+}
+
+impl Fast {
+    fn of(r: &Record) -> Option<Fast> {
+        let bounds = r
+            .bounds
+            .iter()
+            .map(|&(k, lo, hi)| {
+                let lo = lo.map_or(Some(i128::MIN), Exact::to_i128)?;
+                let hi = hi.map_or(Some(i128::MAX), Exact::to_i128)?;
+                Some((k, lo, hi))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Fast {
+            bounds,
+            relations: r.relations.clone(),
+        })
+    }
+
+    /// Whether the values `nums` satisfy every constraint, `None` where one is past an `i128`,
+    /// which [`judge`] then decides exactly.
+    fn holds(&self, nums: &[Num]) -> Option<bool> {
+        for &(k, lo, hi) in &self.bounds {
+            match nums[k] {
+                Num::Missing => {}
+                Num::Wide => return None,
+                Num::Fits(x) => {
+                    if x < lo || x > hi {
+                        return Some(false);
+                    }
+                }
+            }
+        }
+        for &((a, na), (b, nb), c) in &self.relations {
+            let (x, y) = match (nums[a], nums[b]) {
+                (Num::Fits(x), Num::Fits(y)) => (x, y),
+                (Num::Missing, _) | (_, Num::Missing) => continue,
+                (Num::Wide, _) | (_, Num::Wide) => return None,
+            };
+            let x = if na { x.checked_neg()? } else { x };
+            let y = if nb { y.checked_neg()? } else { y };
+            if x.checked_add(y)? > c {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+}
+
+/// A value of a variable, as the fast check reads it.
+#[derive(Clone, Copy, Debug)]
+enum Num {
+    /// The interpreter holds none: its binding is not bound, or not an integer there.
+    Missing,
+    Fits(i128),
+    /// Past an `i128`: the exact check reads it.
+    Wide,
+}
+
+/// `x` as an `i128`, when it fits one.
+fn num(x: Int) -> Option<i128> {
+    if x.is_negative() {
+        0i128.checked_sub_unsigned(x.magnitude())
+    } else {
+        i128::try_from(x.magnitude()).ok()
+    }
 }
 
 /// What Tier 1 claimed at one point: the tracked variables in scope there, each with its binding,
@@ -53,6 +129,9 @@ struct Record {
 struct AtPoint {
     vars: Vec<(usize, Vec<String>, usize)>,
     records: Vec<Record>,
+    /// Whether some state recorded here bounds nothing and relates nothing, so that no value
+    /// breaks it: such a point is checked by its lookup alone.
+    free: bool,
 }
 
 impl AtPoint {
@@ -70,13 +149,31 @@ impl AtPoint {
 /// A value Tier 1 claimed for an expression: whether its state was empty, and its bounds.
 type Claimed = (bool, Option<Exact>, Option<Exact>);
 
+/// What Tier 1 claimed of an expression's values, reduced to what a value can break.
+#[derive(Clone, Debug, Default)]
+enum ValueClaim {
+    /// No record: no claim.
+    #[default]
+    Unclaimed,
+    /// Some record bounds nothing: no value breaks it.
+    Free,
+    /// Every record is of an empty state: any value given breaks it.
+    Empty,
+    /// The bounds of each record of a state that is not empty, and the same as `i128`s, when
+    /// they fit, for the check every event runs.
+    Within(
+        Vec<(Option<Exact>, Option<Exact>)>,
+        Option<Vec<(i128, i128)>>,
+    ),
+}
+
 /// What Tier 1 claimed of one function, laid out by the indexes of its tree.
 #[derive(Clone, Debug, Default)]
 struct Claims {
     before: Vec<AtPoint>,
     end: Vec<AtPoint>,
     head: Vec<AtPoint>,
-    values: Vec<Vec<Claimed>>,
+    values: Vec<ValueClaim>,
     /// The statements and blocks inside a clause Tier 1 never walks (`States::unwalked`),
     /// where no state is no claim.
     quiet_stmts: Vec<bool>,
@@ -89,7 +186,7 @@ impl Claims {
             before: vec![AtPoint::default(); tree.stmts.len()],
             end: vec![AtPoint::default(); tree.blocks.len()],
             head: vec![AtPoint::default(); tree.stmts.len()],
-            values: vec![Vec::new(); tree.exprs.len()],
+            values: vec![ValueClaim::Unclaimed; tree.exprs.len()],
             quiet_stmts: vec![false; tree.stmts.len()],
             quiet_blocks: vec![false; tree.blocks.len()],
         };
@@ -128,10 +225,50 @@ impl Claims {
             }
             at.records.push(r);
         }
+        let mut values: Vec<Vec<Claimed>> = vec![Vec::new(); tree.exprs.len()];
         for v in states.values {
-            if let Some(list) = c.values.get_mut(v.expr.0 as usize) {
+            if let Some(list) = values.get_mut(v.expr.0 as usize) {
                 list.push((v.empty, v.lo, v.hi));
             }
+        }
+        for (claim, records) in c.values.iter_mut().zip(values) {
+            let live: Vec<(Option<Exact>, Option<Exact>)> = records
+                .iter()
+                .filter(|(empty, _, _)| !*empty)
+                .map(|(_, lo, hi)| (*lo, *hi))
+                .collect();
+            *claim = if records.is_empty() {
+                ValueClaim::Unclaimed
+            } else if live.is_empty() {
+                ValueClaim::Empty
+            } else if live.iter().any(|(lo, hi)| lo.is_none() && hi.is_none()) {
+                ValueClaim::Free
+            } else {
+                let fast = live
+                    .iter()
+                    .map(|&(lo, hi)| {
+                        Some((
+                            lo.map_or(Some(i128::MIN), Exact::to_i128)?,
+                            hi.map_or(Some(i128::MAX), Exact::to_i128)?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>();
+                ValueClaim::Within(live, fast)
+            };
+        }
+        for at in c.before.iter_mut().chain(&mut c.end).chain(&mut c.head) {
+            for r in &mut at.records {
+                r.fast = Fast::of(r);
+            }
+        }
+        for at in c.before.iter_mut().chain(&mut c.end).chain(&mut c.head) {
+            at.free = at.records.iter().any(|r| {
+                !r.empty
+                    && r.relations.is_empty()
+                    && r.bounds
+                        .iter()
+                        .all(|(_, lo, hi)| lo.is_none() && hi.is_none())
+            });
         }
         c
     }
@@ -226,6 +363,26 @@ fn first_outside(v: &Value, fits: &dyn Fn(Exact) -> bool) -> Option<Exact> {
     }
 }
 
+/// Whether every integer of `v` lies within one of `live`, `None` where one is past an
+/// `i128`: the check every value runs, which the exact one decides past it.
+fn all_within(v: &Value, live: &[(i128, i128)]) -> Option<bool> {
+    match v {
+        Value::Int(x) => {
+            let n = num(*x)?;
+            Some(live.iter().any(|&(lo, hi)| lo <= n && n <= hi))
+        }
+        Value::Array(items) => {
+            for i in items {
+                if !all_within(i, live)? {
+                    return Some(false);
+                }
+            }
+            Some(true)
+        }
+        Value::Bool(_) | Value::Struct(..) | Value::Enum(..) | Value::Unit => Some(true),
+    }
+}
+
 /// Which records of a point a valuation breaks, and how: `None` when one holds it.
 enum Verdict {
     Holds,
@@ -277,8 +434,10 @@ struct Watch<'a> {
     claims: &'a [Option<Claims>],
     call: usize,
     seen: HashSet<(usize, String)>,
-    /// The values of a point's variables, reused from event to event.
+    /// The values of a point's variables, reused from event to event, exactly and for the fast
+    /// check.
     values: Vec<Option<Exact>>,
+    nums: Vec<Num>,
     out: Outcome,
 }
 
@@ -291,6 +450,7 @@ impl<'a> Watch<'a> {
             call: 0,
             seen: HashSet::new(),
             values: Vec::new(),
+            nums: Vec::new(),
             out: Outcome::default(),
         }
     }
@@ -362,6 +522,7 @@ impl<'a> Watch<'a> {
             return;
         }
         let at = match claims.at(p) {
+            Some(at) if at.free => return,
             Some(at) if !at.records.is_empty() => at,
             _ => {
                 let place = self.place(function, p);
@@ -375,7 +536,38 @@ impl<'a> Watch<'a> {
                 return;
             }
         };
-        // The interpreter's value of each tracked variable in scope, where it has one.
+        // The interpreter's value of each tracked variable in scope, where it has one; a state
+        // the fast check finds holding settles the point.
+        let mut nums = std::mem::take(&mut self.nums);
+        nums.clear();
+        // Plain loops and matches: this runs at every point of every run, in the unit tests'
+        // build without optimisation too, where each adaptor and closure is a call.
+        for (binding, path, _) in &at.vars {
+            let held = match slots.get(*binding) {
+                Some(Some(v)) => at_path(v, path),
+                Some(None) | None => None,
+            };
+            nums.push(match held {
+                None => Num::Missing,
+                Some(x) => match num(x) {
+                    Some(n) => Num::Fits(n),
+                    None => Num::Wide,
+                },
+            });
+        }
+        let mut held = false;
+        for r in &at.records {
+            if let (false, Some(f)) = (r.empty, &r.fast) {
+                if f.holds(&nums) == Some(true) {
+                    held = true;
+                    break;
+                }
+            }
+        }
+        self.nums = nums;
+        if held {
+            return;
+        }
         let mut values = std::mem::take(&mut self.values);
         values.clear();
         values.extend(at.vars.iter().map(|(binding, path, _)| {
@@ -453,33 +645,33 @@ impl<'a> Watch<'a> {
         let Some(Some(claims)) = claims.get(function) else {
             return;
         };
-        let records = match claims.values.get(expr.0 as usize) {
-            Some(r) if !r.is_empty() => r,
-            _ => return,
+        let live = match claims.values.get(expr.0 as usize) {
+            None | Some(ValueClaim::Unclaimed | ValueClaim::Free) => return,
+            Some(ValueClaim::Empty) => None,
+            Some(ValueClaim::Within(live, fast)) => {
+                if fast.as_ref().and_then(|f| all_within(v, f)) == Some(true) {
+                    return;
+                }
+                Some(live)
+            }
         };
-        let live = |x: Exact| {
-            records
-                .iter()
-                .any(|(empty, lo, hi)| !*empty && within(x, *lo, *hi))
+        let outside = match live {
+            None => None,
+            Some(live) => {
+                match first_outside(v, &|x| live.iter().any(|(lo, hi)| within(x, *lo, *hi))) {
+                    None => return,
+                    Some(x) => Some((x, live)),
+                }
+            }
         };
-        let all_empty = records.iter().all(|(empty, _, _)| *empty);
-        let outside = if all_empty {
-            None
-        } else {
-            first_outside(v, &live)
-        };
-        if !all_empty && outside.is_none() {
-            return;
-        }
         let at = self.expr_place(function, expr);
         let detail = match outside {
             None => "Tier 1 evaluated it in an empty state, yet the reference interpreter gives it"
                 .to_string(),
-            Some(x) => {
-                let claimed: Vec<String> = records
+            Some((x, live)) => {
+                let claimed: Vec<String> = live
                     .iter()
-                    .filter(|(empty, _, _)| !*empty)
-                    .map(|(_, lo, hi)| format!("[{}, {}]", show_bound(*lo), show_bound(*hi)))
+                    .map(|(lo, hi)| format!("[{}, {}]", show_bound(*lo), show_bound(*hi)))
                     .collect();
                 format!(
                     "the reference interpreter gives {}, outside Tier 1's {}",
