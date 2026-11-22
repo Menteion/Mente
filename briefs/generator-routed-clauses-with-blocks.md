@@ -19,10 +19,10 @@ The containment oracle ([`tier1-containment`](../docs/design-review.md#tier1-con
 
 ## Invariants
 
-- [ ] Every generated program still passes every check, Tier 1 included: the generator's self-test over its seeds holds.
-- [ ] `node tools/quick.mjs` passes before the push.
+- [x] Every generated program still passes every check, Tier 1 included: the generator's self-test over its seeds holds.
+- [x] `node tools/quick.mjs` passes before the push.
 
 ## Acceptance Criteria
 
-- [ ] `test_generated_programs_reach_every_construct_of_the_grammar` counts a routed `ensures`, `requires`, invariant and measure holding an `if` and a block-armed `match`, and fails, seen to, when the generator writes none.
-- [ ] The oracle, run on the seeds that hold one, reports nothing.
+- [x] `test_generated_programs_reach_every_construct_of_the_grammar` counts a routed `ensures`, `requires`, invariant and measure holding an `if` and a block-armed `match`, and fails, seen to, when the generator writes none.
+- [x] The oracle, run on the seeds that hold one, reports nothing.

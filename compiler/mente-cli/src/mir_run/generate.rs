@@ -1133,6 +1133,24 @@ struct Param {
     refine: Option<Refine>,
 }
 
+impl Param {
+    /// The range its refinement gives it when both bounds are literals.
+    fn literal_range(&self) -> Option<R> {
+        let r = self.refine.as_ref()?;
+        match (&r.lo, &r.hi) {
+            (Bnd::Lit(lo), Bnd::Lit(hi)) => Some(R {
+                lo: *lo,
+                hi: if r.inclusive {
+                    *hi
+                } else {
+                    hi.sub(Num::small(1))?
+                },
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// A `requires` clause over parameters: `a op c`, `a op b`, `a + b <= c` or `a < b.len`.
 #[derive(Clone, Debug)]
 enum Req {
@@ -1300,6 +1318,10 @@ struct Gen {
     helpers: Vec<String>,
     /// The bindings those conjuncts declare so far, which name each.
     helper_bindings: usize,
+    /// Whether the function being generated routes its clauses outside the Tier-1 fragment, by
+    /// `@checked` or `@prove`, so that its loops may write such an invariant and measure
+    /// ([`Gen::holding`], [`Gen::measure`]).
+    routed: bool,
 }
 
 impl Gen {
@@ -1335,6 +1357,7 @@ impl Gen {
             no_candidates: Rng::new(seed),
             helpers: Vec::new(),
             helper_bindings: 0,
+            routed: false,
         }
     }
 
@@ -5053,8 +5076,21 @@ impl Gen {
                     format!("invariant {} <= {}", c.marked(), bound)
                 });
             }
-            if self.rng.chance(60) {
-                clauses.push(if up {
+            // In a routed function, now and then an invariant outside the fragment, which every
+            // round's head holds, and always a measure, most often one that holds an `if` or a
+            // `match` with a block arm.
+            if self.routed && self.rng.chance(50) {
+                let rounds = R {
+                    lo: Num::ZERO,
+                    hi: Num::new(false, u128::from(bound)),
+                };
+                let holding = self.holding(&c.marked(), rounds);
+                clauses.push(format!("invariant {}", holding));
+            }
+            if self.rng.chance(60) || self.routed {
+                clauses.push(if self.routed && self.rng.chance(75) {
+                    self.measure(&c.marked(), up, bound)
+                } else if up {
                     format!("decreases {} - {}", bound, c.marked())
                 } else {
                     format!("decreases {}", c.marked())
@@ -5486,17 +5522,7 @@ impl Gen {
             Vec::new()
         };
         for p in &params {
-            let range = p.refine.as_ref().and_then(|r| match (&r.lo, &r.hi) {
-                (Bnd::Lit(lo), Bnd::Lit(hi)) => Some(R {
-                    lo: *lo,
-                    hi: if r.inclusive {
-                        *hi
-                    } else {
-                        hi.sub(Num::small(1))?
-                    },
-                }),
-                _ => None,
-            });
+            let range = p.literal_range();
             let kind = if p.is_mut {
                 Kind::MutParam
             } else {
@@ -5528,6 +5554,44 @@ impl Gen {
                 self.learn(&E::bin(op, E::name(&params[a].name), E::num(c)));
             }
         }
+        // Now and then a refined function that routes its clauses outside the Tier-1 fragment,
+        // by `@checked` or `@prove`, with a `requires` and an `ensures` that hold an `if` or a
+        // `match` with a block arm ([`Gen::holding`]), and in its loops an invariant and a
+        // measure that do. Tier 1 walks the `requires`, the invariant and the measure where it
+        // decides them, and a routed `ensures` nowhere, which a run evaluates all the same, so the
+        // containment oracle claims nothing inside it (`ghost-contracts-and-totality.md`, item 2;
+        // `tier1-containment`). A stream of its own decides, so that every other function is
+        // written as before.
+        let signature = std::mem::replace(&mut self.rng, stream(self.seed, index, 3 << 32));
+        let route = (refined && self.rng.chance(30)).then(|| {
+            if self.rng.chance(50) {
+                "checked"
+            } else {
+                "prove"
+            }
+        });
+        let mut routed_requires = Vec::new();
+        let mut routed_ensures = Vec::new();
+        if route.is_some() {
+            let ints: Vec<usize> = (0..params.len())
+                .filter(|&i| matches!(params[i].ty, Ty::Int(_)) && !params[i].is_mut)
+                .collect();
+            if !ints.is_empty() && self.rng.chance(70) {
+                let p = &params[*self.rng.pick(&ints)];
+                if let Ty::Int(t) = p.ty {
+                    let range = p.literal_range().unwrap_or(t.range());
+                    routed_requires.push(format!("requires {}", self.holding(&p.name, range)));
+                }
+            }
+            if let Some(Ty::Int(t)) = &ret {
+                if self.rng.chance(70) {
+                    let range = ret_range.unwrap_or(t.range());
+                    routed_ensures.push(format!("ensures {}", self.holding("result", range)));
+                }
+            }
+        }
+        self.rng = signature;
+        self.routed = route.is_some();
         self.current = Some(sig.clone());
         // The body, of this attempt: another attempt has another body under the same signature.
         let attempt = self.attempts.get(index).copied().unwrap_or(0);
@@ -5595,9 +5659,13 @@ impl Gen {
         }
         self.sigs.push(Sig { cost, ..sig });
         self.current = None;
+        self.routed = false;
 
         // The text.
         let mut out = String::new();
+        if let Some(attr) = route {
+            out.push_str(&format!("@{}\n", attr));
+        }
         if public {
             out.push_str("pub ");
         }
@@ -5635,12 +5703,15 @@ impl Gen {
             .iter()
             .map(|r| format!("requires {}", req_text(r, &params)))
             .collect();
+        clauses.extend(routed_requires);
         clauses.extend(ensures);
+        clauses.extend(routed_ensures);
         if self.recursion.is_some() && refined {
             clauses.push("decreases n".into());
         }
+        // A clause's later lines, a `match`'s arms, stand under its first.
         for c in &clauses {
-            out.push_str(&format!("\n  {}", c));
+            out.push_str(&format!("\n  {}", c.replace('\n', "\n  ")));
         }
         match body {
             Body::Expr(e) => {
@@ -5655,6 +5726,47 @@ impl Gen {
             }
         }
         out
+    }
+
+    /// A clause outside the Tier-1 fragment that holds whatever value `x` takes, for a routed
+    /// function to write ([`Gen::function`], [`Gen::loop_statement`]): an `if` each of whose
+    /// branches holds where it is taken, or a `match` with an expression arm and a block arm,
+    /// split at a value `k` of `x`'s range `r`, so that a run may take either way. It never
+    /// fails on a call, since a routed clause that fails stops the run at a trap.
+    fn holding(&mut self, x: &str, r: R) -> String {
+        let k = self.value_in(r);
+        if self.rng.chance(50) {
+            format!("(if {0} > {1} {{ {0} > {1} }} else {{ {0} <= {1} }})", x, k)
+        } else {
+            format!(
+                "(match {0} {{\n  {1} => true\n  _ => {{ {0} != {1} }}\n}})",
+                x, k
+            )
+        }
+    }
+
+    /// A loop's measure in a routed function that holds an `if` or a `match` with a block arm:
+    /// what its counter `c` has left to go, `bound - c` going up and `c` going down, in one
+    /// branch, and 0 in the other, which only the end of the round that ends the loop reaches.
+    fn measure(&mut self, c: &str, up: bool, bound: u64) -> String {
+        let (end, left) = if up {
+            (bound.to_string(), format!("{} - {}", bound, c))
+        } else {
+            ("0".to_string(), c.to_string())
+        };
+        if self.rng.chance(50) {
+            let more = if up {
+                format!("{} < {}", c, bound)
+            } else {
+                format!("{} > 0", c)
+            };
+            format!("decreases (if {} {{ {} }} else {{ 0 }})", more, left)
+        } else {
+            format!(
+                "decreases (match {} {{\n  {} => 0\n  _ => {{ {} }}\n}})",
+                c, end, left
+            )
+        }
     }
 
     fn param_refinement(&mut self, t: IntT, before: &[Param]) -> Option<Refine> {
@@ -5837,7 +5949,7 @@ impl Gen {
                 out.push_str(&format!("while {}", c.header_marked()));
                 for k in clauses {
                     out.push(' ');
-                    out.push_str(k);
+                    out.push_str(&k.replace('\n', &format!("\n{}", pad)));
                 }
                 out.push_str(" {\n");
                 self.print_block(body, indent + 1, out);

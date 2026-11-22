@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use mente_sema::check;
 use mente_sema::literals::From;
 use mente_sema::octagon::{INF, RELATIONAL_LIMIT};
+use mente_sema::tier1::Routing;
 use mente_sema::types::{Int, Ty, INT_TYPES};
 use mente_sema::wide::{self, Interval};
 use mente_sema::{CheckedFn, CheckedModule};
@@ -348,6 +349,23 @@ const COMPARISONS: &[&str] = &[
 /// for a negative value (`core-calculus.md`, item 4).
 const SHIFTS: &[&str] = &["right shift past the bits its value is kept in"];
 
+/// A clause of a function marked `@checked` or `@prove` that holds an `if` or a `match` with a
+/// block arm, by its kind: a `requires`, a loop's invariant and its measure, which Tier 1 walks
+/// where it decides them, and an `ensures`, which it walks nowhere though a run evaluates it, so
+/// that the containment oracle claims nothing inside it (`ghost-contracts-and-totality.md`,
+/// item 2). The oracle's first version reported a false alarm inside such an `ensures`, which no
+/// generated program held (`tier1-containment`).
+const ROUTED: &[&str] = &[
+    "requires holding an if, in a routed function",
+    "requires holding a match with a block arm, in a routed function",
+    "ensures holding an if, in a routed function",
+    "ensures holding a match with a block arm, in a routed function",
+    "invariant holding an if, in a routed function",
+    "invariant holding a match with a block arm, in a routed function",
+    "loop decreases holding an if, in a routed function",
+    "loop decreases holding a match with a block arm, in a routed function",
+];
+
 /// What generated programs never hold, each with its reason.
 pub(super) const NOT_GENERATED: &[(&str, &str)] = &[
     (
@@ -661,6 +679,43 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
             },
             _ => {}
         }
+    }
+}
+
+/// The rows of [`ROUTED`] a function that routes its clauses outside the Tier-1 fragment
+/// reaches: each of its clauses, its loops' invariants and measures among them, that is an `if`
+/// or a `match` with a block arm.
+fn reached_routed(f: &FnSyntax, seen: &mut BTreeSet<String>) {
+    let tree = &f.tree;
+    let mut clauses: Vec<(&str, ExprId)> = f
+        .contracts
+        .iter()
+        .map(|c| (contract_kind(c), c.expr))
+        .collect();
+    for s in &tree.stmts {
+        if let StmtKind::While {
+            invariants,
+            decreases,
+            ..
+        } = &s.kind
+        {
+            clauses.extend(invariants.iter().map(|&i| ("invariant", i)));
+            clauses.extend(decreases.iter().map(|&d| ("loop decreases", d)));
+        }
+    }
+    for (kind, e) in clauses {
+        let form = match &tree.expr(e).kind {
+            ExprKind::If {
+                otherwise: Some(_), ..
+            } => "an if",
+            ExprKind::Match { arms, .. }
+                if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) =>
+            {
+                "a match with a block arm"
+            }
+            _ => continue,
+        };
+        seen.insert(format!("{} holding {}, in a routed function", kind, form));
     }
 }
 
@@ -1557,12 +1612,21 @@ fn reached_enum(e: &EnumSyntax, seen: &mut BTreeSet<String>) {
 
 /// The functions of `src`, which must parse, their trees as name resolution qualifies them:
 /// `a.b`, `a` an enum, is a variant.
-fn functions(src: &str) -> Vec<FnSyntax> {
+fn functions(src: &str) -> Vec<(FnSyntax, Routing)> {
     let module = mente_syntax::parse_module(src).unwrap_or_else(|d| panic!("{:?}\n{}", d, src));
     let parsed = mente_sema::parse_qualified(src, &module);
     let diags: Vec<_> = parsed.iter().flat_map(|p| p.errors.iter()).collect();
     assert!(diags.is_empty(), "{:?}\n{}", diags, src);
-    parsed.into_iter().filter_map(|p| p.syntax).collect()
+    // Each function's routing, from its attributes, as the checker reads it.
+    let routings = module.items.iter().filter_map(|i| match i {
+        mente_syntax::ItemDecl::Fn(f) => Some(Routing::of(&f.attrs)),
+        _ => None,
+    });
+    parsed
+        .into_iter()
+        .zip(routings)
+        .filter_map(|(p, r)| Some((p.syntax?, r)))
+        .collect()
 }
 
 /// The enums of `src`, which must parse.
@@ -1660,6 +1724,7 @@ fn grammar() -> BTreeSet<String> {
         COMPARISONS,
         EXPRESSIONS,
         SHIFTS,
+        ROUTED,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -1701,7 +1766,12 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
         let mut problems = c.problems;
         if let Some(module) = &c.module {
             let text = &c.program.text;
-            functions(text).iter().for_each(|f| reached(f, &mut seen));
+            for (f, routing) in functions(text) {
+                reached(&f, &mut seen);
+                if routing.checked || routing.prove {
+                    reached_routed(&f, &mut seen);
+                }
+            }
             structs(text)
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));
