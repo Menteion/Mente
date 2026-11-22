@@ -249,7 +249,7 @@ pub fn program(
     let mut ids = Vec::new();
     for (i, f) in lowered.module.functions.iter().enumerate() {
         let sig = signature(f, conv, ptr);
-        let name = format!("mente_f{}_{}", i, sanitize(&f.name));
+        let name = symbol(i, f);
         ids.push(
             writer
                 .module_mut()
@@ -282,6 +282,18 @@ pub fn program(
             prefix,
         )?;
         writer.define_function_as(ids[i], &mut ctx, decl, &f.name)?;
+        // A function's slots are held near its frame (`core-calculus.md#stack-budget`) by
+        // measure, not by construction, until the frame model gives them their offsets
+        // ([`aligned-frame-layout`]). Past item 5's ceiling, 256 times its frame, the compiler
+        // cannot build a function yet, which is a limit of the compiler, never of the program.
+        // An entry counts no frame.
+        let slots = writer.stack_slot_bytes(&symbol(i, f)).unwrap_or(0);
+        if f.frame > 0 && u128::from(slots) > CEILING * f.frame {
+            return Err(err(format!(
+                "a limit of the compiler: the slots of `{}` take {} bytes, past {} times the {} its frame counts; the compiler cannot build it yet, and splitting it avoids the limit",
+                f.name, slots, CEILING, f.frame
+            )));
+        }
     }
     define_main(
         writer,
@@ -293,6 +305,48 @@ pub fn program(
         prefix,
     )?;
     Ok(())
+}
+
+/// The symbol of the `i`th MIR function.
+fn symbol(i: usize, f: &cfg::Function) -> String {
+    format!("mente_f{}_{}", i, sanitize(&f.name))
+}
+
+/// Each MIR function of `lowered` that a call counts, by name, with its frame as the checker
+/// counts it (`core-calculus.md`, item 25) and the bytes of the stack slots native code gave it
+/// in `writer`, after [`program`] wrote them. An entry counts no frame and is left out.
+pub fn slot_frames(lowered: &Lowered, writer: &ObjectWriter) -> Vec<(String, u128, u32)> {
+    lowered
+        .module
+        .functions
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.frame > 0)
+        .filter_map(|(i, f)| {
+            let bytes = writer.stack_slot_bytes(&symbol(i, f))?;
+            Some((f.name.clone(), f.frame, bytes))
+        })
+        .collect()
+}
+
+/// [`slot_frames`] for the program `lowered` compiled for `target`, with no call: what a build
+/// gives each function's slots beside the frame it counts. A build refuses a function whose
+/// slots take more than its frame, so a fault of that kind comes back as the error.
+pub fn frames_and_slots(
+    lowered: &Lowered,
+    target: Target,
+) -> Result<Vec<(String, u128, u32)>, CodegenError> {
+    let isa = target.isa(
+        cranelift_codegen::settings::OptLevel::Speed,
+        crate::Cpu::Baseline,
+    )?;
+    let source = crate::SourceFile {
+        path: "program.mn".into(),
+        directory: ".".into(),
+    };
+    let mut writer = ObjectWriter::new(isa, source, "program.o")?;
+    program(lowered, &[], "", &mut writer)?;
+    Ok(slot_frames(lowered, &writer))
 }
 
 fn sanitize(name: &str) -> String {
@@ -354,6 +408,18 @@ fn trusted(_b: &mut FunctionBuilder) -> MemFlagsData {
 struct Emit<'a, 'b> {
     b: &'a mut FunctionBuilder<'b>,
     ptr: Type,
+    /// The function's one slot for what the runtime writes through a pointer (`scratch`), made
+    /// when first asked for.
+    scratch: &'a mut Option<ir::StackSlot>,
+    /// Where the function's MIR slots lie.
+    area: &'a Area,
+}
+
+/// Where a function's MIR slots lie: one Cranelift slot, none when it makes none, and each
+/// `slot` instruction's offset in it, by value (`crate::slots`).
+struct Area {
+    slot: Option<ir::StackSlot>,
+    offsets: Vec<Option<u32>>,
 }
 
 impl Emit<'_, '_> {
@@ -762,6 +828,19 @@ impl Translate {
             b.finalize(frontend);
             return Ok(());
         }
+        let mut scratch = None;
+        let layout =
+            crate::slots::layout(f).map_err(|e| err(format!("a limit of the compiler: {}", e)))?;
+        let area = Area {
+            slot: std::num::NonZeroU32::new(layout.bytes).map(|bytes| {
+                b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    bytes.get(),
+                    4,
+                ))
+            }),
+            offsets: layout.offsets,
+        };
         for (bi, block) in f.blocks.iter().enumerate() {
             if bi > 0 {
                 b.switch_to_block(blocks[bi]);
@@ -775,7 +854,12 @@ impl Translate {
                     })?;
                     b.set_srcloc(sl);
                 }
-                let mut e = Emit { b: &mut b, ptr };
+                let mut e = Emit {
+                    b: &mut b,
+                    ptr,
+                    scratch: &mut scratch,
+                    area: &area,
+                };
                 let value = Self::inst(writer, rt, (ids, m), f, &mut e, &vals, v, prefix)?;
                 vals[v.0 as usize] = value;
             }
@@ -827,7 +911,12 @@ impl Translate {
                     b.ins().return_(&out);
                 }
                 Term::Trap(site, _) => {
-                    let mut e = Emit { b: &mut b, ptr };
+                    let mut e = Emit {
+                        b: &mut b,
+                        ptr,
+                        scratch: &mut scratch,
+                        area: &area,
+                    };
                     trap_report(writer, rt, &mut e, f, *site, &[], prefix)?;
                 }
             }
@@ -1049,13 +1138,15 @@ impl Translate {
                 args[last]
             }
             Op::Assume(_) => args[0],
-            Op::Slot { bytes } => {
-                let slot = e.b.create_sized_stack_slot(StackSlotData::new(
-                    StackSlotKind::ExplicitSlot,
-                    (*bytes).max(1),
-                    4,
-                ));
-                e.b.ins().stack_addr(ptr, slot, 0)
+            // Every slot of the function lies in its one area, at the offset that keeps it apart
+            // from each slot alive with it in one run (`crate::slots`).
+            Op::Slot { .. } => {
+                let at = e.area.offsets.get(v.0 as usize).copied().flatten();
+                let (Some(slot), Some(at)) = (e.area.slot, at) else {
+                    return Err(err("a slot with no place in its function's slots"));
+                };
+                let at = i32::try_from(at).map_err(|_| err("a function's slots take 2 GiB"))?;
+                e.b.ins().stack_addr(ptr, slot, at)
             }
             Op::Elem { stride } => {
                 let s = e.iconst(ptr, i64::from(*stride));
@@ -1099,7 +1190,7 @@ impl Translate {
                 let callee = &ids[c.0 as usize];
                 let fref = writer.module_mut().declare_func_in_func(*callee, e.b.func);
                 let mut flat = Vec::new();
-                let out = (t == types::I128 && rty != cfg::Ty::Unit).then(|| slot(e, 16));
+                let out = (t == types::I128 && rty != cfg::Ty::Unit).then(|| scratch(e, 16));
                 flat.extend(out);
                 for (a, at) in args.iter().zip(&arg_tys) {
                     flat.extend(e.split(*a, cl_type(*at, ptr)));
@@ -1278,7 +1369,7 @@ fn divide_mag(
     }
     let (alo, ahi) = e.b.ins().isplit(a);
     let (blo, bhi) = e.b.ins().isplit(b);
-    let out = slot(e, 32);
+    let out = scratch(e, 32);
     let f = writer
         .module_mut()
         .declare_func_in_func(rt.udivmod, e.b.func);
@@ -1476,7 +1567,16 @@ fn make_call(
         .ok_or_else(|| err("a call of an entry that does not exist"))?;
     let mir = &lowered.module.functions[entry.func.0 as usize];
     {
-        let mut e = Emit { b, ptr };
+        let mut none = None;
+        let mut e = Emit {
+            b,
+            ptr,
+            scratch: &mut none,
+            area: &Area {
+                slot: None,
+                offsets: Vec::new(),
+            },
+        };
         if let Some(trap) = refusal(lowered, entry, &call.args) {
             emit_text(writer, rt, &mut e, 2, &format!("{}{}\n", prefix, trap))?;
             emit_exit(writer, rt, &mut e, 1);
@@ -1589,12 +1689,30 @@ impl Shared {
     }
 }
 
-fn slot(e: &mut Emit, bytes: u32) -> Value {
-    let s = e.b.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        bytes.max(1),
-        4,
-    ));
+/// The most the runtime writes through a pointer at once: a 128-bit division's quotient and
+/// remainder.
+pub(crate) const SCRATCH: u32 = 32;
+
+/// The most times its frame a function's machine code may take, item 5's ceiling: past it the
+/// compiler cannot build the function yet (`mir-and-codegen.md`, item 5).
+pub const CEILING: u128 = 256;
+
+/// The most times its frame the tests let a function's slots take, on every program of the
+/// conformance suite and the agent programs: measured, not built in, until the frame model gives
+/// slots their offsets ([`aligned-frame-layout`]). Native code that gave every slot bytes of its
+/// own once took 194 times a frame, two hundred branches of a 4 KiB array; the layout's own
+/// alignment and holes take up to 1.18 times, in the review's programs of pull request 183.
+pub const MEASURED: u128 = 2;
+
+/// The address of the function's scratch slot, where the runtime writes a result of at most
+/// [`SCRATCH`] bytes that the code loads at once, before anything else writes there. One slot
+/// serves every such call of the function: one each would grow the frame with the calls, past
+/// what its frame counts (`core-calculus.md`, item 25).
+fn scratch(e: &mut Emit, bytes: u32) -> Value {
+    debug_assert!(bytes <= SCRATCH, "{bytes} bytes of scratch");
+    let s = *e.scratch.get_or_insert_with(|| {
+        e.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, SCRATCH, 4))
+    });
     e.b.ins().stack_addr(e.ptr, s, 0)
 }
 
@@ -1960,6 +2078,140 @@ pub fn g(xs: [3]u8) -> u8 = xs[0]
         ] {
             assert!(build(wrong).is_err());
         }
+    }
+
+    /// The functions of each program of the conformance suite that lowers, on each target, each
+    /// with its frame and the bytes of its stack slots in native code.
+    fn conformance_slot_frames() -> Vec<(String, Target, String, u128, u32)> {
+        fn programs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    programs(&path, out);
+                } else if path.extension().is_some_and(|e| e == "mn") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        programs(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance"),
+            &mut files,
+        );
+        files.sort();
+        let targets = [
+            Target::X86_64Linux,
+            Target::Aarch64Linux,
+            Target::X86_64Windows,
+        ];
+        let mut out = Vec::new();
+        for (k, path) in files.iter().enumerate() {
+            let source = std::fs::read_to_string(path).unwrap();
+            let Ok(module) = mente_sema::check_program_without_proofs(&source) else {
+                continue;
+            };
+            let Ok(lowered) = crate::lower::lower(&module) else {
+                continue;
+            };
+            // A program that makes no slot has none but the scratch's 32 bytes in a function,
+            // under any frame's 64; every build holds it to that anyway (`program`).
+            let slots = lowered
+                .module
+                .functions
+                .iter()
+                .any(|f| f.ops.iter().any(|op| matches!(op, Op::Slot { .. })));
+            if !slots {
+                continue;
+            }
+            // Each target in turn, to stay within a test's time, and the stack budget's own
+            // programs on all three.
+            let name = path.file_name().unwrap().to_string_lossy();
+            let all = name.starts_with("frames_") || name.starts_with("slots_");
+            let chosen = if all {
+                &targets[..]
+            } else {
+                &targets[k % 3..k % 3 + 1]
+            };
+            for &target in chosen {
+                let mut w = writer(target);
+                program(&lowered, &[], "", &mut w).unwrap();
+                for (name, frame, bytes) in slot_frames(&lowered, &w) {
+                    let file = path.file_name().unwrap().to_string_lossy().to_string();
+                    out.push((file, target, name, frame, bytes));
+                }
+            }
+        }
+        out
+    }
+
+    /// Each function's stack slots in native code take at most twice its frame as the checker
+    /// counts it (`core-calculus.md`, item 25), on every target, for every program of the
+    /// conformance suite that lowers, the review's programs of pull request 183 among them: native
+    /// code lays the slots that are never alive together over the same bytes, as the frame counts
+    /// one branch of an `if` or one arm of a `match`. The bound is measured, not built in
+    /// ([`MEASURED`]). Native code once gave every slot bytes of its own, so that two hundred
+    /// branches of a 4 KiB array each took 1.6 MB of stack for a frame of 8,265, past Windows' 1 MB
+    /// stack before any branch ran.
+    #[test]
+    fn test_native_slots_stay_within_twice_the_frame() {
+        let frames = conformance_slot_frames();
+        assert!(frames.len() > 100, "{} functions compared", frames.len());
+        let over: Vec<String> = frames
+            .iter()
+            .filter(|(_, _, _, frame, bytes)| u128::from(*bytes) > MEASURED * *frame)
+            .map(|(file, target, name, frame, bytes)| {
+                format!("{file} {target:?} {name}: {bytes} bytes of slots, frame {frame}")
+            })
+            .collect();
+        assert!(over.is_empty(), "{}:\n{}", over.len(), over.join("\n"));
+    }
+
+    /// A build gives a function's stack slots the bytes of its layout, which `frames_and_slots`
+    /// reports beside the frame the checker counts, by the function's name; and it refuses a
+    /// function whose slots take more than 256 times its frame, item 5's ceiling, as a limit of the
+    /// compiler, but builds one whose slots take exactly that, and one that counts no frame, as an
+    /// entry.
+    #[test]
+    fn test_a_build_refuses_slots_past_the_ceiling() {
+        let source = "module m\npub fn f(x: u8, i: usize[0..=255]) -> u8 {\n  var a: [256]u8 = [x; 256]\n  a[i] = 1\n  a[i]\n}\n";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let mut lowered = crate::lower::lower(&module).unwrap();
+        let k = lowered
+            .module
+            .functions
+            .iter()
+            .position(|f| f.name == "f")
+            .unwrap();
+        let laid = crate::slots::layout(&lowered.module.functions[k])
+            .unwrap()
+            .bytes;
+        // The literal and the binding it is copied into, alive together at the copy.
+        assert_eq!(laid, 512);
+        let frame = lowered.module.functions[k].frame;
+        let target = Target::X86_64Linux;
+        assert_eq!(
+            frames_and_slots(&lowered, target).unwrap(),
+            [("f".to_string(), frame, laid)],
+            "the function's name, its frame, and its slots' bytes, its entry left out"
+        );
+        let built = |lowered: &mut Lowered, frame: u128| {
+            lowered.module.functions[k].frame = frame;
+            frames_and_slots(lowered, target)
+        };
+        assert_eq!(
+            built(&mut lowered, 2).unwrap(),
+            [("f".to_string(), 2, laid)],
+            "512 bytes of slots are 256 times a frame of 2"
+        );
+        let refused = built(&mut lowered, 1).unwrap_err();
+        assert!(
+            refused.to_string().contains("a limit of the compiler")
+                && refused
+                    .to_string()
+                    .contains("splitting it avoids the limit"),
+            "{refused}"
+        );
+        assert!(built(&mut lowered, 0).unwrap().is_empty());
     }
 
     /// A result is printed in a loop over each array, so that `main`'s code does not grow with

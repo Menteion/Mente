@@ -1,0 +1,92 @@
+// expect: pass
+module conformance
+// Branches that assign before they give a value, wide integers in structs and arrays, counters and
+// measures (the review of pull request 183, 2026-11-22).
+
+fn same(k: u8) -> u8 = k
+
+pub fn through_a_call(c: u8) -> u8 {
+  var acc: u8 = c
+  acc = acc ^ same(if c > 0 {
+    acc = acc ^ 1
+    4
+  } else {
+    6
+  })
+  acc
+}
+
+pub fn in_place(c: u8) -> u8 {
+  var acc: u8 = c
+  acc = acc ^ (if c > 0 {
+    acc = acc ^ 1
+    4
+  } else {
+    6
+  })
+  acc
+}
+
+pub struct W {
+  a: u8
+  b: u128
+  c: [3]u8
+}
+
+fn large(k: u128) -> i128 {
+  val t: [2]i128 = [-5, 7]
+  t[1] * 3 - 1000000000000000000000000000
+}
+
+pub fn wide(x: u128, y: u128) -> u128 {
+  val p = W(a: 1, b: x, c: [2, 3, 4])
+  val q: [17]u8 = [9; 17]
+  val d = x / (y + 1)
+  val r: [3]u128 = [d, x % (y + 1), p.b / 3]
+  val gg = large(d)
+  val s = W(a: q[16], b: r[1] + 1, c: p.c)
+  val h: i128 = gg / 7
+  val e: [5]u8 = [s.c[2]; 5]
+  r[0] + r[1] + s.b + p.b / 5 + d / 11 + e[4] + q[0] + (if h < 0 { 1 } else { 2 })
+}
+
+pub fn wides(x: u128) -> i128 {
+  val a: [4]i128 = [large(x), large(x + 1), -3, 4]
+  val b: [4]i128 = [a[0] / 9, a[1] % 13, a[2] / 2, large(x) / 1000003]
+  a[0] / 77 + b[1] + b[3] + a[3]
+}
+
+pub fn stats(xs: [8]u8) -> u8 {
+  var i: usize = 0
+  var evens: u8 = 0
+  var odds: u8 = 0
+  var big: u8 = 0
+  var small: u8 = 0
+  var zeros: u8 = 0
+  while i < 8 {
+    if xs[i] % 2 == 0 { evens = evens + 1 } else { odds = odds + 1 }
+    if xs[i] > 100 { big = big + 1 } else { small = small + 1 }
+    if xs[i] == 0 { zeros = zeros + 1 }
+    i = i + 1
+  }
+  evens + odds + big + small + zeros
+}
+
+pub fn measures(n: u8) -> u8 {
+  var i: u8 = 0
+  var s: u8 = 0
+  while i < n
+    decreases n - i
+  {
+    s = s / 2 + i / 2
+    i = i + 1
+  }
+  var j: u8 = 0
+  while j < n
+    decreases n - j
+  {
+    s = s / 2 + j / 2
+    j = j + 1
+  }
+  s
+}
