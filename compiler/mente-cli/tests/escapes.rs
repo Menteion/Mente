@@ -13,10 +13,11 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// An escape's file, with day `day`, area `area`, what missed it `missed` and guard `guard`.
+/// An escape's file, with day `day`, area `area`, what missed it `missed` and guard `guard`, whose
+/// fix holds the root at its guard.
 fn file(day: &str, area: &str, missed: &str, guard: &str) -> String {
     format!(
-        "---\ndate: {}\nfixed-by: https://github.com/Menteion/Mente/pull/129\narea: {}\nmissed-by: {}\nguard: {}\n---\n",
+        "---\ndate: {}\nfixed-by: https://github.com/Menteion/Mente/pull/129\narea: {}\nmissed-by: {}\nguard: {}\nroot: held\n---\n",
         day, area, missed, guard
     )
 }
@@ -125,7 +126,7 @@ fn test_every_problem_of_the_record_is_reported_at_once() {
 /// A file is refused for each way its front matter breaks the record's form: no front matter, an
 /// unclosed one, a field missing, out of order, renamed or added, a value YAML would read as
 /// something else, a quote left alone, a day off the calendar, a fix that is no pull request's
-/// address, and a guard of no form.
+/// address, a guard of no form, and a root missing, out of its place, or of neither word.
 #[test]
 fn test_a_file_is_refused_for_each_rule_of_its_front_matter() {
     let good = file("2026-11-14", "checker", "No lint.", LINT);
@@ -138,6 +139,12 @@ fn test_a_file_is_refused_for_each_rule_of_its_front_matter() {
             name: "test_exhaustive_crates_deny_wildcard_arms".to_string(),
             package: "mente-cli".to_string(),
         }
+    );
+    assert_eq!(escape.root, escapes::Root::Held);
+    let removed = good.replace("root: held", "root: removed");
+    assert_eq!(
+        escapes::parse("walker-hid", &removed).unwrap().root,
+        escapes::Root::Removed
     );
     let with_prose = format!("{}\n# The walker\n\nIt hid --- the operands.\n", good);
     assert!(escapes::parse("walker-hid", &with_prose).is_ok());
@@ -237,6 +244,24 @@ fn test_a_file_is_refused_for_each_rule_of_its_front_matter() {
             "a guard that is none",
         ),
         (good.replace(LINT, "node test \"\""), "a guard that is none"),
+        // The root, the sixth field: present, last, and one of its two words
+        // (escape-root-field).
+        (good.replace("root: held\n", ""), "not the fields"),
+        (
+            good.replace(
+                &format!("guard: {}\nroot: held\n", LINT),
+                &format!("root: held\nguard: {}\n", LINT),
+            ),
+            "not the fields",
+        ),
+        (good.replace("root: held", "root: Held"), "a root that is neither"),
+        (good.replace("root: held", "root: partly"), "a root that is neither"),
+        (
+            good.replace("root: held", "root: removed held"),
+            "a root that is neither",
+        ),
+        (good.replace("root: held", "root: ''"), "a root that is neither"),
+        (good.replace("root: held", "roots: held"), "not the fields"),
     ] {
         let found = escapes::parse("walker-hid", &bad).expect_err(&bad);
         assert!(found.contains(why), "{}\n{}", bad, found);
@@ -270,8 +295,8 @@ fn test_an_escape_is_refused_for_each_rule_of_the_record() {
     assert_eq!(escapes::problems(&[row]), Vec::<String>::new());
 }
 
-/// `mn escapes` counts the escapes per ISO week, the Thursday's year deciding the week's, and per
-/// area.
+/// `mn escapes` counts the escapes per ISO week, the Thursday's year deciding the week's, per area,
+/// and per root.
 #[test]
 fn test_escapes_are_counted_per_iso_week_and_per_area() {
     for (day, week) in [
@@ -292,7 +317,10 @@ fn test_escapes_are_counted_per_iso_week_and_per_area() {
         "counted",
         &[
             ("first.md", &file("2026-11-14", "checker", "A.", LINT)),
-            ("second.md", &file("2026-11-16", "MIR", "C.", LINT)),
+            (
+                "second.md",
+                &file("2026-11-16", "MIR", "C.", LINT).replace("root: held", "root: removed"),
+            ),
             ("third.md", &file("2026-11-15", "MIR", "B.", LINT)),
         ],
     )
@@ -300,8 +328,16 @@ fn test_escapes_are_counted_per_iso_week_and_per_area() {
     let rows = escapes::read(&dir).unwrap();
     assert_eq!(
         escapes::counts(&rows),
-        "Escapes per week:\n  2026-W46  2\n  2026-W47  1\nEscapes per area:\n  MIR  2\n  checker  1\n"
+        "Escapes per week:\n  2026-W46  2\n  2026-W47  1\nEscapes per area:\n  MIR  2\n  checker  1\nEscapes per root:\n  removed  1\n  held  2\n"
     );
+    // Both words are counted, the one no escape has as 0.
+    let held = planted(
+        "counted-held",
+        &[("first.md", &file("2026-11-14", "checker", "A.", LINT))],
+    )
+    .unwrap();
+    assert!(escapes::counts(&escapes::read(&held).unwrap())
+        .ends_with("Escapes per root:\n  removed  0\n  held  1\n"));
 }
 
 /// `mn escapes` run in `dir` with `args`: its exit code, its standard output and its standard
@@ -325,7 +361,8 @@ fn mn(dir: &Path, args: &[&str]) -> (Option<i32>, String, String) {
 
 /// `mn escapes` prints the record's counts, `mn escapes --check` checks it as the test does, and
 /// each fails with what is wrong: an argument it does not take, a directory that is missing, an
-/// entry that is no escape, and, with `--check`, an area outside the record's list.
+/// entry that is no escape, a root of neither word, and, with `--check`, an area outside the
+/// record's list.
 #[test]
 fn test_mn_escapes_counts_and_checks_the_record() {
     let rows = escapes::read(&root().join(escapes::RECORD)).unwrap();
@@ -382,4 +419,20 @@ fn test_mn_escapes_counts_and_checks_the_record() {
         "{}",
         err
     );
+    // A root of neither word fails both, as the test reads the record.
+    fs::write(
+        dir.join("docs/escapes/walker-hid.md"),
+        nowhere.replace("root: held", "root: partly"),
+    )
+    .unwrap();
+    for args in [&[][..], &["--check"][..]] {
+        let (code, out, err) = mn(&dir, args);
+        assert_eq!((code, out.as_str()), (Some(1), ""), "{:?}", args);
+        assert!(
+            err.starts_with("[FAIL] walker-hid.md: a root that is neither"),
+            "{:?}: {}",
+            args,
+            err
+        );
+    }
 }

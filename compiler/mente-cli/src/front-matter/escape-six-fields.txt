@@ -1,0 +1,17 @@
+fields date fixed-by area missed-by guard root
+expect accepted
+value date 2026-11-14
+value fixed-by https://github.com/Menteion/Mente/pull/129
+value area checker
+value missed-by No lint: a walker's `_` arm hid the operand kinds.
+value guard fn test_exhaustive_crates_deny_wildcard_arms in mente-cli
+value root removed
+input
+---
+date: 2026-11-14
+fixed-by: https://github.com/Menteion/Mente/pull/129
+area: checker
+missed-by: 'No lint: a walker''s `_` arm hid the operand kinds.'
+guard: fn test_exhaustive_crates_deny_wildcard_arms in mente-cli
+root: removed
+---

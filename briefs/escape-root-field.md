@@ -1,10 +1,10 @@
 ---
 id: escape-root-field
-status: deferred
+status: active
 trigger: when root-cause-first's pull request has merged
 type: chore
 awaits: [docs/design-review.md#root-cause-first]
-affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/src/escapes.rs, compiler/mente-cli/tests/escapes.rs, compiler/mente-cli/src/front-matter/**, docs/escapes.md, docs/escapes/**, briefs/escape-root-field.md, briefs/archive/escape-root-field.md]
+affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/src/escapes.rs, compiler/mente-cli/tests/escapes.rs, compiler/mente-cli/tests/evidence.rs, compiler/mente-cli/src/front-matter/**, docs/escapes.md, docs/escapes/**, briefs/escape-root-field.md, briefs/archive/escape-root-field.md]
 protectedFiles: [spec/**, CLAUDE.md, .github/**]
 ---
 
@@ -27,8 +27,8 @@ When this round is done, every record's front matter holds a sixth field, `root`
 
 ## Invariants
 
-- [ ] `front_matter` in `compiler/mente-cli/src/records.rs` reads six fields, `root` last, and the front-matter cases in `compiler/mente-cli/src/front-matter/` hold the field's form.
-- [ ] `test_every_escape_has_a_key_an_area_and_a_guard` fails on a record with no `root`, on one with `root` out of its place, and on one with any value but `removed` or `held`, each planted.
-- [ ] Every record of `docs/escapes/` has its `root`, and the pull request lists each with the line of its fix's pull request that the value rests on.
-- [ ] `docs/escapes.md` describes the field beside the other five.
-- [ ] `mn escapes` prints the count of each value, and `mn escapes --check` checks the field as the test does.
+- [x] `front_matter` in `compiler/mente-cli/src/records.rs` reads six fields, `root` last, and the front-matter cases in `compiler/mente-cli/src/front-matter/` hold the field's form.
+- [x] `test_every_escape_has_a_key_an_area_and_a_guard` fails on a record with no `root`, on one with `root` out of its place, and on one with any value but `removed` or `held`, each planted.
+- [x] Every record of `docs/escapes/` has its `root`, and the pull request lists each with the line of its fix's pull request that the value rests on.
+- [x] `docs/escapes.md` describes the field beside the other five.
+- [x] `mn escapes` prints the count of each value, and `mn escapes --check` checks the field as the test does.
