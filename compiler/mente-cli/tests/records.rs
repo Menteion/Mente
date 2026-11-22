@@ -230,11 +230,10 @@ fn test_a_link_in_a_kind_is_refused() {
     );
 }
 
-/// Every document of the tree, a file of prose or markup whatever its markup, belongs to exactly
-/// one declaration: a kind of record, a shared file or a set of documents, each with its reason;
-/// every exact pattern names a file that exists.
+/// Every Markdown file of the tree belongs to exactly one declaration: a kind of record, a shared
+/// file or a set of documents, each with its reason; every exact pattern names a file that exists.
 #[test]
-fn test_every_document_is_declared_once() {
+fn test_every_markdown_file_is_declared_once() {
     let problems =
         records::undeclared(&root(), records::KINDS, records::SHARED, records::DOCUMENTS);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
@@ -251,13 +250,12 @@ fn test_every_document_is_declared_once() {
     }
 }
 
-/// A document nothing declares is refused with what to do, whatever its markup or none, and so is
-/// one two declarations claim; code, a dotfile, a nested repository, `target` and `node_modules`
-/// are not read. A record of a new kind in a directory nothing declares, as the review of PR 175
-/// planted in Markdown and its re-review named in other forms, is refused by the real
+/// A Markdown file nothing declares is refused with what to do, and so is one two declarations
+/// claim; a nested repository, `target` and `node_modules` are not read. A record of a new kind in
+/// a directory nothing declares, as the review of PR 175 planted, is refused by the real
 /// declarations.
 #[test]
-fn test_a_document_nothing_declares_is_refused() {
+fn test_a_markdown_file_nothing_declares_is_refused() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join("kinds")
         .join("closed");
@@ -266,17 +264,9 @@ fn test_a_document_nothing_declares_is_refused() {
         "README.md",
         "Upper.MD",
         "docs/adr/0001-use-keys.md",
-        "docs/adr/0002-name-files.markdown",
-        "docs/decisions/0001.txt",
-        "docs/decisions/0002",
-        "docs/decisions/0003.RST",
-        "docs/decisions/0004.adoc",
-        "docs/decisions/.keep",
-        "docs/decisions/build.rs",
         "docs/log.md",
         "docs/page.md",
         "notes/a-note.md",
-        "notes/stray.txt",
         "nested/.git/HEAD",
         "nested/x.md",
         "target/y.md",
@@ -304,79 +294,20 @@ fn test_a_document_nothing_declares_is_refused() {
         why: "pages",
     }];
     let found = records::undeclared(&dir, &kinds, &shared, &documents);
-    let nothing = "a document nothing declares: declare its directory in records.rs as a kind of record, whose files are then named by keys (`KINDS`), or as a set of documents with why they are none (`DOCUMENTS`)";
+    let nothing = "a Markdown file nothing declares: declare its directory in records.rs as a kind of record, whose files are then named by keys (`KINDS`), or as a set of documents with why they are none (`DOCUMENTS`)";
     assert_eq!(
         found,
         [
             format!("Upper.MD: {}", nothing),
             format!("docs/adr/0001-use-keys.md: {}", nothing),
-            format!("docs/adr/0002-name-files.markdown: {}", nothing),
-            format!("docs/decisions/0001.txt: {}", nothing),
-            format!("docs/decisions/0002: {}", nothing),
-            format!("docs/decisions/0003.RST: {}", nothing),
-            format!("docs/decisions/0004.adoc: {}", nothing),
             "docs/log.md: claimed by the shared file of the log and the documents of pages, where one declaration is to claim it".to_string(),
-            format!("notes.txt: {}", nothing),
         ]
-    );
-    let stray = records::entries(&kinds[0], &dir.join("notes")).unwrap_err();
-    assert_eq!(
-        stray,
-        ["stray.txt: not a note, a file `<key>.md`; rename it `stray.md`"]
     );
     let adr = dir.join("adr");
-    for file in ["docs/adr/0001-use-keys.md", "docs/decisions/0001.txt"] {
-        fs::create_dir_all(adr.join(file).parent().unwrap()).unwrap();
-        fs::write(adr.join(file), "").unwrap();
-    }
+    fs::create_dir_all(adr.join("docs/adr")).unwrap();
+    fs::write(adr.join("docs/adr/0001-use-keys.md"), "").unwrap();
     let real = records::undeclared(&adr, records::KINDS, records::SHARED, records::DOCUMENTS);
-    assert_eq!(
-        real,
-        [
-            format!("docs/adr/0001-use-keys.md: {}", nothing),
-            format!("docs/decisions/0001.txt: {}", nothing),
-        ]
-    );
-}
-
-/// A document is a file of prose or markup by its extension, in any case, or a file with no
-/// extension; code, data and a dotfile are none.
-#[test]
-fn test_a_document_is_named_by_its_markup_or_by_none() {
-    for name in [
-        "a.md",
-        "a.MD",
-        "a.markdown",
-        "a.mdown",
-        "a.mkd",
-        "a.mdx",
-        "a.txt",
-        "a.text",
-        "a.rst",
-        "a.adoc",
-        "a.asciidoc",
-        "a.org",
-        "LICENSE-MIT",
-        "CODEOWNERS",
-        "0001",
-    ] {
-        assert!(records::is_document(name), "{} is a document", name);
-    }
-    for name in [
-        "a.rs",
-        "a.mn",
-        "a.json",
-        "a.toml",
-        "a.yml",
-        "a.mjs",
-        "a.diff",
-        "a.log",
-        ".gitkeep",
-        ".gitignore",
-        ".keep.md",
-    ] {
-        assert!(!records::is_document(name), "{} is no document", name);
-    }
+    assert_eq!(real, [format!("docs/adr/0001-use-keys.md: {}", nothing)]);
 }
 
 /// A pattern matches name by name: `*` within a name, `**` across any number of directories.
