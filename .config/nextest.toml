@@ -71,6 +71,11 @@ all-cores = { max-threads = 1 }
 # Every failure of the run, not only the first.
 fail-fast = false
 
+[profile.ci.junit]
+# Each test's time, in target/nextest/ci/junit.xml, which the Rust jobs report as each test's share
+# of its stop, in the job's summary (.github/scripts/lib/test-times.mjs).
+path = "junit.xml"
+
 [profile.mutants]
 # The first failing test catches the mutant: the rest need not run.
 fail-fast = true

@@ -4,6 +4,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { doctestProblems, problems as testListProblems, overrideTests } from "../lib/test-list.mjs";
+import * as times from "../lib/test-times.mjs";
 import { PINNED_JOBS } from "./pins.mjs";
 import { filesUnder, read, tomlSubset, workspace } from "./repo.mjs";
 import { TESTING_JOBS } from "./sandbox.mjs";
@@ -13,7 +14,7 @@ import { logicalLines, stepKey, steps, workflows } from "./workflows.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 3;
+const FLOOR = 4;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -41,6 +42,7 @@ const NEXTEST_TABLES = new Map([
     },
   ],
   ["profile.ci", { array: false, keys: ["fail-fast"] }],
+  ["profile.ci.junit", { array: false, keys: ["path"] }],
   ["profile.mutants", { array: false, keys: ["fail-fast"] }],
   ["test-groups", { array: false, keys: ["all-cores"] }],
 ]);
@@ -52,6 +54,7 @@ const NEXTEST_VALUES = new Map([
   ["profile.default/leak-timeout", '{ period = "100ms", result = "fail" }'],
   ["profile.default.overrides/slow-timeout", '{ period = "60s", terminate-after = 3 }'],
   ["profile.ci/fail-fast", "false"],
+  ["profile.ci.junit/path", '"junit.xml"'],
   ["profile.mutants/fail-fast", "true"],
   ["profile.default.overrides/test-group", '"all-cores"'],
   ["profile.default.overrides/threads-required", '"num-test-threads"'],
@@ -314,4 +317,125 @@ check("the list of tests is read as nextest writes it", () => {
   assert.equal(doctestProblems(`${none}   Doc-tests mente_sema\ncompiler/mente-sema/src/lib.rs - f (line 3): test\n1 test, 0 benchmarks\n`).length, 1, "a library with a doctest");
   assert.equal(doctestProblems("   Doc-tests mente_ast\n   Doc-tests mente_mir\n0 tests, 0 benchmarks\n").length, 1, "a library without its count");
   assert.equal(doctestProblems("   Compiling mente-ast\n").length, 1, "no library at all");
+});
+
+/// A JUnit report as nextest writes one, of the times given by `<binary id> <test name>`, with the
+/// count it states.
+function junitOf(timesById, stated = Object.keys(timesById).length) {
+  const suites = new Map();
+  for (const [id, secs] of Object.entries(timesById)) {
+    const [binary, name] = id.split(" ");
+    suites.set(binary, [...(suites.get(binary) ?? []), `    <testcase name="${name}" classname="${binary}" timestamp="2026-11-22T06:20:00.000+00:00" time="${secs}">\n    </testcase>`]);
+  }
+  const body = [...suites].map(([binary, cases]) => `  <testsuite name="${binary}" tests="${cases.length}" disabled="0" errors="0" failures="0">\n${cases.join("\n")}\n  </testsuite>`);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="nextest-run" tests="${stated}" skipped="0" failures="0" errors="0" uuid="u" timestamp="t" time="1">\n${body.join("\n")}\n</testsuites>\n`;
+}
+
+/// A slow-timeout of .config/nextest.toml in seconds: its period times the periods it ends after.
+const stopOfTimeout = (value) => {
+  const m = /period = "(\d+)s", terminate-after = (\d+)/.exec(value);
+  return Number(m[1]) * Number(m[2]);
+};
+
+check("every test's share of its stop is reported on every runner, and only a broken report fails", () => {
+  // The report nextest writes is the one the step reads, and the stops are nextest's own.
+  const junitPath = /"([^"]*)"/.exec(NEXTEST_VALUES.get("profile.ci.junit/path"))[1];
+  assert.equal(times.REPORT, `target/nextest/ci/${junitPath}`, "lib/test-times.mjs reads another report than the ci profile's");
+  assert.equal(times.DEFAULT_STOP, stopOfTimeout(NEXTEST_VALUES.get("profile.default/slow-timeout")), "the default stop is not nextest's");
+  assert.equal(times.LONGER_STOP, stopOfTimeout(NEXTEST_VALUES.get("profile.default.overrides/slow-timeout")), "the longer stop is not nextest's");
+  assert.deepEqual([...times.longerTests(read(".config/nextest.toml"))].sort(), SLOW_TESTS.map(([p, n]) => `${p} ${n}`).sort(), "lib/test-times.mjs gives the longer stop to other tests than SLOW_TESTS");
+  // The Rust jobs report right after their tests, with their runner alone, on every runner of the
+  // matrix, and nothing on the step forgives its failure.
+  const rust = workflows().find((w) => w.file === "ci.yml").doc.jobs.rust;
+  const all = steps(rust);
+  const reportStep = all[all.findIndex((s) => s.run === NEXTEST_STEP) + 1];
+  assert.equal(reportStep?.run, "node .github/scripts/test-times.mjs\n/usr/bin/bash .github/scripts/tools.sh verify\n", "the step right after the Rust jobs' tests does not report their times as test-times.mjs does");
+  assert.deepEqual(reportStep.env, { TEST_TIMES_RUNNER: "${{ matrix.os }}" }, "the step that reports the times has another environment than its runner");
+  assert.deepEqual(Object.keys(reportStep).sort(), ["env", "name", "run"], "the step that reports the times carries more than its name, environment and script");
+  assert.equal(rust["continue-on-error"], undefined, "the Rust jobs forgive a failed step");
+
+  // The report as nextest writes it: a failed, errored or skipped test has no time of its own, and
+  // the count read is the count stated.
+  const xml = '<testsuites tests="5" skipped="1" failures="1" errors="0"><testsuite name="mente-cli::reproducible" tests="3">\n<testcase name="a&lt;b" classname="mente-cli::reproducible" time="30.101">\n</testcase>\n<testcase name="failed" classname="mente-cli::reproducible" time="2"><failure message="x"/></testcase>\n<testcase name="skipped" classname="mente-cli::reproducible" time="0"><skipped/></testcase>\n</testsuite><testsuite name="mente-sema"><testcase name="t" time="1.5"/><testcase name="u" time="0.2"/></testsuite></testsuites>';
+  assert.deepEqual([...times.junitTimes(xml)], [["mente-cli::reproducible a<b", 30.101], ["mente-sema t", 1.5], ["mente-sema u", 0.2]]);
+  assert.throws(() => times.junitTimes(xml.replace('tests="5"', 'tests="6"')), /states 4 tests that passed, and 3 were read/);
+  assert.throws(() => times.junitTimes('<testsuites tests="0"></testsuites>'), /states 0/);
+  assert.throws(() => times.junitTimes('<testsuite><testcase name="t" time="1"/></testsuite>'), /binary, name and time/);
+  // The stops: a test the longer group names is held to 180 s, any other to 40.
+  const longer = new Set(["mente-cli mir_run::coverage::slow"]);
+  assert.equal(times.stopOf("mente-cli::bin/mn mir_run::coverage::slow", longer), times.LONGER_STOP);
+  assert.equal(times.stopOf("mente-cli::reproducible slow", longer), times.DEFAULT_STOP);
+
+  // Planted: a notice past NOTICE of a test's stop, none at it, the longer group by its own stop,
+  // highest first, and the message escaped as GitHub reads a workflow command.
+  const noticed = (current) => times.report("windows-2025", times.shares(new Map(Object.entries(current)), longer)).lines.filter((l) => l.startsWith("::notice "));
+  assert.deepEqual(noticed({ "mente-cli::reproducible t": 18 }), [], "a test at 45% of its stop draws a notice");
+  assert.deepEqual(noticed({ "mente-cli::reproducible t": 18.1 }), ["::notice title=A test near its stop::mente-cli::reproducible t took 18.1 s on windows-2025, 45.3%25 of its stop of 40 s"], "a test past 45% of its stop draws no notice, or one GitHub misreads");
+  // A share past NOTICE never reads as NOTICE: rounded up to a tenth of a percent, and exactly
+  // NOTICE as itself.
+  assert.match(noticed({ "mente-cli::reproducible t": 18.001 })[0], /, 45\.1%25 of its stop of 40 s$/, "a share just past 45% reads as 45%");
+  assert.equal(times.pct(times.NOTICE), "45.0%");
+  // A share that is a whole tenth reads as it, though its floating-point product lies a hair above.
+  assert.equal(times.pct(1.04 / 40), "2.6%", "a whole tenth reads a tenth more");
+  // Past the notices GitHub keeps for a step, one notice says how many there are, first.
+  const crowd = (n) => noticed(Object.fromEntries(Array.from({ length: n }, (_, k) => [`mente-sema t${k}`, 30])));
+  assert.equal(crowd(times.ANNOTATIONS).length, times.ANNOTATIONS, "as many notices as GitHub keeps draw one more");
+  const past = crowd(times.ANNOTATIONS + 1);
+  assert.equal(past.length, times.ANNOTATIONS + 2, "past the notices GitHub keeps, none says how many tests there are");
+  assert.match(past[0], /^::notice title=Tests near their stop::11 tests took past 45\.0%25 of their stop on windows-2025, more than the 10 notices GitHub shows: the job's summary lists them all$/);
+  assert.deepEqual(noticed({ "mente-cli::bin/mn mir_run::coverage::slow": 80 }), [], "a test of the longer group is held to the default stop");
+  assert.equal(noticed({ "mente-cli::bin/mn mir_run::coverage::slow": 82 }).length, 1, "a test of the longer group past 45% of 180 s draws no notice");
+  assert.deepEqual(times.shares(new Map([["b t", 2], ["a t", 30], ["c t", 2]]), longer).map((r) => r.id), ["a t", "b t", "c t"]);
+  assert.equal(times.commandData("50%\r\n"), "50%25%0D%0A");
+  // The summary lists LISTED tests at least, and every test past NOTICE.
+  const many = (n, secs) => new Map(Array.from({ length: n }, (_, k) => [`mente-sema t${k}`, secs]));
+  const rowsOf = (current) => times.report("ubuntu-24.04", times.shares(current, longer)).summary.split("\n").filter((l) => l.startsWith("| `")).length;
+  assert.equal(rowsOf(many(40, 1)), times.LISTED);
+  assert.equal(rowsOf(many(40, 30)), 40);
+
+  // Pull request 183 against main before it, from the Rust jobs' logs: its merge-queue run
+  // (44993192856) took 36.3 s for the diagnostics test on Windows and 37.0 s on AArch64, 91 and 92%
+  // of the stop, where main at fe887e5 took 11.5 and 5.3 s. The report shows it on both runners and
+  // nothing before it, and fails neither.
+  const diagnostics = "mente-cli::reproducible test_diagnostics_are_reproducible";
+  const fake = (xml) => {
+    const out = [];
+    const err = [];
+    const summary = [];
+    const io = {
+      read: (f) => {
+        if (f !== times.REPORT) return read(f);
+        if (xml === undefined) throw new Error(`ENOENT: no such file, open '${f}'`);
+        return xml;
+      },
+      out: (s) => out.push(s),
+      err: (s) => err.push(s),
+      summary: (s) => summary.push(s),
+    };
+    return { io, out, err, summary };
+  };
+  const run = (runner, xml, args = []) => {
+    const f = fake(xml);
+    return { code: times.main(args, { TEST_TIMES_RUNNER: runner }, f.io), out: f.out.join("\n"), err: f.err.join("\n"), summary: f.summary.join("") };
+  };
+  for (const [runner, before, after] of [["windows-2025", 11.501, 36.254], ["ubuntu-24.04-arm", 5.343, 36.966]]) {
+    const was = run(runner, junitOf({ [diagnostics]: before, "mente-sema t": 1 }));
+    assert.equal(was.code, 0);
+    assert.doesNotMatch(was.out, /::notice /, `main before 183 draws a notice on ${runner}`);
+    const is = run(runner, junitOf({ [diagnostics]: after, "mente-sema t": 1 }));
+    assert.equal(is.code, 0, `183's time fails the job on ${runner}: the times are a report`);
+    assert.match(is.out, new RegExp(`::notice title=A test near its stop::${diagnostics} took 3\\d\\.\\d s on ${runner}, 9\\d\\.\\d%25 of its stop of 40 s`), `183 draws no notice on ${runner}`);
+    assert.match(is.summary, new RegExp(`\\| \`${diagnostics}\` \\| 3\\d\\.\\d \\| 40 \\| \\*\\*9\\d\\.\\d%\\*\\* \\|`), `183's share is not in the summary on ${runner}`);
+  }
+  // main gives a test of the longer group its own stop, read from .config/nextest.toml: at 80 s it
+  // draws no notice, and at 82 s one of 180 s.
+  const longest = `mente-cli::bin/mn ${SLOW_TESTS.find(([p]) => p === "mente-cli")[1]}`;
+  assert.doesNotMatch(run("ubuntu-24.04", junitOf({ [longest]: 80 })).out, /::notice /, "main holds a test of the longer group to the default stop");
+  assert.match(run("ubuntu-24.04", junitOf({ [longest]: 82 })).out, /, 45\.6%25 of its stop of 180 s$/m, "main gives no notice to a test of the longer group past 45% of its stop");
+  // Only a broken report fails: one missing, one whose count is not the count read, or an argument.
+  const missing = run("ubuntu-24.04", undefined);
+  assert.equal(missing.code, 1, "a missing report passes");
+  assert.match(missing.err, /^::error title=No report of the tests' times::target\/nextest\/ci\/junit\.xml could not be read in full: ENOENT/);
+  assert.equal(run("ubuntu-24.04", junitOf({ "mente-sema t": 1 }, 2)).code, 1, "a report whose count is not the count read passes");
+  assert.equal(run("ubuntu-24.04", junitOf({ "mente-sema t": 1 }), ["extra"]).code, 2, "an argument passes");
 });

@@ -50,6 +50,8 @@ export const PINNED_FILES = new Map([
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
+  [".github/scripts/lib/test-times.mjs", "3ca15a31f747f5125186af1648202803a2563f347a326a13c06642cc5a9bc372"],
+  [".github/scripts/test-times.mjs", "397e521bd3c3932429a6c16b5634c0de99ec9b2cf3203eb148ee51c462a392e9"],
   [".github/scripts/tools.sh", "dee23b6f996a8b6772446056aa448ad2a35e60563a3e0320e1855b6a420e90d0"],
   [".github/scripts/test-sandbox.sh", "9ac640fe36800bc80902151031552ff8f218c104f03c85a3a79951df880a7bbd"],
   // The sandbox's one program, cargo's runner and the namespace's first process, which
@@ -110,7 +112,7 @@ export const PINNED_FILES = new Map([
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 export const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "43563468f8a2f3871922acb9eaf4531e1cdc097c64f7215166ae890791587819"],
+  ["ci.yml#rust", "3105565a83bb93bb4fbee08ec79b936931500637dc51afce73ddb51cc5dec303"],
   ["mutants.yml#in-diff", "6b54eaf7d853b04bf84a06306bee5d6d0195bf17477bd7e2c6be4ceeaf9526ad"],
   ["mutants-full.yml#full", "ef3c64177ebd2171cd1fccad046dd3e796dfc9d4294101359fbd0329afa46c88"],
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
