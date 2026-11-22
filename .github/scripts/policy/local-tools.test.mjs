@@ -243,10 +243,16 @@ check("the quick checks run every command in one of the machine's build slots, u
 const GUARD_SETTINGS = ".claude/settings.json";
 // `|| exit 2`: a guard that fails to load exits 1, which Claude Code lets pass; this refuses.
 const GUARD_COMMAND = 'node "$CLAUDE_PROJECT_DIR/tools/raw-build-guard.mjs" || exit 2';
+/// The push guard's command, which refuses a push of a tree tools/quick.mjs has not passed
+/// (tools/push.mjs; Norman approved it, 2026-11-22).
+const PUSH_GUARD_COMMAND = 'node "$CLAUDE_PROJECT_DIR/tools/push-guard.mjs" || exit 2';
+/// The tools whose commands both guards read before they run.
+const GUARDED_TOOLS = ["Bash", "PowerShell", "Monitor", "mcp__terminal__run_in_terminal"];
 
-/// What keeps `settings`, the project's Claude Code settings as parsed, from running the guard
-/// before every Bash and PowerShell command: a PreToolUse hook whose matcher takes both tools'
-/// names, with the guard's command among its hooks.
+/// What keeps `settings`, the project's Claude Code settings as parsed, from running each guard,
+/// the raw-build guard and the push guard, before every command of a tool that runs one: Bash,
+/// PowerShell, Monitor and the terminal's run_in_terminal (the second review of #203). A PreToolUse
+/// hook whose matcher takes each tool's name, with the guard's command among its hooks.
 export function guardSettingsProblems(settings) {
   const takes = (matcher, name) => {
     try {
@@ -257,9 +263,11 @@ export function guardSettingsProblems(settings) {
   };
   const before = Array.isArray(settings?.hooks?.PreToolUse) ? settings.hooks.PreToolUse : [];
   const problems = [];
-  for (const tool of ["Bash", "PowerShell"]) {
-    const runs = before.some((h) => typeof h?.matcher === "string" && takes(h.matcher, tool) && Array.isArray(h.hooks) && h.hooks.some((x) => x?.type === "command" && x.command === GUARD_COMMAND));
-    if (!runs) problems.push(`${GUARD_SETTINGS} does not run \`${GUARD_COMMAND}\` before each ${tool} command`);
+  for (const command of [GUARD_COMMAND, PUSH_GUARD_COMMAND]) {
+    for (const tool of GUARDED_TOOLS) {
+      const runs = before.some((h) => typeof h?.matcher === "string" && takes(h.matcher, tool) && Array.isArray(h.hooks) && h.hooks.some((x) => x?.type === "command" && x.command === command));
+      if (!runs) problems.push(`${GUARD_SETTINGS} does not run \`${command}\` before each ${tool} command`);
+    }
   }
   return problems;
 }
@@ -345,6 +353,9 @@ check("the raw-build guard refuses a build outside the local limits and names th
     assert.match(answer.words, /^the raw-build guard /);
   }
   assert.deepEqual(rawBuildDecide(JSON.stringify({ tool_input: { command: "node tools/cargo.mjs test" } })), { status: 0, words: "" });
+  assert.deepEqual(rawBuildDecide(JSON.stringify({ tool_name: "Monitor", tool_input: { ws: { url: "wss://example.invalid" } } })), { status: 0, words: "" }, "a Monitor of a WebSocket runs no command");
+  assert.equal(rawBuildDecide(JSON.stringify({ tool_name: "mcp__terminal__run_in_terminal", tool_input: { command: "cargo test", cwd: "C:/x" } })).status, 2);
+  assert.equal(rawBuildDecide(JSON.stringify({ tool_name: "Monitor", tool_input: {} })).status, 2, "an event with neither command nor WebSocket refuses");
   assert.equal(rawBuildDecide(JSON.stringify({ tool_input: { command: "cargo test" } })).status, 2);
   // The project's settings, which every checkout and every session of it reads, run the guard
   // before each Bash and PowerShell command (Norman, 2026-11-22).
@@ -354,6 +365,9 @@ check("the raw-build guard refuses a build outside the local limits and names th
   const ours = settings.hooks.PreToolUse.find((h) => h.hooks?.some((x) => x.command === GUARD_COMMAND));
   for (const [plant, what] of [
     [hook("Bash", GUARD_COMMAND), "the guard for Bash alone"],
+    [hook(ours.matcher, GUARD_COMMAND), "the raw-build guard without the push guard"],
+    [hook(ours.matcher, PUSH_GUARD_COMMAND), "the push guard without the raw-build guard"],
+    [{ hooks: { PreToolUse: [{ matcher: "Bash|PowerShell", hooks: ours.hooks }] } }, "both guards before Bash and PowerShell alone"],
     [hook(ours.matcher, 'node "$CLAUDE_PROJECT_DIR/tools/other.mjs"'), "another script"],
     [{ hooks: { PostToolUse: settings.hooks.PreToolUse } }, "the guard after the command, not before"],
     [{}, "no hook"],
