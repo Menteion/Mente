@@ -370,7 +370,17 @@ check("every test's share of its stop is reported on every runner, and only a br
   // highest first, and the message escaped as GitHub reads a workflow command.
   const noticed = (current) => times.report("windows-2025", times.shares(new Map(Object.entries(current)), longer)).lines.filter((l) => l.startsWith("::notice "));
   assert.deepEqual(noticed({ "mente-cli::reproducible t": 18 }), [], "a test at 45% of its stop draws a notice");
-  assert.deepEqual(noticed({ "mente-cli::reproducible t": 18.1 }), ["::notice title=A test near its stop::mente-cli::reproducible t took 18.1 s on windows-2025, 45%25 of its stop of 40 s"], "a test past 45% of its stop draws no notice, or one GitHub misreads");
+  assert.deepEqual(noticed({ "mente-cli::reproducible t": 18.1 }), ["::notice title=A test near its stop::mente-cli::reproducible t took 18.1 s on windows-2025, 45.3%25 of its stop of 40 s"], "a test past 45% of its stop draws no notice, or one GitHub misreads");
+  // A share past NOTICE never reads as NOTICE: rounded up to a tenth of a percent, and exactly
+  // NOTICE as itself.
+  assert.match(noticed({ "mente-cli::reproducible t": 18.001 })[0], /, 45\.1%25 of its stop of 40 s$/, "a share just past 45% reads as 45%");
+  assert.equal(times.pct(times.NOTICE), "45.0%");
+  // Past the notices GitHub keeps for a step, one notice says how many there are, first.
+  const crowd = (n) => noticed(Object.fromEntries(Array.from({ length: n }, (_, k) => [`mente-sema t${k}`, 30])));
+  assert.equal(crowd(times.ANNOTATIONS).length, times.ANNOTATIONS, "as many notices as GitHub keeps draw one more");
+  const past = crowd(times.ANNOTATIONS + 1);
+  assert.equal(past.length, times.ANNOTATIONS + 2, "past the notices GitHub keeps, none says how many tests there are");
+  assert.match(past[0], /^::notice title=Tests near their stop::11 tests took past 45\.0%25 of their stop on windows-2025, more than the 10 notices GitHub shows: the job's summary lists them all$/);
   assert.deepEqual(noticed({ "mente-cli::bin/mn mir_run::coverage::slow": 80 }), [], "a test of the longer group is held to the default stop");
   assert.equal(noticed({ "mente-cli::bin/mn mir_run::coverage::slow": 82 }).length, 1, "a test of the longer group past 45% of 180 s draws no notice");
   assert.deepEqual(times.shares(new Map([["b t", 2], ["a t", 30], ["c t", 2]]), longer).map((r) => r.id), ["a t", "b t", "c t"]);
@@ -412,9 +422,14 @@ check("every test's share of its stop is reported on every runner, and only a br
     assert.doesNotMatch(was.out, /::notice /, `main before 183 draws a notice on ${runner}`);
     const is = run(runner, junitOf({ [diagnostics]: after, "mente-sema t": 1 }));
     assert.equal(is.code, 0, `183's time fails the job on ${runner}: the times are a report`);
-    assert.match(is.out, new RegExp(`::notice title=A test near its stop::${diagnostics} took 3\\d\\.\\d s on ${runner}, 9\\d%25 of its stop of 40 s`), `183 draws no notice on ${runner}`);
-    assert.match(is.summary, new RegExp(`\\| \`${diagnostics}\` \\| 3\\d\\.\\d \\| 40 \\| \\*\\*9\\d%\\*\\* \\|`), `183's share is not in the summary on ${runner}`);
+    assert.match(is.out, new RegExp(`::notice title=A test near its stop::${diagnostics} took 3\\d\\.\\d s on ${runner}, 9\\d\\.\\d%25 of its stop of 40 s`), `183 draws no notice on ${runner}`);
+    assert.match(is.summary, new RegExp(`\\| \`${diagnostics}\` \\| 3\\d\\.\\d \\| 40 \\| \\*\\*9\\d\\.\\d%\\*\\* \\|`), `183's share is not in the summary on ${runner}`);
   }
+  // main gives a test of the longer group its own stop, read from .config/nextest.toml: at 80 s it
+  // draws no notice, and at 82 s one of 180 s.
+  const longest = `mente-cli::bin/mn ${SLOW_TESTS.find(([p]) => p === "mente-cli")[1]}`;
+  assert.doesNotMatch(run("ubuntu-24.04", junitOf({ [longest]: 80 })).out, /::notice /, "main holds a test of the longer group to the default stop");
+  assert.match(run("ubuntu-24.04", junitOf({ [longest]: 82 })).out, /, 45\.6%25 of its stop of 180 s$/m, "main gives no notice to a test of the longer group past 45% of its stop");
   // Only a broken report fails: one missing, one whose count is not the count read, or an argument.
   const missing = run("ubuntu-24.04", undefined);
   assert.equal(missing.code, 1, "a missing report passes");

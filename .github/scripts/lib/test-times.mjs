@@ -88,16 +88,24 @@ export function shares(current, longer) {
     .sort((a, b) => b.share - a.share || a.id.localeCompare(b.id));
 }
 
-const pct = (x) => `${(x * 100).toFixed(0)}%`;
+/// A share as a percentage, rounded up to a tenth of one, so that a share past NOTICE never reads
+/// as NOTICE itself; the noise of the floating-point product is dropped first, so a share of
+/// exactly NOTICE reads as it.
+export const pct = (x) => `${(Math.ceil(Number((x * 1000).toFixed(6))) / 10).toFixed(1)}%`;
 /// A message of a workflow command, as GitHub reads one: `%`, CR and LF escaped.
 export const commandData = (s) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+/// The annotations of one type GitHub keeps for a step; past them it drops the rest unseen.
+export const ANNOTATIONS = 10;
 
-/// What the step prints of the shares on `runner`: a line, a notice for each test past NOTICE, and
-/// the summary's table of the LISTED highest shares, or of every test past NOTICE if more.
+/// What the step prints of the shares on `runner`: a line, a notice for each test past NOTICE,
+/// highest first, after one notice of how many there are when they are more than GitHub keeps,
+/// and the summary's table of the LISTED highest shares, or of every test past NOTICE if more.
 export function report(runner, rows) {
   const near = rows.filter((r) => r.share > NOTICE);
   const head = `test times on ${runner}: ${rows.length} tests, ${near.length} past ${pct(NOTICE)} of their stop`;
-  const notices = near.map((r) => `::notice title=A test near its stop::${commandData(`${r.id} took ${r.time.toFixed(1)} s on ${runner}, ${pct(r.share)} of its stop of ${r.stop} s`)}`);
+  const each = near.map((r) => `::notice title=A test near its stop::${commandData(`${r.id} took ${r.time.toFixed(1)} s on ${runner}, ${pct(r.share)} of its stop of ${r.stop} s`)}`);
+  const many = near.length > ANNOTATIONS ? [`::notice title=Tests near their stop::${commandData(`${near.length} tests took past ${pct(NOTICE)} of their stop on ${runner}, more than the ${ANNOTATIONS} notices GitHub shows: the job's summary lists them all`)}`] : [];
+  const notices = [...many, ...each];
   const table = ["| Test | Time (s) | Stop (s) | Share |", "| :--- | ---: | ---: | ---: |"];
   for (const r of rows.slice(0, Math.max(LISTED, near.length))) table.push(`| \`${r.id}\` | ${r.time.toFixed(1)} | ${r.stop} | ${r.share > NOTICE ? `**${pct(r.share)}**` : pct(r.share)} |`);
   return { lines: [head, ...notices], summary: `### ${head}\n\nA report, which fails nothing: the gate on the compiler's cost is its counts of work.\n\n${table.join("\n")}\n` };
