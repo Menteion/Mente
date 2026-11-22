@@ -209,6 +209,13 @@ test("when a parent that is not node ends, the wrapper ends the command too", { 
   assert.ok(gone, "the command outlived the PowerShell that started its wrapper by 10 s");
 });
 
+/**
+ * Whether a run of cargo.mjs got past cargo's runner: cargo ran, or the tools refused for git's
+ * hooks alone (local-limits.mjs, requireHooks), which they read from their own checkout after the
+ * runner, so that this proof of the runner holds whatever this machine's hooks are.
+ */
+const pastRunner = (r) => r.status === 0 || (r.status === 2 && /core\.hooksPath/.test(r.stderr) && !/cargo's runner|_RUNNER is set/.test(r.stderr));
+
 test("the tools refuse to run until cargo's runner is the capped one, and name the lines to add", { skip }, () => {
   // The review of round 4: CLAUDE.md called cargo's runner the wall, which nothing set or checked.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cargo-home-"));
@@ -224,15 +231,19 @@ test("the tools refuse to run until cargo's runner is the capped one, and name t
     ['"wine"', "another runner"],
   ]) {
     fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ${runner}\n`);
-    assert.equal(cargo().status, 2, `the tools ran with ${what}`);
+    const refused = cargo();
+    assert.equal(refused.status, 2, `the tools ran with ${what}`);
+    assert.match(refused.stderr, /cargo's runner on this laptop is/, `the tools refused ${what} for another reason than the runner`);
   }
   // The capped runner, but for another target: cargo would not use it here.
   fs.writeFileSync(path.join(home, "config.toml"), `[target.aarch64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
-  assert.equal(cargo().status, 2, "the tools ran with the capped runner set for another target");
+  const elsewhere = cargo();
+  assert.equal(elsewhere.status, 2, "the tools ran with the capped runner set for another target");
+  assert.match(elsewhere.stderr, /cargo's runner on this laptop is/, "the tools refused the runner of another target for another reason");
   fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
   const held = cargo();
-  assert.equal(held.status, 0, `${held.stdout}${held.stderr}`);
-  assert.match(held.stdout, /^cargo \d/);
+  assert.ok(pastRunner(held), `${held.stdout}${held.stderr}`);
+  if (held.status === 0) assert.match(held.stdout, /^cargo \d/);
   // The variable cargo reads before every file: the capped runner by it alone is held, and another
   // runner by it is refused whatever the file says, as cargo would run that one.
   const variable = (value, config) => {
@@ -240,7 +251,7 @@ test("the tools refuse to run until cargo's runner is the capped one, and name t
     return spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home, CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: value }, encoding: "utf8", timeout: 60000 });
   };
   const capped = `node ${path.join(HERE, "capped.mjs").replace(/\\/g, "/")} --mente-only --`;
-  assert.equal(variable(capped, "").status, 0, "the capped runner set by CARGO_TARGET_..._RUNNER was refused");
+  assert.ok(pastRunner(variable(capped, "")), "the capped runner set by CARGO_TARGET_..._RUNNER was refused");
   const good = `[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`;
   const over = variable("wine", good);
   assert.equal(over.status, 2, "another runner set by CARGO_TARGET_..._RUNNER passed over a capped one in the file");

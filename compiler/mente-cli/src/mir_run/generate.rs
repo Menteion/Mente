@@ -5931,6 +5931,16 @@ fn req_text(r: &Req, params: &[Param]) -> String {
 
 // -------------------------------------------------------------------- programs that check
 
+/// What a panic carried, for the problem that reports it: its message, so that a run names
+/// the internal error and not only that there was one.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+        .unwrap_or_else(|| "a panic with no message".to_string())
+}
+
 /// A generated program that passes every check, Tier 1 included, so that the three paths run
 /// it: the program of its seed, with each function Tier 1 refused generated again.
 pub struct Checked {
@@ -6102,9 +6112,10 @@ pub fn checked(seed: u64) -> Checked {
                                 }));
                             }
                         }
-                        Err(_) => problems.push(format!(
-                            "seed {}: Tier 1 panicked replaying its loops",
-                            seed
+                        Err(payload) => problems.push(format!(
+                            "seed {}: Tier 1 panicked replaying its loops: {}",
+                            seed,
+                            panic_message(&*payload)
                         )),
                     }
                     return Checked {
@@ -6128,8 +6139,12 @@ pub fn checked(seed: u64) -> Checked {
                 continue;
             }
             Ok(Err(diagnostics)) => diagnostics,
-            Err(_) => {
-                problems.push(format!("seed {}: the checker panicked", seed));
+            Err(payload) => {
+                problems.push(format!(
+                    "seed {}: the checker panicked: {}",
+                    seed,
+                    panic_message(&*payload)
+                ));
                 return refused(program, claims, problems);
             }
         };
@@ -6155,15 +6170,25 @@ pub fn checked(seed: u64) -> Checked {
             return refused(program, claims, problems);
         }
         // Tier 1 alone refuses the program, so without it the functions run.
-        let Ok(Ok(kept)) =
-            panic::catch_unwind(|| mente_sema::check_program_without_proofs(&program.text))
-        else {
-            problems.push(format!(
-                "seed {}: Tier 1 alone refuses the program, which does not check without it",
-                seed
-            ));
-            return refused(program, claims, problems);
-        };
+        let kept =
+            match panic::catch_unwind(|| mente_sema::check_program_without_proofs(&program.text)) {
+                Ok(Ok(kept)) => kept,
+                Ok(Err(_)) => {
+                    problems.push(format!(
+                    "seed {}: Tier 1 alone refuses the program, which does not check without it",
+                    seed
+                ));
+                    return refused(program, claims, problems);
+                }
+                Err(payload) => {
+                    problems.push(format!(
+                        "seed {}: the checker panicked without proofs: {}",
+                        seed,
+                        panic_message(&*payload)
+                    ));
+                    return refused(program, claims, problems);
+                }
+            };
         attempts.resize(program.functions.len(), 0);
         // A function deeper than the harnesses' bound is generated again before the reference
         // interpreter runs anything of the program.
@@ -7942,6 +7967,32 @@ mod tests {
         // Every call but one whose result needs more than 128 bits, which the trap holds not.
         assert!(seen[0].reached > 200, "{:?}", seen[0]);
         assert_eq!(seen[0].nearest.as_deref(), Some("-4"));
+    }
+
+    /// A checker that panics is reported with what it said (`panic_message`), so that a run
+    /// names the internal error and not only that there was one: the 18 programs the 4000 seeds
+    /// of pull request 204 refused were each `the checker panicked`, and named nothing.
+    #[test]
+    fn test_a_panic_is_reported_with_what_it_said() {
+        fn planted(n: u8) -> u8 {
+            if n == 0 {
+                panic!("internal error: planted at {}", n);
+            }
+            n
+        }
+        let said = |caught: std::thread::Result<u8>| match caught {
+            Err(payload) => panic_message(&*payload),
+            Ok(n) => n.to_string(),
+        };
+        assert_eq!(
+            said(panic::catch_unwind(|| planted(0))),
+            "internal error: planted at 0"
+        );
+        assert_eq!(
+            said(panic::catch_unwind(|| -> u8 { panic::panic_any(7_u8) })),
+            "a panic with no message"
+        );
+        assert_eq!(said(panic::catch_unwind(|| planted(3))), "3");
     }
 
     /// A run is held to two bars, whatever its size: the functions it generates again for
