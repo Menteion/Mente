@@ -203,12 +203,16 @@ export function readList(text) {
 /// timeout, a leak that fails, or a signal or an abort.
 const FAILED_TEST = /^\s+(FAIL|TIMEOUT|LEAK-FAIL|SIG[A-Z]+|ABORT) \[/m;
 
+/// The sandbox's one program, as setup installs it and test-sandbox.sh names it cargo's runner,
+/// `test-sandbox run` (.github/scripts/test-sandbox.rs). The policy holds the script, the program
+/// and this to the one path.
+export const SANDBOX_PROGRAM = "/opt/mente-test-sandbox/test-sandbox";
 /// What nextest prints before a run whose test executables it hands to the sandbox
-/// (.github/scripts/test-sandbox.sh): its own line, for each mutant, in that mutant's log. The
-/// count of sandboxed commands at the step's end cannot tell one mutant's tests from another's.
-/// A test's own output lands in the same log, so the line counts only where nextest alone writes:
-/// before its line that starts the tests, and so before any failed test.
-const SANDBOX_RUNNER = /^\s*info: (?:for the \w+ platform, )?using target runner `[^`\n]*\/test-sandbox\.sh run`/m;
+/// (.github/scripts/test-sandbox.sh): its own line, for each mutant, in that mutant's log, naming
+/// that program exactly. The count of sandboxed commands at the step's end cannot tell one mutant's
+/// tests from another's. A test's own output lands in the same log, so the line counts only where
+/// nextest alone writes: before its line that starts the tests, and so before any failed test.
+const SANDBOX_RUNNER = new RegExp(`^\\s*info: (?:for the \\w+ platform, )?using target runner \`${SANDBOX_PROGRAM.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")} run\``, "m");
 /// nextest's line that starts the tests, after which a test's output may appear.
 const TESTS_START = /^\s*Starting \d+ tests? across /m;
 

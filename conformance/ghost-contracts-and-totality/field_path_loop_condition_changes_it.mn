@@ -1,6 +1,7 @@
-// expect: E0504
+// expect: E0236
 module conformance
-// A loop's condition that passes a struct `mut` changes its fields at the head of every round.
+// A condition decides and changes nothing (core-calculus.md, item 10): this loop's condition
+// passes a struct `mut`, which would change its fields at the head of every round.
 pub struct P {
   a: u8
 }

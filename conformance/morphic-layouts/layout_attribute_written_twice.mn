@@ -1,0 +1,21 @@
+// expect: E0427 E0427 E0427
+module conformance
+// A layout states each of its numbers once (morphic-layouts.md, item 2): a second `@layout`, a
+// second `@bytes` and a second `@bits` are each an error, which names the second. The parser
+// once read the last `@bytes` and the layout check the first, so a fix rewrote the first with
+// its own text and never converged.
+@layout(size: 8, align: 8)
+@layout(size: 16, align: 8)
+pub struct Twice {
+  @bytes(0..8) pub v: u64
+}
+
+@layout(size: 8, align: 8)
+pub struct Field {
+  @bytes(0..8) @bytes(0..eight) pub v: u64
+}
+
+pub bitstruct Bits : u8 {
+  @bits(0..4) @bits(0..8) pub a: u4
+  @bits(4..8) pub b: u4
+}

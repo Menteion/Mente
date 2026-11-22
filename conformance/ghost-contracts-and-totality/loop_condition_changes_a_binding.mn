@@ -1,7 +1,8 @@
-// expect: E0504
+// expect: E0236
 module conformance
-// A loop's condition runs at the head of every round: a binding it passes `mut` changes there,
-// so `take0(x)` may see 9 in the second round.
+// A condition decides and changes nothing (core-calculus.md, item 10): this loop's condition
+// passes `x` `mut`, which would change it at the head of every round, so that `take0(x)` saw 9
+// in the second round.
 fn bump(mut x: u8) -> u8
   ensures x == 9
 {

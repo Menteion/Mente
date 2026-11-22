@@ -86,3 +86,16 @@
 # them, and a module the policy loaded could turn its assertions off (the quick check of d471f7e).
 /tools/quick.mjs @Dancraft3746
 /tools/quick-checks.json @Dancraft3746
+
+# The local limits every session builds and tests under on the laptop, and their proofs: an edit
+# could lift the caps that keep one runaway from taking the machine down (the reset of 2026-11-22).
+/tools/local-limits.mjs @Dancraft3746
+/tools/local-limits.test.mjs @Dancraft3746
+/tools/capped.ps1 @Dancraft3746
+/tools/capped.mjs @Dancraft3746
+/tools/cargo.mjs @Dancraft3746
+/tools/mn.mjs @Dancraft3746
+/tools/raw-build.mjs @Dancraft3746
+/tools/raw-build-guard.mjs @Dancraft3746
+/tools/store-apps.mjs @Dancraft3746
+/.claude/settings.json @Dancraft3746

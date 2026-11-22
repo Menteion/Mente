@@ -399,6 +399,8 @@ impl Parser {
             self.skip_to_clauses();
         }
 
+        // Every node of the header is built by now, and none of the body's.
+        let header = self.tree.counts();
         let body = match self.peek() {
             TokenKind::LBrace => Some(Body::Block(self.block())),
             TokenKind::Eq => {
@@ -423,6 +425,7 @@ impl Parser {
             contracts,
             body,
             tree: std::mem::take(&mut self.tree),
+            header,
         }
     }
 
@@ -2742,7 +2745,7 @@ fn assign_op(kind: &TokenKind) -> Option<AssignOp> {
 }
 
 /// The suffix of an integer literal as written: `u8` for `255_u8` and `0xFF_u8`.
-fn int_suffix(raw: &str) -> Option<String> {
+pub(crate) fn int_suffix(raw: &str) -> Option<String> {
     let hex = raw.starts_with("0x");
     let bytes = raw.as_bytes();
     (1..bytes.len())

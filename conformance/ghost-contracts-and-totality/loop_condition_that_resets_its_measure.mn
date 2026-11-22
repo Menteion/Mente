@@ -1,0 +1,17 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (core-calculus.md, item 10): this loop's condition
+// resets `c`, which its measure `3 - c` reads, in a branch of an `if` before the conjunct that
+// bounds it, so the measure need not fall from one round to the next.
+pub fn f(q: u8) -> u8 {
+  var c: u8 = 0
+  while (if q > 8 {
+    c = 0
+    0
+  } else {
+    0
+  }) == 0 and c < 3 decreases 3 - c {
+    c += 1
+  }
+  c
+}

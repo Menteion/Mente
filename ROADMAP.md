@@ -183,7 +183,7 @@ Runs in full at the end: `mn fmt`, in use; the internal preview, marked unstable
 
 **Decided first:** [`atomics-memory-ordering`](docs/design-review.md#atomics-memory-ordering), [`atomic-record-fields`](docs/design-review.md#atomic-record-fields), [`lock-free-structures`](docs/design-review.md#lock-free-structures), [`memory-reclamation`](docs/design-review.md#memory-reclamation), [`barrier-and-channel`](docs/design-review.md#barrier-and-channel), [`core-pinning`](docs/design-review.md#core-pinning). **Spike before it:** fiber stacks reserved and switched on Windows and Linux, with guard pages.
 
-- [ ] Fibers on reserved stacks that debuggers and profilers can walk, `parallel (...)`, and `parallel_for` over structural partitions.
+- [ ] Fibers on reserved stacks that debuggers and profilers can walk, `parallel (...)`, and `parallel_for` over structural partitions. Whether the scheduler's protocol is model-checked beside its tests is open ([`scheduler-model-check`](docs/design-review.md#scheduler-model-check)).
 - [ ] The stack budget of each task, and the reservation of its stack, which item 25 of `core-calculus.md` leaves to this milestone ([`stack-budget`](docs/design-review.md#stack-budget), [`max-stack-unit`](docs/design-review.md#max-stack-unit)).
 - [ ] `Sched` with deterministic simulation (`SimClock`, `SimNet`, `SimSched`), the memory model, networking and HTTP.
 - [ ] The cost report adds atomic operations and cache lines shared between tasks.

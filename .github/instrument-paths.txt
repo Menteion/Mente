@@ -33,6 +33,7 @@ rust-toolchain.toml
 .github/scripts/tools.sh
 # The sandbox its tests run in.
 .github/scripts/test-sandbox.sh
+.github/scripts/test-sandbox.rs
 .github/scripts/test-sandbox-env.sh
 # The floor of work the job checks.
 .github/scripts/mutants-floor.mjs
@@ -53,6 +54,7 @@ Cargo.lock
 rust-toolchain.toml
 # The sandbox its tests run in.
 .github/scripts/test-sandbox.sh
+.github/scripts/test-sandbox.rs
 .github/scripts/test-sandbox-env.sh
 .github/workflows/generated.yml
 # The check that nothing of the change can run where cargo builds, which runs first.
@@ -75,6 +77,8 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .github/workflows/fuzz.yml
+# The summary of its run, every part capped.
+.github/scripts/fuzz-summary.mjs
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs

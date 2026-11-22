@@ -1,0 +1,10 @@
+// expect: E0225
+module conformance
+// A struct that contains itself with no integer field on the cycle, taken as a parameter: the
+// module is refused for the declaration alone (core-calculus.md), and Tier 1, which reads the
+// types the declarations give, proves none of its functions.
+pub struct Node {
+  next: Node
+}
+
+pub fn first(n: Node) -> u8 = 0

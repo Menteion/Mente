@@ -1,0 +1,5 @@
+mn fuzz found
+phase: incremental
+edit seed: unknown
+found by: mn fuzz, in the change of commit 6f4a05c ("Gate Tier 1 on the types the declarations give, not on every error"), which kept the input and not its record; the seed was not kept
+replay: mn fuzz --replay incremental-functions-of-one-name.mn
