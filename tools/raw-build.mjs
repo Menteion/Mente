@@ -295,6 +295,7 @@ export function decide(input) {
     return { status: 2, words: `the raw-build guard could not read its event, so the command did not run: ${e.message}` };
   }
   const command = event?.tool_input?.command;
+  if (command === undefined && event?.tool_input?.ws !== undefined) return { status: 0, words: "" };
   if (typeof command !== "string") return { status: 2, words: "the raw-build guard found no command in its event, so the command did not run" };
   const why = refusal(command);
   return why ? { status: 2, words: message(why) } : { status: 0, words: "" };

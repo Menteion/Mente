@@ -16,7 +16,7 @@
 // Off Windows the commands run unbounded and take no slot, and each says so: the laptop is the
 // machine this guards.
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,6 +36,27 @@ export const BUILD = Object.freeze({ processGB: 8, jobGB: 16, minutes: 30 });
 /// the last passing run of tools/quick.mjs read, which the push guard (tools/push.mjs) compares
 /// with the tree of each commit a push would send.
 export const PASSED = "quick-passed";
+/// The directory core.hooksPath names in this repository, relative to each checkout's root: git's
+/// own hooks of the repository, the pre-push hook among them (tools/git-hooks/pre-push), which
+/// refuses a push of a tree the quick checks have not passed.
+export const HOOKS_PATH = "tools/git-hooks";
+
+/**
+ * Whether the repository of `cwd` runs its own git hooks: core.hooksPath is HOOKS_PATH. If not,
+ * says the one command to run, as requireRunner does for cargo's runner (Norman, 2026-11-22), and
+ * returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run nothing until it is.
+ */
+export function requireHooks({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
+  let value = "";
+  try {
+    value = execFileSync("git", ["config", "--get", "core.hooksPath"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    value = "";
+  }
+  if (value === HOOKS_PATH) return true;
+  say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, so git's pre-push hook of this repository (${HOOKS_PATH}/pre-push), which refuses a push of a tree the quick checks have not passed, does not run, and nothing here runs until it does. Run this once:\n\ngit config core.hooksPath ${HOOKS_PATH}\n`);
+  return false;
+}
 export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });
 /// libuv's UV_FS_O_EXLOCK: Windows opens the file sharing it with no other handle.
 const EXCLUSIVE = 0x10000000;

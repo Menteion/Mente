@@ -164,6 +164,7 @@ export const GATE_FILES = [
   "/tools/push.mjs",
   "/tools/push-guard.mjs",
   "/tools/push.test.mjs",
+  "/tools/git-hooks/",
   "/tools/local-limits.mjs",
   "/tools/local-limits.test.mjs",
   "/tools/capped.ps1",

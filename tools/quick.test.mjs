@@ -84,6 +84,7 @@ function withRepository(body) {
     fs.mkdirSync(work);
     const git = (...args) => execFileSync("git", args, { cwd: work, env, encoding: "utf8" }).trim();
     git("init", "-q", "-b", "main");
+    git("config", "core.hooksPath", "tools/git-hooks");
     fs.writeFileSync(path.join(work, "a.md"), "a\n");
     fs.writeFileSync(path.join(work, ".gitignore"), "out/\n");
     fs.mkdirSync(path.join(work, "sub"));
@@ -133,6 +134,9 @@ function change({ work, git }) {
 const CLEAN = [
   "quick: the working tree is HEAD's tree, before the checks and after them: no tracked or unignored file differs from HEAD, so these checks read what a push sends.",
 ];
+const CLEAN_LISTING = [
+  "quick: the working tree is HEAD's tree: no tracked or unignored file differs from HEAD, so checks run now would read what a push sends.",
+];
 const DIFFERS = [
   "quick: the working tree differs from HEAD, in 3 entries of git's short status, which these checks read and a push does not send; this is no pass of HEAD until they are committed:",
   "   M a.md",
@@ -156,7 +160,7 @@ test("a listing says the checks read HEAD's tree when nothing differs from it, a
   withRepository((r) => {
     const clean = r.quick(["--list"]);
     assert.equal(clean.status, 0, clean.stderr);
-    assert.deepEqual(report(clean.stdout), CLEAN);
+    assert.deepEqual(report(clean.stdout), CLEAN_LISTING);
     change(r);
     const dirty = r.quick(["--list"]);
     assert.equal(dirty.status, 0, dirty.stderr);
@@ -192,6 +196,28 @@ test("a passing run on a working tree that differs from HEAD exits 0, says what 
     const tree = r.passed();
     assert.match(tree ?? "", /^[0-9a-f]{40}$/);
     assert.notEqual(tree, r.git("rev-parse", "HEAD^{tree}"));
+    // The record is the whole working tree: committed whole, new files and the file git was told
+    // not to compare among it, HEAD's tree is the tree the run read.
+    r.git("update-index", "--no-assume-unchanged", "hidden.md");
+    r.git("add", "-A");
+    r.git("commit", "-q", "-m", "everything the run read");
+    assert.equal(tree, r.git("rev-parse", "HEAD^{tree}"));
+  });
+});
+
+test("a run refuses to start until core.hooksPath names the repository's hooks, and says the command to run", (t) => {
+  withRepository((r) => {
+    r.git("config", "--unset", "core.hooksPath");
+    const run = r.quick();
+    if (noRunner(run)) return t.skip("cargo's runner is not the capped one here, so quick.mjs runs no check");
+    assert.equal(run.status, 2, `${run.stdout}\n${run.stderr}`);
+    assert.match(run.stderr, /core\.hooksPath is not set/);
+    assert.match(run.stderr, /git config core\.hooksPath tools\/git-hooks/);
+    assert.doesNotMatch(run.stdout, /\n== /, "no check ran");
+    r.git("config", "core.hooksPath", "elsewhere");
+    const other = r.quick();
+    assert.equal(other.status, 2);
+    assert.match(other.stderr, /core\.hooksPath is "elsewhere"/);
   });
 });
 

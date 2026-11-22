@@ -25,13 +25,14 @@
 // takes the working tree's tree, every tracked and unignored file as it stands, before its checks
 // and after them, and says the checks read HEAD only when both are HEAD's tree and HEAD did not
 // move. A run that passes on a tree that stood still writes that tree's id into the git directory
-// (local-limits.mjs, PASSED), and any other run takes it away: the push guard (tools/push.mjs)
-// refuses a push of a commit whose tree is not that one.
+// (local-limits.mjs, PASSED), and any other run takes it away: git's pre-push hook of this
+// repository (tools/git-hooks/pre-push, tools/push.mjs) refuses a push of a commit whose tree is not
+// that one, and quick runs nothing until core.hooksPath names that hook's directory.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";
-import { PASSED } from "./local-limits.mjs";
+import { PASSED, requireHooks } from "./local-limits.mjs";
 
 /** git's output, line by line, with `env` added to its environment. */
 function git(args, env = {}) {
@@ -44,7 +45,7 @@ function git(args, env = {}) {
  * repository's index as it was.
  */
 function workingTree() {
-  const index = git(["rev-parse", "--git-path", "quick-index"])[0];
+  const index = git(["rev-parse", "--git-path", `quick-index-${process.pid}`])[0];
   try {
     git(["read-tree", "HEAD"], { GIT_INDEX_FILE: index });
     git(["add", "--all"], { GIT_INDEX_FILE: index });
@@ -65,12 +66,14 @@ function snapshot() {
  * what differs, with the files git does not compare, marked assume-unchanged or skip-worktree.
  * Returns whether the tree stood still.
  */
-function reportTree(before) {
+function reportTree(before, listing = false) {
   const after = snapshot();
   const headTree = git(["rev-parse", "HEAD^{tree}"])[0];
   const still = before.head === after.head && before.tree === after.tree;
   if (still && after.tree === headTree) {
-    console.log("\nquick: the working tree is HEAD's tree, before the checks and after them: no tracked or unignored file differs from HEAD, so these checks read what a push sends.");
+    console.log(listing
+      ? "\nquick: the working tree is HEAD's tree: no tracked or unignored file differs from HEAD, so checks run now would read what a push sends."
+      : "\nquick: the working tree is HEAD's tree, before the checks and after them: no tracked or unignored file differs from HEAD, so these checks read what a push sends.");
     return true;
   }
   const status = git(["status", "--porcelain", "--untracked-files=all"]);
@@ -128,10 +131,11 @@ console.log(`quick: ${changed.size} changed file(s); ${due.length} check(s)\n`);
 const before = snapshot();
 if (process.argv.includes("--list")) {
   for (const check of due) console.log(`  ${check.name}: ${check.run.join(" ")}`);
-  reportTree(before);
+  reportTree(before, true);
   process.exit(0);
 }
 if (!requireRunner()) process.exit(2);
+if (!requireHooks()) process.exit(2);
 const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);
 const results = [];
 for (const check of due) {
