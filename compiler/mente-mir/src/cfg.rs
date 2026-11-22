@@ -4169,7 +4169,9 @@ mod tests {
                 );
             }
         }
-        // A guard and an assumption yield the integer they take.
+        // A guard and an assumption yield the integer they take, each held in a function of its
+        // own, so that one's refusal of an address cannot stand for the other's (the review of
+        // pull request 183: a guard that took one passed while beside an assumption).
         for guarded in [u, a] {
             let mut f = Builder::new("g", &[b, guarded], None);
             let [c, v] = f.params(BlockId(0))[..] else {
@@ -4178,10 +4180,21 @@ mod tests {
             let site = f.trap_site("narrowing", &["x does not fit"]);
             let fact = f.fact_site(Fact::Within(Num::ZERO, Num::from_i128(3)));
             f.inst(Op::Guard { trap: site, fact }, guarded, &[c, v]);
-            let w = f.assume(v, Fact::Within(Num::ZERO, Num::from_i128(3)));
-            let _ = w;
             f.ret(None);
-            assert_eq!(check(f.finish()).is_ok(), guarded == u, "{guarded}");
+            assert_eq!(
+                check(f.finish()).is_ok(),
+                guarded == u,
+                "a guard of {guarded}"
+            );
+            let mut f = Builder::new("g", &[guarded], None);
+            let v = f.params(BlockId(0))[0];
+            f.assume(v, Fact::Within(Num::ZERO, Num::from_i128(3)));
+            f.ret(None);
+            assert_eq!(
+                check(f.finish()).is_ok(),
+                guarded == u,
+                "an assumption of {guarded}"
+            );
         }
         // A count takes what it counts, an address among them; a call passes an address only to a
         // parameter that is one.
