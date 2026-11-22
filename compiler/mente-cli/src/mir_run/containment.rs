@@ -1025,4 +1025,158 @@ mod tests {
         let none = claims_changed(src, |st| st.values.clear());
         assert!(against(src, none, &[call("sum", &[3])]).problems.is_empty());
     }
+
+    /// A generator of the test's choices, the same at every run.
+    struct Draw(u64);
+
+    impl Draw {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+
+        /// A value of the 128-bit types' joint range, as its sign and magnitude, near the edges
+        /// of an `i128` and past them as often as near zero.
+        fn pair(&mut self) -> (bool, u128) {
+            let edge = [
+                0,
+                1,
+                2,
+                (i128::MAX as u128) - 1,
+                i128::MAX as u128,
+                (i128::MAX as u128) + 1,
+                (i128::MAX as u128) + 2,
+                u128::MAX,
+                u128::MAX - 1,
+            ];
+            let magnitude = match self.below(3) {
+                0 => u128::from(self.below(40)),
+                1 => edge[self.below(edge.len() as u64) as usize],
+                _ => (u128::from(self.next()) << 64) | u128::from(self.next()),
+            };
+            (self.below(2) == 0, magnitude)
+        }
+
+        fn exact(&mut self) -> Exact {
+            let (negative, magnitude) = self.pair();
+            Exact::new(negative, magnitude)
+        }
+
+        fn bound(&mut self) -> Option<Exact> {
+            (self.below(4) != 0).then(|| self.exact())
+        }
+    }
+
+    /// The exact verdict on one record, which [`judge`] gives: every bound and relation holds of
+    /// the values present.
+    fn holds_exactly(r: &Record, values: &[Option<Exact>]) -> bool {
+        r.bounds
+            .iter()
+            .all(|&(k, lo, hi)| values[k].is_none_or(|x| within(x, lo, hi)))
+            && r.relations
+                .iter()
+                .all(|&((a, na), (b, nb), c)| match (values[a], values[b]) {
+                    (Some(x), Some(y)) => related((na, x), (nb, y), c),
+                    _ => true,
+                })
+    }
+
+    fn int_of((negative, magnitude): (bool, u128)) -> Int {
+        let i = Int::from_u128(magnitude);
+        if negative {
+            i.negate()
+        } else {
+            i
+        }
+    }
+
+    /// The `i128` check decides as the exact one does wherever it decides, on random records and
+    /// values at and past the edges of an `i128`, and decides many of them; a value of an
+    /// expression likewise.
+    #[test]
+    fn test_the_fast_check_decides_as_the_exact_one() {
+        let mut d = Draw(0x9E37_79B9_7F4A_7C15);
+        let (mut decided, mut broken) = (0, 0);
+        for _ in 0..20_000 {
+            let k = 1 + d.below(3) as usize;
+            let pairs: Vec<Option<(bool, u128)>> = (0..k)
+                .map(|_| (d.below(6) != 0).then(|| d.pair()))
+                .collect();
+            let values: Vec<Option<Exact>> = pairs
+                .iter()
+                .map(|p| p.map(|(negative, magnitude)| Exact::new(negative, magnitude)))
+                .collect();
+            let mut r = Record::default();
+            for v in 0..k {
+                if d.below(3) != 0 {
+                    r.bounds.push((v, d.bound(), d.bound()));
+                }
+            }
+            for _ in 0..d.below(4) {
+                let (a, b) = (d.below(k as u64) as usize, d.below(k as u64) as usize);
+                let c = match d.below(3) {
+                    0 => d.below(80) as i128 - 40,
+                    1 => i128::MAX / 8 - d.below(3) as i128,
+                    _ => d.next() as i128 * if d.below(2) == 0 { 1 } else { -1 },
+                };
+                r.relations
+                    .push(((a, d.below(2) == 0), (b, d.below(2) == 0), c));
+            }
+            let nums: Vec<Num> = pairs
+                .iter()
+                .map(|v| match v {
+                    None => Num::Missing,
+                    Some(x) => match num(int_of(*x)) {
+                        Some(n) => Num::Fits(n),
+                        None => Num::Wide,
+                    },
+                })
+                .collect();
+            let exactly = holds_exactly(&r, &values);
+            if let Some(fast) = Fast::of(&r).and_then(|f| f.holds(&nums)) {
+                assert_eq!(fast, exactly, "{:?} at {:?}", r, values);
+                decided += 1;
+                broken += usize::from(!fast);
+            }
+            // A value against intervals, an array's elements each.
+            let live: Vec<(Option<Exact>, Option<Exact>)> = (0..1 + d.below(2))
+                .map(|_| (d.bound(), d.bound()))
+                .collect();
+            let fast_live = live
+                .iter()
+                .map(|&(lo, hi)| {
+                    Some((
+                        lo.map_or(Some(i128::MIN), Exact::to_i128)?,
+                        hi.map_or(Some(i128::MAX), Exact::to_i128)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>();
+            let value = Value::Array(
+                pairs
+                    .iter()
+                    .flatten()
+                    .map(|x| Value::Int(int_of(*x)))
+                    .collect(),
+            );
+            let inside =
+                first_outside(&value, &|x| live.iter().any(|(lo, hi)| within(x, *lo, *hi)))
+                    .is_none();
+            if let Some(fast) = fast_live.and_then(|f| all_within(&value, &f)) {
+                assert_eq!(fast, inside, "{} in {:?}", value, live);
+            }
+        }
+        // The fast check decides many records, both ways.
+        assert!(
+            decided > 5_000 && broken > 1_000,
+            "{} decided, {} broken",
+            decided,
+            broken
+        );
+    }
 }

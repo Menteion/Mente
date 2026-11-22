@@ -83,6 +83,8 @@ date: 2026-11-04
      <!-- @assert-count target="compiler/mente-syntax/src/tree.rs" symbol="fn test_a_subtree_holds_every_node_under_its_root_and_none_beside_it" min="1" reason="The points inside a clause Tier 1 walks nowhere are every node under it, and none beside it" -->
      <!-- @assert-count target="compiler/mente-cli/src/mir_run/differential.rs" symbol="fn test_three_paths_agree_on_generated_programs" min="1" reason="The comparison of generated programs runs the oracle: its reference runs reach points held against Tier 1" -->
      <!-- @assert-count target="compiler/mente-cli/src/mir_run/differential.rs" symbol="fn test_a_traced_run_prints_what_an_untraced_one_does" min="1" reason="The traced run that is the reference prints what an untraced run prints: the tracer only observes" -->
+     <!-- @assert-count target="compiler/mente-cli/src/mir_run/containment.rs" symbol="fn test_the_fast_check_decides_as_the_exact_one" min="1" reason="The i128 check every event runs decides as the exact one, at and past the edges of an i128" -->
+     <!-- @assert-count target="compiler/mente-cli/src/mir_run/differential.rs" symbol="fn test_the_conformance_suite_parts_hold_every_program_once" min="1" reason="The parts run every conformance program once, each heavy group in a part of its own" -->
      <!-- @assert-count target="compiler/mente-cli/src/mir_run/differential.rs" symbol="fn test_three_paths_agree_on_the_conformance_suite_part_" min="5" reason="Each part of the conformance suite runs the oracle, routed clauses that hold blocks included" -->
 3. **Constructive termination (`@total` and `decreases`)**:
    - `Specified`: functions annotated with `@total` MUST terminate on all valid inputs.

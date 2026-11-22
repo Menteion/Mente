@@ -733,30 +733,61 @@ fn conformance_programs() -> Vec<(String, String)> {
 /// functions; the seed of each program's arguments is the length of its name and text, so that
 /// a run is the same everywhere.
 /// The parts the conformance suite's test is split into, so that none holds most of its time
-/// limit (`.config/nextest.toml`). The last takes the programs whose values reach the 4 GiB a
-/// value may hold ([`wide`]): MIR and native code copy their arguments whole, so each costs as
-/// much as many others together, and side by side they cost one of them. Each other part takes
-/// the rest whose index in the sorted list leaves its number when divided by their count, which
-/// spreads every directory across them.
+/// limit (`.config/nextest.toml`).
 const PARTS: usize = 5;
 
-/// Whether a conformance program is one of the values within 4 GiB, by its name.
-fn wide(name: &str) -> bool {
-    name.ends_with("_within_4_gib.mn")
+/// The conformance programs that cost far more than the rest in the unit tests' build, in groups
+/// that run side by side in one part, each group with the cost it is declared at, in programs of
+/// the rest. Group `g` takes part `g`, which holds no other group; the rest, in the order of their
+/// names, each join the part least loaded so far, the first of those on a tie. When the report of
+/// the tests' times (`.github/scripts/lib/test-times.mjs`) shows a part past its share, the
+/// program that put it there joins this list, rather than two heavy programs meeting in a part
+/// by the order of their names.
+const HEAVY: &[(&[&str], usize)] = &[
+    // MIR and native code copy their arguments, values up to 4 GiB, whole: each costs as much
+    // as many programs together, and side by side they cost one of them (the brief
+    // `values-within-4-gib-cost`).
+    (
+        &[
+            "core-calculus/array_within_4_gib.mn",
+            "core-calculus/enum_within_4_gib.mn",
+            "core-calculus/struct_within_4_gib.mn",
+        ],
+        30,
+    ),
+    // Their `countdown` calls loop to the reference interpreter's step limit, and the oracle
+    // holds every point of them against Tier 1's states.
+    (&["core-calculus/frames_of_clauses.mn"], 30),
+    (&["core-calculus/frames_of_statements.mn"], 30),
+];
+
+/// The conformance programs that must pass, in their parts, by the rule of [`HEAVY`].
+fn conformance_parts() -> Vec<Vec<(String, String)>> {
+    let mut parts: Vec<Vec<(String, String)>> = vec![Vec::new(); PARTS];
+    let mut load = [0; PARTS];
+    for (g, (_, cost)) in HEAVY.iter().enumerate() {
+        load[g] = *cost;
+    }
+    for (name, src) in conformance_programs() {
+        let k = match HEAVY
+            .iter()
+            .position(|(group, _)| group.contains(&name.as_str()))
+        {
+            Some(g) => g,
+            None => {
+                let k = (0..PARTS).min_by_key(|&k| (load[k], k)).unwrap_or(0);
+                load[k] += 1;
+                k
+            }
+        };
+        parts[k].push((name, src));
+    }
+    parts
 }
 
-/// Part `k` of `PARTS` of the conformance programs that must pass.
+/// Part `k` of the conformance programs that must pass.
 fn conformance_part(k: usize) -> Vec<(String, String)> {
-    let all = conformance_programs();
-    if k + 1 == PARTS {
-        return all.into_iter().filter(|(name, _)| wide(name)).collect();
-    }
-    all.into_iter()
-        .filter(|(name, _)| !wide(name))
-        .enumerate()
-        .filter(|(i, _)| i % (PARTS - 1) == k)
-        .map(|(_, p)| p)
-        .collect()
+    conformance_parts().swap_remove(k)
 }
 
 fn run_conformance(plan: CallPlan, natively: bool) -> Report {
@@ -1126,68 +1157,82 @@ mod tests {
 
     /// Every conformance program that must pass of part `k`, with generated arguments for its
     /// public functions, prints the same on the four paths, and the reference interpreter's
-    /// runs lie within Tier 1's states (`containment`): the oracle saw values, and points too
-    /// where `points`, a part whose programs have statements.
-    fn conformance_part_agrees(k: usize, calls: u64, points: bool) {
+    /// runs lie within Tier 1's states (`containment`): the oracle saw points and values.
+    fn conformance_part_agrees(k: usize) {
         let report = run_programs(conformance_part(k), FEW, true);
         println!("{}", report.summary());
         assert!(report.failures.is_empty(), "{}", report.failures());
         assert!(report.rejected.is_empty(), "{}", report.summary());
-        assert!(report.calls >= calls, "{}", report.summary());
+        assert!(report.calls >= 10, "{}", report.summary());
+        assert!(report.contained.0 > 0, "{}", report.summary());
         assert!(report.contained.1 > 0, "{}", report.summary());
-        assert!(!points || report.contained.0 > 0, "{}", report.summary());
     }
 
     #[test]
     fn test_three_paths_agree_on_the_conformance_suite_part_1_of_5() {
-        conformance_part_agrees(0, 25, true);
+        conformance_part_agrees(0);
     }
 
     #[test]
     fn test_three_paths_agree_on_the_conformance_suite_part_2_of_5() {
-        conformance_part_agrees(1, 25, true);
+        conformance_part_agrees(1);
     }
 
     #[test]
     fn test_three_paths_agree_on_the_conformance_suite_part_3_of_5() {
-        conformance_part_agrees(2, 25, true);
+        conformance_part_agrees(2);
     }
 
     #[test]
     fn test_three_paths_agree_on_the_conformance_suite_part_4_of_5() {
-        conformance_part_agrees(3, 25, true);
+        conformance_part_agrees(3);
     }
 
-    /// The values within 4 GiB, side by side; their functions are expressions, with no
-    /// statement.
     #[test]
     fn test_three_paths_agree_on_the_conformance_suite_part_5_of_5() {
-        conformance_part_agrees(4, 3, false);
+        conformance_part_agrees(4);
     }
 
-    /// The parts hold every conformance program that must pass, each once: a program in no part
-    /// would run on no path.
+    /// The parts hold every conformance program that must pass, each once, a program in no part
+    /// running on no path; each heavy group sits in its own part, with no other group's program;
+    /// and every program [`HEAVY`] names is one of the suite's, so that a stale name cannot leave
+    /// a heavy program to fall in with another.
     #[test]
     fn test_the_conformance_suite_parts_hold_every_program_once() {
-        let mut parts: Vec<String> = (0..PARTS)
-            .flat_map(|k| conformance_part(k).into_iter().map(|(name, _)| name))
-            .collect();
-        parts.sort();
+        let parts = conformance_parts();
+        assert_eq!(parts.len(), PARTS);
+        assert_eq!(PARTS, 5, "the tests above name five parts");
+        let mut held: Vec<&str> = parts.iter().flatten().map(|(n, _)| n.as_str()).collect();
+        held.sort();
         let all: Vec<String> = conformance_programs()
             .into_iter()
             .map(|(name, _)| name)
             .collect();
         assert!(!all.is_empty());
-        assert_eq!(parts, all);
-        assert_eq!(PARTS, 5, "the tests above name five parts");
-        // The last part holds every value within 4 GiB, and none of the others does.
-        let last = conformance_part(PARTS - 1);
-        assert!(!last.is_empty() && last.iter().all(|(name, _)| wide(name)));
-        assert_eq!(
-            last.len(),
-            all.iter().filter(|name| wide(name)).count(),
+        assert_eq!(held, all.iter().map(String::as_str).collect::<Vec<_>>());
+        // Group `g` is in part `g`, whole, and the groups' parts differ, so none meets another.
+        assert!(HEAVY.len() <= PARTS);
+        let part_of = |name: &str| parts.iter().position(|p| p.iter().any(|(n, _)| n == name));
+        for (g, (group, _)) in HEAVY.iter().enumerate() {
+            for name in *group {
+                assert!(
+                    all.iter().any(|n| n == name),
+                    "{} is no conformance program that must pass",
+                    name
+                );
+                assert_eq!(
+                    part_of(name),
+                    Some(g),
+                    "{} is not in its group's part",
+                    name
+                );
+            }
+        }
+        // Every part holds programs of the rest too: none is left to a group alone, idle.
+        assert!(
+            parts.iter().all(|p| p.len() > 3),
             "{:?}",
-            last
+            parts.iter().map(Vec::len).collect::<Vec<_>>()
         );
     }
 
