@@ -33,7 +33,8 @@ Every path a slip can reach is closed. So is every deliberate path that costs on
 - a local ref moved by `update-ref`;
 - a URL rewritten by `insteadOf`, or any other setting of the system or user git configuration;
 - a replace ref;
-- a `GIT_` variable, or a variable that picks the git binary, preloads node code or names certificate files;
+- a `GIT_` variable;
+- for the processes the refresher and the entries start, a variable that picks the git binary, preloads node code or names certificate files;
 - an argument handed to a refresher;
 - a refresher run by hand, or imported by a script.
 
@@ -56,13 +57,16 @@ A test reads every module of the set, its imports and the files it loads by path
 - `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=/dev/null`, which Git for Windows accepts when node starts it. So no system or user configuration reaches git, wherever `HOME` or `XDG_CONFIG_HOME` points, and no file is left for a command to fill.
 
 The binaries are not found on `PATH`:
-- git runs by its absolute path, from a constant list of the system's locations (`C:/Program Files/Git/cmd/git.exe` on Windows, `/usr/bin/git` on Linux). When none is found, the refresher refuses and says where it looked.
-- node runs by `process.execPath`.
+- git runs by its absolute path, from a constant list of the system's locations, which the refresher and the entries share. On Windows the list is `C:/Program Files/Git/cmd/git.exe`, then Git for Windows' per-user `%LOCALAPPDATA%/Programs/Git/cmd/git.exe`; on Linux it is `/usr/bin/git`.
+- node runs by `process.execPath`, the node already running, never found anew.
+
+A git missing from the list never blocks a push or a test, nor the push that would fix the list:
+- a refresh keeps the current copy and says where it looked;
+- the entries check the copy against its manifest alone, run it, and say that git was not found.
 
 Every git command runs with `--no-replace-objects`, so that `git replace` changes nothing it reads. Further:
 - `git ls-remote` runs in an empty directory the refresher creates for it, by an exclusive create, outside the common git directory. The refresher sets `GIT_CEILING_DIRECTORIES` to that directory's parent itself. So git finds no repository, and no repository's configuration reaches it, wherever the refresher was started from.
 - Every other command names its repository by `--git-dir`: the common git directory that holds `mente-gates/`, found from the running file's own path, never from the current directory or the caller.
-- `git hash-object` runs with `--no-filters`, so no attribute or filter changes what it hashes.
 - On Windows, `ls-remote` runs with `-c http.sslBackend=schannel`, a constant, so the system's certificate store decides what https trusts. A local proof on Windows shows `ls-remote` over https working with the system and user configuration closed.
 
 **Which commit is main.** The remote says, as #203's pre-push hook asks it. The URL is the one the running copy's `gate-set.json` declares, so a refresher takes it from its own verified copy, never from the working tree, from `git remote get-url`, or from its caller. A refresh:
@@ -92,7 +96,7 @@ Every entry also checks these:
 - `current` names a directory whose name is that commit;
 - that commit is the local `refs/remotes/origin/main` or one of its ancestors (`git merge-base --is-ancestor`, local and so offline), so a copy of a branch's commit is refused;
 - the manifest agrees with `git ls-tree <commit> -- <set>`;
-- every file of the copy matches the manifest by blob id (`git hash-object --no-filters --stdin-paths`, one process).
+- every file of the copy matches the manifest by blob id. The entry computes the id in node as git defines a blob's id (SHA-1 of `blob <size>`, a zero byte, and the bytes), so no attribute or filter changes it, and drift is caught even when no git is found. A test compares those ids with `git hash-object` on the fixtures.
 
 A refusal names the one command that clears it:
 - a stale entry, or a copy behind the local `origin/main`, names the refresh;
@@ -133,10 +137,16 @@ The command admits only https however it is started, and a test holds that no ar
   - `tools/gates.mjs` does its work in a child process of its own, started under the tree runner with fixed code and no argument, and that child holds the lock.
   - The new set's refresher is a descendant of that child, so the time covers both refreshers.
   - When the time passes, the tree dies, and the operating system releases the lock.
-- **Waiting.** A start of quick, cargo or mn that finds the lock held waits at most a short bound. It then runs the current verified copy and says which process has held the lock, and since when. The bootstrap waits at most the refresh's time limit, by which any holder has been killed.
+- **Waiting.** A writer without the lock would break the recovery from a kill, so whoever waits writes nothing.
+  - A start of quick, cargo or mn that finds the lock held waits at most a short bound. It then writes nothing, runs the current verified copy, and says which process has held the lock, and since when.
+  - The bootstrap waits at most the refresh's time limit, by which any holder has been killed. If that runs out, it gives up, writes nothing, and names the process that holds the lock.
+- **How the times relate.** These hold, and a test reads the constants:
+  - the refresh's time limit exceeds the time of both `ls-remote` calls, the confirming refresher's and the new set's, plus the time to write a set, so a slow but legitimate refresh is not killed at every start;
+  - a waiter's bound is shorter than the refresh's time limit.
 - **The order.** A staged set is renamed whole to its commit's name. Then the entries are replaced, each by a new file renamed over it, from the new set's `gate-entries/`. `current` is switched last, and only once every entry has been replaced.
   - A shell already reading the old hook keeps its open file.
   - Where Windows refuses to rename over a file in use, the refresh stops before switching `current` and says it will try again. The next start of quick, cargo or mn retries through the refresh entry, which the version check exempts. Until then, an entry already replaced reports itself as stale against the old copy.
+  - So, while a change of the interface version is between its entry step and the switch of `current`, the test binaries of a waiting start may be refused as stale. That is safe, since nothing runs from a mismatched entry, and it ends when `current` switches.
 - **A kill at any step** leaves a state the next refresh, or the bootstrap, completes:
   - an abandoned staging directory is swept;
   - a renamed `<commit>/` is verified and reused, or moved aside;
@@ -167,7 +177,13 @@ They are the branch's own tools, which its own changes test. What judges every b
 - **Rollback.** Writing `current` alone to name the copy kept before it passes every entry, since that commit is an ancestor of `origin/main`. The next refresh restores the newest confirmed commit.
 - **Lag.** The stable entries never refresh, and quick, cargo and mn install only what the local `origin/main` names. A merge to main after the last fetch holds the gates back until the next fetch, and the next start of one of those tools.
 - **Proxies.** Proxy variables such as `HTTPS_PROXY` stay. A proxy cannot change what https verifies; at most it keeps the current copy.
-- **node.** The runner line's node, and the node the hook's sh entry starts, are found on `PATH`. Cargo starts the runner line's node with whatever `NODE_OPTIONS` holds, which can preload code into it before the entry runs.
+- **node.** Every node at the head of a chain is found on `PATH` and takes its caller's `NODE_OPTIONS`, which can preload code into it before anything is cleaned:
+  - the node that runs quick, cargo and mn, and so the refresh entry and the refresher, since `process.execPath` is that node. Preloaded code can change how those tools start the refresh entry;
+  - the runner line's node, which cargo starts;
+  - the node the hook's sh entry starts. The entry removes `NODE_OPTIONS`, but not `PATH`.
+
+  What is closed is closed for the processes the refresher and the entries start.
+- **git.** Where only the per-user Git for Windows is installed, `LOCALAPPDATA` picks the git binary. Where no git of the list is found, the entries check a copy against its manifest alone, so a manifest edited to match a drifted file passes until git is back.
 - **The bootstrap** runs in Norman's own terminal, with that terminal's environment.
 - **https.** The remote is trusted through https and its certificate, as the system's certificate store (on Windows) or the system's default certificate files (on Linux) decide.
 
@@ -215,7 +231,13 @@ They are the branch's own tools, which its own changes test. What judges every b
 - [ ] A module of the set that imports or loads a file outside the set fails the closure test, planted.
 - [ ] A refresher started with `PATH` naming another git first, with `NODE_OPTIONS` set, or with `SSL_CERT_FILE`, `SSL_CERT_DIR` or `CURL_CA_BUNDLE` set, does three things, planted: it runs the system's git, it preloads nothing into the processes it starts, and it trusts only the system's certificates. The hook's entry started with `NODE_OPTIONS` set preloads nothing, planted.
 - [ ] Two refreshes at once leave one valid copy, planted.
-- [ ] A refresher that hangs while it holds the lock is killed with its tree at its time limit, and the lock is then free. Meanwhile a start of quick, cargo or mn runs the current verified copy after the short bound and says so. Each is planted.
+- [ ] A refresher that hangs while it holds the lock is killed with its tree at its time limit, and the lock is then free. Meanwhile, each planted:
+  - a start of quick, cargo or mn runs the current verified copy after the short bound, writes nothing, and says so;
+  - a bootstrap whose bound runs out writes nothing and names the process that holds the lock.
+- [ ] The refresh's time limit exceeds both `ls-remote` times plus the time to write a set, and a waiter's bound is shorter than that limit. A test reads the constants.
+- [ ] With no git of the list found, a push and a test go on, each planted:
+  - a refresh keeps the current copy and says where it looked;
+  - the entries refuse a copy with one drifted byte, by the blob ids they compute in node. Otherwise they run it, and say that git was not found.
 - [ ] A refresh killed at each step leaves the lock free and a state the next refresh completes, each planted. The steps are: while it readies the new set; after the new set's refresher has started; after the rename; after each entry; after `current` switches, before the sweep.
 - [ ] A refresh while a file of the old copy is in use succeeds and leaves that file alone. Windows alone refuses to replace a file in use, so this is a local proof that the quick map runs, skipped on Linux. So is the proof that an entry whose rename Windows refuses leaves `current` unswitched, and that the next start's refresh completes it.
 - [ ] Of the copy a refresh replaces, only the refresher and its closure run: a module committed in the old set outside that closure, which writes a file when imported, writes none during a refresh to a newer commit, planted.
