@@ -1149,7 +1149,7 @@ const COST_BUDGET: u64 = 4_000;
 
 /// How often, in percent, a loop gets a conjunct or a guard that is no candidate
 /// ([`Gen::no_candidate`]).
-const NO_CANDIDATE_CHANCE: u64 = 20;
+const NO_CANDIDATE_CHANCE: u64 = 25;
 
 /// What `Gen::mark` saves.
 struct Mark {
@@ -1218,6 +1218,8 @@ struct Gen {
     no_candidates: Rng,
     /// The functions those conjuncts call, written after the module's own.
     helpers: Vec<String>,
+    /// The bindings those conjuncts declare so far, which name each.
+    helper_bindings: usize,
 }
 
 impl Gen {
@@ -1252,6 +1254,7 @@ impl Gen {
             rules: Rng::new(seed),
             no_candidates: Rng::new(seed),
             helpers: Vec::new(),
+            helper_bindings: 0,
         }
     }
 
@@ -4828,7 +4831,7 @@ impl Gen {
                 ));
             }
         }
-        self.no_candidate(&mut cond, &mut first);
+        let before = self.no_candidate(&mut cond, &mut first);
         let mut clauses = Vec::new();
         let invariant = self.mode == Mode::Refined && self.rng.chance(50);
         if self.mode == Mode::Refined {
@@ -4849,6 +4852,7 @@ impl Gen {
             }
         }
         let mut out = self.flush();
+        out.extend(before);
         out.push(S::Bind(
             id,
             Some(t.name.to_string()),
@@ -4940,16 +4944,23 @@ impl Gen {
     ///   `unreachable`;
     /// - a call whose `ensures` bounds its argument, of a function written for it that returns
     ///   only where that holds, and which the loop's exit never calls; in a refined program only,
-    ///   since a plain one has no contracts.
+    ///   since a plain one has no contracts;
+    /// - a guard `y >= 256 and b % 4 <= 1` whose remainder reads a binding of its own the round
+    ///   assigns just before it, and sets to 0 after, so that the remainder is a candidate the
+    ///   head holds, and whose `else` narrows `y` into `u8`, which only the left conjunct
+    ///   bounds: Fable's review of pull request 182 found the head's fact of such a remainder
+    ///   deciding the `else` (`no-site-value-from-another-evaluation`).
     ///
     /// The reviews' b2, an `if` whose branch assigns, is no condition at all now: a condition
     /// changes nothing (`core-calculus.md`, item 10), and the checker refuses one that does.
     ///
     /// Each reads a binding in scope, so that a fact Tier 1 wrongly held there would prove a
-    /// check some run fails. `cond` takes the conjunct, and `first` the guard, after the step.
-    fn no_candidate(&mut self, cond: &mut E, first: &mut Vec<S>) {
+    /// check some run fails. The statements to write before the loop come back; `cond` takes the
+    /// conjunct, and `first` the guard and the body's first statements, after the step.
+    fn no_candidate(&mut self, cond: &mut E, first: &mut Vec<S>) -> Vec<S> {
+        let mut before = Vec::new();
         if !self.no_candidates.chance(NO_CANDIDATE_CHANCE) {
-            return;
+            return before;
         }
         let ints: Vec<(usize, IntT)> = self
             .visible()
@@ -4960,18 +4971,20 @@ impl Gen {
             })
             .collect();
         if ints.is_empty() {
-            return;
+            return before;
         }
         let (x, t) = ints[self.no_candidates.below(ints.len() as u64) as usize];
         let zero = || E::Lit("0".to_string());
         // A contract is the refined mode's alone, so a plain program's call is a leaving one.
-        let pick = match self.no_candidates.below(3) {
-            2 if self.mode != Mode::Refined => 0,
+        let pick = match self.no_candidates.below(4) {
+            3 if self.mode != Mode::Refined => 0,
             pick => pick,
         };
-        let test = {
-            let k = self.no_candidates.below(10);
-            E::bin(Op::Gt, self.read(x), E::Lit(k.to_string()))
+        // The `if`'s test, for the forms that write one: reading `x` marks it read, so a form
+        // that does not write it does not make it.
+        let test = |fx: &mut Gen| {
+            let k = fx.no_candidates.below(10);
+            E::bin(Op::Gt, fx.read(x), E::Lit(k.to_string()))
         };
         match pick {
             0 | 1 => {
@@ -5000,7 +5013,7 @@ impl Gen {
                 };
                 let conj = E::bin(
                     Op::Eq,
-                    E::If(Box::new(test), Box::new(leave), Box::new(zero())),
+                    E::If(Box::new(test(self)), Box::new(leave), Box::new(zero())),
                     zero(),
                 );
                 if in_guard {
@@ -5020,6 +5033,73 @@ impl Gen {
                     *cond = E::bin(Op::And, cond.clone(), conj);
                 }
             }
+            2 => {
+                // A binding wider than a byte, whose range holds 255 and 256, so that the guard's
+                // left conjunct decides whether its `else` narrows it into a byte without a trap.
+                let (byte_max, past) = (Num::small(255), Num::small(256));
+                let wide: Vec<usize> = ints
+                    .iter()
+                    .filter(|(id, t)| {
+                        let r = self.known_range(*id, *t);
+                        t.bits > 8 && r.lo <= byte_max && past <= r.hi
+                    })
+                    .map(|(id, _)| *id)
+                    .collect();
+                if wide.is_empty() {
+                    return before;
+                }
+                let y = wide[self.no_candidates.below(wide.len() as u64) as usize];
+                let byte = INTS[0];
+                let own = |fx: &mut Gen, kind: Kind| {
+                    fx.helper_bindings += 1;
+                    let name = format!("lc{}", fx.helper_bindings);
+                    fx.binds.push(Binding {
+                        name: name.clone(),
+                        ty: Ty::Int(byte),
+                        kind,
+                        range: None,
+                        known: None,
+                        elements: None,
+                        read: true,
+                        assigned: kind == Kind::Var,
+                    });
+                    (fx.binds.len() - 1, name)
+                };
+                let (b_id, b) = own(self, Kind::Var);
+                let (z_id, z) = own(self, Kind::Val);
+                before.push(S::Bind(b_id, Some(byte.name.to_string()), zero()));
+                let bytes: Vec<usize> = ints
+                    .iter()
+                    .filter(|(_, t)| *t == byte)
+                    .map(|(id, _)| *id)
+                    .collect();
+                let value = if bytes.is_empty() {
+                    E::Lit(self.no_candidates.below(256).to_string())
+                } else {
+                    let id = bytes[self.no_candidates.below(bytes.len() as u64) as usize];
+                    self.read(id)
+                };
+                first.push(S::Assign(E::name(&b), "=", value));
+                let wide_enough = E::bin(Op::Ge, self.read(y), E::Lit("256".into()));
+                let small_rem = E::bin(
+                    Op::Le,
+                    E::bin(Op::Rem, E::name(&b), E::Lit("4".into())),
+                    E::Lit("1".into()),
+                );
+                let narrowed = self.read(y);
+                first.push(S::Guard(
+                    E::bin(Op::And, wide_enough, small_rem),
+                    Block {
+                        stmts: vec![
+                            S::Bind(z_id, Some(byte.name.to_string()), narrowed),
+                            S::Discard(E::name(&z)),
+                            S::Break,
+                        ],
+                        tail: None,
+                    },
+                ));
+                first.push(S::Assign(E::name(&b), "=", zero()));
+            }
             _ => {
                 let name = format!("pin{}", self.helpers.len());
                 // Every integer type holds 0 to 99.
@@ -5036,6 +5116,7 @@ impl Gen {
                 );
             }
         }
+        before
     }
 
     fn guard_statement(&mut self) -> Vec<S> {

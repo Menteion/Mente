@@ -546,6 +546,8 @@
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/loop_met_again_breaks_from_an_inner_condition.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== ghost-contracts-and-totality/stale_fact_in_a_guard.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/total_while_without_decreases.mn ==
 {"version":1,"diagnostics":[{"code":"E0501","severity":"error","message":"function `countdown` is marked `@total` and loops with `while`, but gives no `decreases` measure","primary":{"file":"total_while_without_decreases.mn","start":50,"end":59,"line":4,"column":8},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/total_with_decreases_in_the_signature.mn ==
