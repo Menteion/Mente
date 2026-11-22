@@ -1,9 +1,10 @@
 ---
 id: records-every-file
-status: active
+status: deferred
+trigger: when pressure-report, which also changes records.rs, test-isolation's rewrite of mutants.yml (#202) and the quick checks' report of their tree (#203) have merged
 type: chore
 awaits: [docs/design-review.md#records-one-per-file]
-affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, .github/workflows/ci.yml, .github/workflows/mutants.yml, .github/workflows/mutants-full.yml, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .gitignore, CLAUDE.md, docs/design-review.md, docs/escapes/undeclared-record-directory.md, docs/escapes/undeclared-record-other-markup.md, briefs/goldens-one-per-program.md, briefs/records-every-file.md, briefs/archive/records-every-file.md]
+affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, tools/quick.mjs, tools/quick.test.mjs, .github/workflows/ci.yml, .github/workflows/mutants.yml, .github/workflows/mutants-full.yml, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .gitignore, CLAUDE.md, docs/design-review.md, docs/escapes/undeclared-record-directory.md, docs/escapes/undeclared-record-other-markup.md, briefs/goldens-one-per-program.md, briefs/records-every-file.md, briefs/archive/records-every-file.md]
 protectedFiles: [spec/**, compiler/mente-cli/tests/gates.rs, compiler/mente-cli/tests/lints.rs]
 ---
 
@@ -19,7 +20,7 @@ The records' closed world (`records::undeclared`) reads Markdown files alone. A 
   - The tests read that file in their sandbox, whose `.git` is empty.
   - A missing or empty list fails, with no fallback. CI is told apart by GitHub's `CI` variable, which the sandbox lets through.
   - The step stands in every job that runs the records' tests: ci.yml's Rust and Coverage jobs, mutants.yml and mutants-full.yml. `.github/gate-commands.txt` pins it in the required ones.
-- **Elsewhere**, the tests run the same git command, keeping the files that exist.
+- **Elsewhere**, `tools/quick.mjs` writes the same list into the same file at the start of its run, so that one place runs git and the tests read its output. No test runs git, so no program that a repository's git configuration names (`core.fsmonitor`, say) runs inside a test, the principle `pressure-report` holds. A test run outside quick that finds no list fails, saying to run quick; one that finds an old list reads the files as quick last listed them, keeping those that still exist.
 
 Over that list:
 - every document-like file (Markdown in each usual spelling, plain text, reStructuredText, AsciiDoc and Org in any case, or a file with no extension; a dotfile is none) belongs to exactly one declaration;
@@ -39,5 +40,6 @@ Code, fixtures of code, benchmark runs and configuration in other formats stay o
 - [ ] A stray file of any extension in a kind's directory is refused by the list, as `entries` refuses it.
 - [ ] In CI, a job that runs the records' tests without the step fails them, saying which step to add.
 - [ ] The list holds a known tracked file and nothing `.gitignore` excludes.
+- [ ] No test runs git: off CI, the list is the one `tools/quick.mjs` wrote.
 - [ ] The `.github` changes go to Norman.
 - [ ] `node tools/quick.mjs` passes before the push.
