@@ -62,6 +62,29 @@ pub struct Resolution {
     /// The binding each name of a `match` pattern declares, by the `match`, the arm and the
     /// binding's position in the pattern.
     pub patterns: HashMap<(ExprId, usize, usize), BindingId>,
+    /// The names of the module's functions and types, which no binding takes (`E0220`).
+    pub module_names: Vec<String>,
+}
+
+impl Resolution {
+    /// `base`, or `base` with the first number from 2 after it, that no binding of the function
+    /// has, no function or type of the module has (`E0220`), and none of `besides`, the names
+    /// earlier fixes of the function declare, so that applying them all declares no name twice
+    /// (`E0202`): the name of a binding a fix declares.
+    pub fn unused_name_besides(&self, base: &str, besides: &[String]) -> String {
+        let taken = |n: &str| {
+            self.bindings.iter().any(|b| b.name == n)
+                || self.module_names.iter().any(|m| m == n)
+                || besides.iter().any(|m| m == n)
+        };
+        (1..)
+            .map(|k| match k {
+                1 => base.to_string(),
+                k => format!("{}{}", base, k),
+            })
+            .find(|n| !taken(n))
+            .unwrap_or_default()
+    }
 }
 
 /// A refinement's bound that names a binding: `name`, or `name.len`.
@@ -95,6 +118,13 @@ pub fn resolve(
             stmts: vec![None; f.tree.stmts.len()],
             bounds: Vec::new(),
             patterns: HashMap::new(),
+            module_names: functions
+                .iter()
+                .cloned()
+                .chain(structs.defs.iter().map(|d| d.name.clone()))
+                .chain(structs.enums.iter().map(|e| e.name.clone()))
+                .chain(structs.later.keys().cloned())
+                .collect(),
         },
         scopes: vec![Vec::new()],
         declared: HashMap::new(),

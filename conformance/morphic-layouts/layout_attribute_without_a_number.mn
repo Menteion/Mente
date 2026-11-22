@@ -1,0 +1,8 @@
+// expect: E0426
+module conformance
+// A @layout names its size and its alignment, each an integer literal (morphic-layouts.md, item
+// 2); one without its alignment once passed with its struct unchecked.
+@layout(size: 8)
+pub struct Header {
+  @bytes(0..8) pub id: u64
+}

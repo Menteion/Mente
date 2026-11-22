@@ -1,10 +1,10 @@
 // Checks a built book: every relative link and every fragment resolves inside it, and no
 // `@assert-*` or `@spec-item` directive of the sources is shown to a reader. Run by build.mjs
-// after mdBook, and on its own as `node site/check.mjs <book directory> [site url]`.
+// after mdBook: a module with no command line of its own, since a check a required job runs never
+// decides by the path it was started by whether to run.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 function walk(dir) {
   const out = [];
@@ -170,16 +170,4 @@ export function checkBook(bookDir, siteUrl = '/') {
     errors.push(...directiveErrors(rel, html));
   }
   return { pages: pages.length, errors };
-}
-
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [bookDir, siteUrl = '/'] = process.argv.slice(2);
-  if (!bookDir) {
-    console.error('usage: node site/check.mjs <book directory> [site url]');
-    process.exit(2);
-  }
-  const { pages, errors } = checkBook(bookDir, siteUrl);
-  for (const e of errors) console.error(e);
-  console.log(`${pages} pages checked, ${errors.length} problems`);
-  process.exit(errors.length === 0 ? 0 : 1);
 }

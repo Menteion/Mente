@@ -1,0 +1,20 @@
+// expect: E0236
+module conformance
+// The scrutinee of a `match` on a `bool` is a condition, an `if` spelled another way, and
+// changes nothing (item 10): `x == 0` held before `bump` made `x` 9, not in the `true` arm.
+fn bump(mut x: u8) -> u8
+  ensures x == 9
+  ensures result == 0
+{
+  x = 9
+  0
+}
+
+pub fn f() -> u8[0..=0] {
+  var x: u8 = 0
+  val k: u8 = match x == 0 and bump(mut x) == 0 {
+    true => x
+    false => 0
+  }
+  k
+}

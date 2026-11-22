@@ -64,7 +64,7 @@ fn cl_type(t: cfg::Ty, ptr: Type) -> Type {
     match t {
         cfg::Ty::Int(i) => int_type(i),
         cfg::Ty::Bool => types::I8,
-        cfg::Ty::Addr => ptr,
+        cfg::Ty::Addr(_) => ptr,
         cfg::Ty::Unit | cfg::Ty::Effect => types::I8,
     }
 }
@@ -275,7 +275,7 @@ pub fn program(
             writer,
             &mut rt,
             (&ids, &lowered.module),
-            f,
+            (cfg::FuncId(i as u32), f),
             &mut ctx,
             &mut fctx,
             ptr,
@@ -703,7 +703,7 @@ impl Translate {
         writer: &mut ObjectWriter,
         rt: &mut Runtime,
         (ids, m): (&[ClFunc], &cfg::Module),
-        f: &cfg::Function,
+        (own, f): (cfg::FuncId, &cfg::Function),
         ctx: &mut Context,
         fctx: &mut FunctionBuilderContext,
         ptr: Type,
@@ -751,6 +751,16 @@ impl Translate {
             .collect();
         for (p, v) in kept.iter().zip(entry_params) {
             vals[p.0 as usize] = Some(v);
+        }
+        // A function whose frame passes the budget never runs: every call of it is counted
+        // first and traps, however little of the stack is in use (`core-calculus.md`, item 25),
+        // as below. So its body is never built, and its slots, which may pass what a machine
+        // frame can hold, are never made.
+        if m.runs_out(0, own) {
+            b.ins().trap(TrapCode::STACK_OVERFLOW);
+            b.seal_all_blocks();
+            b.finalize(frontend);
+            return Ok(());
         }
         for (bi, block) in f.blocks.iter().enumerate() {
             if bi > 0 {
@@ -851,7 +861,7 @@ impl Translate {
         let t = cl_type(rty, ptr);
         let int = |x: cfg::Ty| match x {
             cfg::Ty::Int(i) => Ok(i),
-            cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
+            cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => {
                 Err(err("an integer operation on a value that is not one"))
             }
         };
@@ -1011,7 +1021,7 @@ impl Translate {
                     .zip(&arg_tys[1..])
                     .filter_map(|(v, t)| match t {
                         cfg::Ty::Int(i) => Some((*v, *i)),
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
+                        cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => None,
                     })
                     .collect();
                 let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
@@ -1030,7 +1040,7 @@ impl Translate {
                     .zip(&arg_tys[1..last])
                     .filter_map(|(v, t)| match t {
                         cfg::Ty::Int(i) => Some((*v, *i)),
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => None,
+                        cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => None,
                     })
                     .collect();
                 let values: Vec<Shown> = shown.into_iter().map(|(v, i)| Shown::Int(v, i)).collect();
@@ -1069,6 +1079,21 @@ impl Translate {
             }
             // Native code counts no frame yet: its stack ends at the system's guard page
             // (`core-calculus.md`, item 25, what the paths do not do yet).
+            // Native code runs no count yet (`core-calculus.md`, item 25), but the count of a
+            // callee whose frame alone passes the budget, which traps however little is in use,
+            // as on MIR.
+            Op::Enter {
+                callee,
+                trap: Some(site),
+            } if m.runs_out(0, *callee) => {
+                let fail = e.b.create_block();
+                let after = e.b.create_block();
+                e.b.ins().jump(fail, &[]);
+                e.b.switch_to_block(fail);
+                trap_report(writer, rt, e, f, *site, &[], prefix)?;
+                e.b.switch_to_block(after);
+                return Ok(None);
+            }
             Op::Enter { .. } => return Ok(None),
             Op::Call(c) => {
                 let callee = &ids[c.0 as usize];
@@ -1479,7 +1504,7 @@ fn make_call(
                 (false, Shape::Int(_), Arg::Int(n)) => {
                     let i = match mty {
                         cfg::Ty::Int(i) => *i,
-                        cfg::Ty::Bool | cfg::Ty::Addr | cfg::Ty::Unit | cfg::Ty::Effect => {
+                        cfg::Ty::Bool | cfg::Ty::Addr(_) | cfg::Ty::Unit | cfg::Ty::Effect => {
                             return Err(err("an integer argument of another type"))
                         }
                     };
@@ -2132,9 +2157,60 @@ pub fn huge(x: u8) -> u8 {
         }
     }
 
+    /// A function whose frame passes the budget is built on every target with no body, since
+    /// every call of it traps at its count, as on MIR: one inside the program at the call, whose
+    /// trap native code now reports, and one from outside at the function's name. A frame of the
+    /// budget itself is built whole and is not refused. The fuzzer found Cranelift refusing the
+    /// 4 GiB slot of such a body (2026-11-22); here a 2 MB array passes the budget, and the
+    /// conformance program holds the 4 GiB one, on CI.
+    #[test]
+    fn test_a_function_past_the_budget_is_built_and_traps_at_its_call() {
+        let source = "module m
+fn huge(k: u8) -> u8 {
+  _ = [[0_u8; 1]; 2000000]
+  k
+}
+pub fn call(c: bool, k: u8) -> u8 = if c { huge(k) } else { k }
+pub fn past(k: u8) -> u8 {
+  _ = [[0_u8; 1]; 2000000]
+  k
+}
+pub fn exact(k: u32) -> u32 {
+  val big: [131063]u32 = [0_u32; 131063]
+  big[k]
+}
+";
+        let module = mente_sema::check_program_without_proofs(source).unwrap();
+        let lowered = crate::lower::lower(&module).unwrap();
+        for target in [
+            Target::X86_64Linux,
+            Target::Aarch64Linux,
+            Target::X86_64Windows,
+        ] {
+            let mut w = writer(target);
+            program(&lowered, &[], "", &mut w).unwrap_or_else(|e| panic!("{:?}: {}", target, e));
+            // The count of `huge` in `call` traps natively, so its message is in the object.
+            let bytes = w.finish().unwrap();
+            assert!(
+                bytes
+                    .windows(b"the call stack ran out".len())
+                    .any(|w| w == b"the call stack ran out"),
+                "{target:?}"
+            );
+        }
+        let entry = |name: &str| lowered.entries.iter().find(|e| e.name == name).unwrap();
+        let int = |n: i128| vec![Arg::Int(Num::from_i128(n))];
+        assert_eq!(refusal(&lowered, entry("exact"), &int(3)), None);
+        assert_eq!(
+            refusal(&lowered, entry("past"), &int(3)).as_deref(),
+            Some("trap[stack-overflow] at 7:8: the call stack ran out")
+        );
+    }
+
     /// The symbols of an object that are not the program's own functions: what it imports, and
     /// each function it defines whose name does not start with `mente_f`.
     fn platform_symbols(bytes: &[u8]) -> BTreeSet<String> {
+        use cranelift_object::object;
         use object::{Object as _, ObjectSymbol as _, SymbolKind};
         let file = object::File::parse(bytes).unwrap();
         file.symbols()

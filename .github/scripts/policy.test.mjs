@@ -33,10 +33,13 @@ import { fileURLToPath } from "node:url";
 import { parseYaml } from "./lib/yaml.mjs";
 import { ALWAYS, PATHS_FILE, decide, globToRegExp, matches, parsePaths } from "./lib/watch.mjs";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "./lib/commits.mjs";
-import { deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
+import { ALARM_AUTHOR, ALARM_LABEL, ALARM_OWNER, NIGHTLIES, alarmMarker, detailsBody, errorLines, failingJobs, failureBody, keepAlarm, keepRunning, lastRealRun, verdict as alarmVerdict } from "./lib/nightly-alarm.mjs";
+import { SANDBOX_PROGRAM, deletedRegexes, evidence, exactRegex, expected, missing, parseDiff, readList, touched } from "./lib/mutants-floor.mjs";
 import { doctestProblems, problems as testListProblems, overrideTests } from "./lib/test-list.mjs";
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
+import { CARGO_HARMLESS, decide as rawBuildDecide, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../tools/raw-build.mjs";
+import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "../../tools/store-apps.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,7 +47,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// FLOOR equal to the checks this file declares.
-const FLOOR = 66;
+const FLOOR = 75;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -260,6 +263,13 @@ check("every workflow sets its permissions at the top, read-only wherever a requ
   }
 });
 
+/// The one job that publishes the site: the only one whose token may write Pages or an OIDC token,
+/// and whose environment is github-pages.
+const PAGES_DEPLOY_JOB = "pages-publish.yml#deploy";
+/// The nightly alarms: the last job of each workflow that runs on a schedule, the only jobs whose
+/// token may write issues (Norman, 2026-11-21).
+const NIGHTLY_ALARM_JOBS = ["fuzz-nightly.yml#alarm", "generated-nightly.yml#alarm", "mutants-full.yml#alarm"];
+
 /// GitHub's permission scopes, each with the values it admits, from the workflow syntax's
 /// `permissions` (read on 2026-11-16): `id-token` and `copilot-requests` take write or none,
 /// `vulnerability-alerts` read or none, every other scope read, write or none.
@@ -294,11 +304,13 @@ const PERMISSION_SCOPES = new Map([
  * comes from GitHub Actions, as such a post would. The probe of policy-runtime-judge (2026-11-16,
  * judge-probe's pull request 3) saw a change's own workflow raise its token so and post a success
  * status and a success check run under the judge's name. The judge posts through its own App, so
- * no workflow needs either permission.
+ * no workflow needs either permission. And only PAGES_DEPLOY_JOB's token may write Pages or an
+ * OIDC token, which publish the site (the review of 7ba7a5c). And only a nightly alarm's token may
+ * write issues: the job named alarm of a workflow that runs on a schedule.
  */
 export function permissionProblems(file, doc) {
   const found = [];
-  const readPermissions = (where, p) => {
+  const readPermissions = (where, p, key = null) => {
     if (p === "read-all") return;
     if (p === "write-all") {
       found.push(`${where}: write-all, by which its token may post check runs or commit statuses`);
@@ -313,13 +325,15 @@ export function permissionProblems(file, doc) {
       if (admits === undefined) found.push(`${where}: ${JSON.stringify(scope)}, no permission scope of GitHub's`);
       else if (!admits.includes(value)) found.push(`${where}: ${scope}: ${JSON.stringify(value)}, none of ${admits.join(", ")}`);
       else if ((scope === "checks" || scope === "statuses") && value === "write") found.push(`${where}: ${scope}: write, by which its token may post check runs or commit statuses`);
+      else if ((scope === "pages" || scope === "id-token") && value === "write" && key !== PAGES_DEPLOY_JOB) found.push(`${where}: ${scope}: write, which only ${PAGES_DEPLOY_JOB} may hold, to publish the site`);
+      else if (scope === "issues" && value === "write" && !(key === `${file}#alarm` && "schedule" in triggers(doc))) found.push(`${where}: issues: write, which only a nightly alarm may hold, the job alarm of a workflow that runs on a schedule`);
     }
   };
   // A workflow's own permissions are required by the check above; a job's may be left out, and
   // then are the workflow's.
   if (doc.permissions !== undefined) readPermissions(file, doc.permissions);
   for (const [id, job] of Object.entries(isPlain(doc.jobs) ? doc.jobs : {})) {
-    if (isPlain(job) && "permissions" in job) readPermissions(`${file}, job ${id}`, job.permissions);
+    if (isPlain(job) && "permissions" in job) readPermissions(`${file}, job ${id}`, job.permissions, `${file}#${id}`);
   }
   return found;
 }
@@ -333,11 +347,23 @@ check("every workflow's permissions are GitHub's scopes and values exactly, and 
     ["contents read", base],
     ["read-all", { ...base, permissions: "read-all" }],
     ["no permission at all", { ...base, permissions: {} }],
-    ["the Pages job's", job({ pages: "write", "id-token": "write" })],
     ["vulnerability-alerts read", job({ "vulnerability-alerts": "read" })],
     ["a job with none of its own", { ...base, jobs: { j: { "runs-on": "ubuntu-24.04" } } }],
   ]) {
     assert.deepEqual(permissionProblems("x.yml", doc), [], what);
+  }
+  const deploy = (permissions, id = "deploy", top = { contents: "read" }) => ({ permissions: top, jobs: { [id]: { "runs-on": "ubuntu-24.04", permissions } } });
+  assert.deepEqual(permissionProblems("pages-publish.yml", deploy({ contents: "read", pages: "write", "id-token": "write" })), [], "the Pages deployment's");
+  // Planted: Pages or an OIDC token written anywhere else: another job, another workflow, the
+  // publishing workflow's top, and its build job.
+  for (const [what, file, doc] of [
+    ["pages write in another job", "pages-publish.yml", deploy({ pages: "write" }, "build")],
+    ["id-token write in another job", "pages-publish.yml", deploy({ "id-token": "write" }, "build")],
+    ["pages write at the publishing workflow's top", "pages-publish.yml", deploy({ contents: "read" }, "deploy", { contents: "read", pages: "write" })],
+    ["pages write in another workflow's job of that name", "ci.yml", deploy({ pages: "write" })],
+    ["id-token write at another workflow's top", "x.yml", deploy({ contents: "read" }, "j", { "id-token": "write" })],
+  ]) {
+    assert.ok(permissionProblems(file, doc).some((p) => p.includes("which only pages-publish.yml#deploy may hold")), what);
   }
   // Planted, at the top and in a job: each way to post one, a key or a value GitHub does not name
   // as written, an expression, and the probe's own forging job.
@@ -1270,18 +1296,28 @@ export function jobDigest(doc, job) {
 const PINNED_FILES = new Map([
   [".github/scripts/limits.sh", "ff5fb294d3365b4c5240a4b9f86042d3c9d2767e0c6e5e1fa0adceea359fdee9"],
   [".github/scripts/memory-guard.sh", "0702e624fc6a5d34a84ba1df7d0d3052957636ac1388fd464f9ff5c482416107"],
-  [".github/scripts/job-limits.ps1", "739fb90a85d859f593080cd32e4f818270afcc8cdb3f296a11caa58510accce4"],
+  [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
+  [".github/scripts/lib/job-object.cs", "aa78b142be7db5de8cf53593b6a5eaf9c62f378a85d4584ec341476345bec908"],
   [".github/scripts/install-nextest.sh", "e031943ffadbe14c7ef5dfbbb249b8e4741f0afe7af824c6fb9a3ff2b7923d55"],
+  [".github/scripts/publish-tag.sh", "d2c7229991d14351b3f1a061af77caacacc04edb3083b355f4a135969a23cbd6"],
+  [".github/scripts/commit-on-main.sh", "ff3e3901d0f81fd54bbee91bf170454a082a4ef868d9e8fb490a98f5ef0da0f8"],
+  [".github/scripts/fuzz-summary.mjs", "5f434a6b1c82003c27e5b531609d2877e0e8c61628bd49261f0f045df4616fea"],
+  [".github/scripts/nightly-alarm.mjs", "4d6a389e64a183ea0935fee1060d02a02a68e3dd40f2b7b6bd5c0daa47e1da59"],
+  [".github/scripts/lib/nightly-alarm.mjs", "6ec77c6bcf004da4da9896d70839f1b843e7c0ba44f324c18231dc697741a5df"],
+  [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
   [".github/scripts/tools.sh", "8567604ff84d47d657cdd04d1fe55dc8ff5a2ae238f02773c6fa87e31298fe18"],
-  [".github/scripts/test-sandbox.sh", "02a8f1312275c5146ddf7950f9d933dab304c5b4470de0ffef792240ffa522d1"],
+  [".github/scripts/test-sandbox.sh", "f998c97e39ba375a6c082544f665464748dba30fedfdbdd9fe1c19b4b557e643"],
+  // The sandbox's one program, cargo's runner and the namespace's first process, which
+  // test-sandbox.sh builds at setup and every command runs through.
+  [".github/scripts/test-sandbox.rs", "8ce1084352c530f615812a052dcbf527f92dafc098d1310e8b64888a42e19b80"],
   [".github/scripts/test-sandbox-env.sh", "b271fb1d97601c393c01e6bb7c590a6dc47a78594acf41f353a0e74cb93b6d10"],
   [".github/scripts/overflow-proof.sh", "72b3760078555145fd95e4124bd0ee8248024819c7dff84b11ef02559646a70a"],
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "f87f035aefe245cfea8b3f713d2d44fb5a73f748455ebec847cd980b7721a327"],
-  [".github/scripts/policy-run.test.mjs", "be6b14c485b3c531af99e5be06448c455da9b7dcc902c70155ee3c39013a8867"],
+  [".github/scripts/policy-run.test.mjs", "957afa3d0ef5f14ee4880e38589a46acf8e694b1b943e05c07f83b8a3e4bd1e8"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -1293,7 +1329,7 @@ const PINNED_FILES = new Map([
   [".github/scripts/build-time-code.mjs", "874280f8818d786a0c6f0bca3a60ced4ae397c0f13169a1244303d4a436487ec"],
   [".github/scripts/lib/build-time-code.mjs", "99b866cb2014b1a97c770819e4707fa06ef203da6bb7e2efc7c6cc3b65517b6a"],
   [".github/scripts/mutants-floor.mjs", "620e5a9329fbddfa0837fad07b7c7c2e918d14bd45b0ba2c80f177edbe722b18"],
-  [".github/scripts/lib/mutants-floor.mjs", "20e30ecfcbb91626c8f3ed22f6709d52afc7ca34cf7dd5c6433728a09108babb"],
+  [".github/scripts/lib/mutants-floor.mjs", "503a25da9fa9813cea1783709f0ff6d8dc53dc57eebb24b79028b39a190519b5"],
   [".github/scripts/watch.mjs", "55168acde1c9d16a823db62389483640e24e745dfd39ad6e984cf88c3200a7d3"],
   [".github/scripts/lib/watch.mjs", "895bedf2e57eb8dd3fc327a33d34e2adedf2770df18de599fae304a6819fe502"],
   [".github/scripts/action-pins.mjs", "83f1208532ba0bc01bc19a0546fd49b93520d464c22a3dc3a41f65cfce4db458"],
@@ -1346,6 +1382,14 @@ const PINNED_JOBS = new Map([
   ["benchmark.yml#bench", "5fe155416addc5eae5e51174842ae3bdf8e69ffdd1879ba691c482b60a03c971"],
   ["prelim.yml#prelim", "ac6eadf49ad0da4d645891fc15d16450c3dbd0905926e5c9c92b548ed7557bc7"],
   ["probe.yml#write", "0830c255940ceb132a7f00e0426efe6de5c4d1287edb351e8cffd93311c51b34"],
+  // The site's publication: the build of a milestone tag, and its deployment, which proves the tag
+  // on main first (the review of 7ba7a5c).
+  ["pages-publish.yml#build", "576f730be30b3daf87b6eb04b0675d7defc124d744250f0578f5ec7a66445593"],
+  ["pages-publish.yml#deploy", "b0a09fe1825e5389c6fe19cd0cdeda6da5b086b8937b345588c037fa19b3ce2b"],
+  // The nightly alarms, each with its workflow's triggers (Norman, 2026-11-21).
+  ["fuzz-nightly.yml#alarm", "3873cebb627ff350058b72ed6a16297ebd92eff8155306ccc271157ce359d652"],
+  ["generated-nightly.yml#alarm", "362bd08920cd3c3830502a91997feda6e45cb81604fcdf9bbe596e16e8ceb946"],
+  ["mutants-full.yml#alarm", "8a51983d7460cf13ca3777d62b7b3237ec381a8b8d1d8b83bcb91373bd166052"],
 ]);
 /// The policy itself, which cannot hold its own digest: CODEOWNERS gives it to its owner, and every
 /// other script a pinned job runs is pinned here.
@@ -1717,6 +1761,39 @@ check("on Linux the testing jobs prove the tests' sandbox first, and every step 
   assert.doesNotMatch("  trap 'signal=15' TERM", lateExitTrap);
 });
 
+check("the sandbox's script, its one program and the floor name the one sandbox: its home, root, user and program", () => {
+  // test-sandbox.sh sets the sandbox up and names cargo's runner; test-sandbox.rs is that runner and
+  // the namespace's first process; the floor reads nextest's line that names it. A value that
+  // differed between them would point cargo at no program, the program at a root or a user setup
+  // did not make, or the floor at a runner that no longer runs.
+  const sh = read(".github/scripts/test-sandbox.sh").replace(/\r\n/g, "\n");
+  const rs = read(".github/scripts/test-sandbox.rs").replace(/\r\n/g, "\n");
+  const shell = (name) => {
+    const m = new RegExp(`^${name}=(\\S+)$`, "m").exec(sh);
+    assert.ok(m, `test-sandbox.sh sets no ${name}`);
+    return m[1].replace(/^\$home(?=\/)/, home);
+  };
+  const rust = (name) => {
+    const m = new RegExp(`^const ${name}: [^=]+ = "?([^";]+)"?;$`, "m").exec(rs);
+    assert.ok(m, `test-sandbox.rs has no constant ${name}`);
+    return m[1];
+  };
+  const home = /^home=(\/\S+)$/m.exec(sh)?.[1];
+  assert.ok(home, "test-sandbox.sh sets no home of the sandbox");
+  assert.equal(rust("HOME"), home, "the program's home of the sandbox is not the script's");
+  assert.equal(rust("ROOT"), shell("root"), "the program's root of the sandbox is not the script's");
+  assert.equal(rust("UID"), shell("uid"), "the program runs the command as another user than the script's");
+  assert.equal(rust("GID"), shell("gid"), "the program runs the command in another group than the script's");
+  assert.equal(rust("PROGRAM"), shell("program"), "the program starts another program as the namespace's first process than the one setup installs");
+  assert.equal(SANDBOX_PROGRAM, shell("program"), "the floor reads nextest's line for another runner than the sandbox's program");
+  // cargo's runner, as `env` names it on both Linux targets, is that program's `run`; the wrapper
+  // starts that program's `inner` through sudo and unshare.
+  for (const triple of ["X86_64_UNKNOWN_LINUX_GNU", "AARCH64_UNKNOWN_LINUX_GNU"]) {
+    assert.ok(sh.includes(`  printf "export CARGO_TARGET_${triple}_RUNNER='%s run'\\n" "$program"\n`), `test-sandbox.sh env does not name the program's run as cargo's runner for ${triple}`);
+  }
+  assert.ok(rs.includes('"--kill-child=SIGKILL", "--", PROGRAM, "inner",'), "the program's wrapper does not start the program's own inner in the namespace");
+});
+
 /// Every required job that runs on a Linux runner is in exactly one of three lists, each with its
 /// reason: SANDBOXED_JOBS, whose code of the change runs in the sandbox; LEFT_OUTSIDE, which runs code
 /// of the change outside it; and GATE_ONLY, which runs none but the gate's own scripts. A job in
@@ -1736,12 +1813,17 @@ const LEFT_OUTSIDE = new Map([
   ["mir-mutants.yml#gate", "it runs mn by its path, which cargo's runner never sees, and writes outside the workspace"],
   ["perf.yml#kernels", "it measures mn and its kernels through perf, with the base branch's compiler beside the change's"],
   ["harness.yml#fixtures", "its own sandbox confines agent code, not mn"],
+  ["pages.yml#build", "it runs the change's site generator, its tests and `mn explain`, whose output is the site its link check reads"],
 ]);
-/// GATE_ONLY: the required jobs that run no code of the change but the gate's own scripts under
-/// .github/. Each is pinned whole, with every script it runs: an allowlist of exact steps, where a
+/// GATE_ONLY: the required or pinned jobs that run no code of the change but the gate's own scripts
+/// under .github/. Each is pinned whole, with every script it runs: an allowlist of exact steps, where a
 /// rule that read the steps for tools by their names let through every spelling it did not know
 /// (`sh -c`, a quoted name, a path to the tool, node's child_process; the third review of 980965e).
-const GATE_ONLY = new Map([["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"]]);
+const GATE_ONLY = new Map([
+  ["commits.yml#commits", "it runs .github/scripts/commits.mjs alone, over the commits' text and the pull request's"],
+  [PAGES_DEPLOY_JOB, "it deploys the site its build job made from a tag the build proved in main's history, and runs nothing else"],
+  ...NIGHTLY_ALARM_JOBS.map((key) => [key, "it runs .github/scripts/nightly-alarm.mjs alone, with the results of the jobs it needs"]),
+]);
 /// The labels a job may run on: each a literal, or a matrix value that is one.
 const RUNNERS = new Set(["ubuntu-24.04", "ubuntu-24.04-arm", "windows-2025"]);
 /// The runners a job names: its literal label, or each value its matrix gives the key `runs-on`
@@ -1779,7 +1861,7 @@ check("every required job on Linux runs the change's code in the sandbox, or say
     if (GATE_ONLY.has(key)) assert.ok(PINNED_JOBS.has(key), `${key}, a job of GATE_ONLY, is not pinned whole: its exact steps are what it may run`);
   }
   for (const [name, set] of lists) {
-    for (const key of set) assert.ok(required.has(key) || (name === "SANDBOXED_JOBS" && key === "mutants-full.yml#full"), `${name} names ${key}, which is no required job`);
+    for (const key of set) assert.ok(required.has(key) || (name === "SANDBOXED_JOBS" && key === "mutants-full.yml#full") || (name === "GATE_ONLY" && PINNED_JOBS.has(key)), `${name} names ${key}, which is no required job${name === "GATE_ONLY" ? " and no pinned one" : ""}`);
   }
   // Nothing of the change lies under target/, where the tests are built: root mounts the tests'
   // own directory there, and refuses to through a link the change tracks (test-sandbox.sh); this
@@ -1826,12 +1908,13 @@ const TOOL_ENV =
   /^(CARGO_|NEXTEST_|RUSTC|RUSTDOC|RUSTUP_|RUSTFLAGS$|RUSTFMT|CLIPPY_|BASH_ENV$|BASH_FUNC_|ENV$|PATH$|SHELLOPTS$|BASHOPTS$|NODE_|NPM_CONFIG_|LD_|DYLD_|GLIBC_TUNABLES$|GCONV_|LOCPATH$|MALLOC_|GIT_|HOME$|XDG_|TMPDIR$|OPENSSL_|SSL_CERT_|CURL_CA_BUNDLE$|HTTPS?_PROXY$|ALL_PROXY$|NO_PROXY$)/i;
 const TOOL_ENV_ALLOWED = new Map([
   ["CARGO_TERM_COLOR", { value: "always", jobs: null }],
-  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
+  // The full run's alarm inherits the workflow's two, and runs no cargo and no nextest.
+  ["CARGO_MUTANTS_VERSION", { value: null, jobs: ["mutants.yml#in-diff", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // The fuzzer's release build also asserts what a debug build asserts.
   ["CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS", { value: "true", jobs: ["fuzz.yml#fuzz"] }],
   // The base branch's build beside this change's.
   ["CARGO_TARGET_DIR", { value: "${{ github.workspace }}/../target", jobs: ["perf.yml#kernels"] }],
-  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#in-diff", "mutants-full.yml#full"] }],
+  ["NEXTEST_PROFILE", { value: "mutants", jobs: ["mutants.yml#in-diff", "mutants-full.yml#full", "mutants-full.yml#alarm"] }],
   // A warning fails the build.
   ["RUSTFLAGS", { value: "-D warnings", jobs: ["ci.yml#rust"] }],
 ]);
@@ -2024,6 +2107,7 @@ const NODE_INPUTS = { "node-version": PERMISSION.node, "package-manager-cache": 
 /// reader's (policy-runtime-judge), as BEFORE_TOOLCHAIN reads a step's script, trimmed.
 const POLICY_RUN = "node .github/scripts/policy-collect.mjs\nnode --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs";
 const BEFORE_TOOLCHAIN = new Map([
+  ["bash .github/scripts/publish-tag.sh", { job: "pages-publish.yml#build", env: { TAG: "${{ inputs.tag }}" }, why: "the milestone tag the run was given, checked out once its commit is proven in main's history, before anything of it runs" }],
   [POLICY_RUN, { job: "ci.yml#docs", why: "the policy, first in the Documentation job: its collector, then its tests" }],
   ["node .github/scripts/action-pins.mjs", { job: "ci.yml#docs", why: "the check of the actions' pins against their releases" }],
   ['echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"', { job: "harness.yml#fixtures", why: "the harness's toolchain, put outside the home its sandbox hides" }],
@@ -2076,8 +2160,12 @@ export function beforeToolchainProblems(file, id, doc, job) {
       found.push(`${where} runs an action other than the checkout and node: ${uses}`);
     } else if (s.id === "watch") {
       if (!stepKeysAre(s, ["name", "id", "run"]) || String(s.run).trim() !== `node .github/scripts/watch.mjs ${file}`) found.push(`${where} is not the watch exactly: ${JSON.stringify(s)}`);
-    } else if (!stepKeysAre(s, ["name", "run"]) || BEFORE_TOOLCHAIN.get(String(s.run ?? "").trim())?.job !== key) {
-      found.push(`${where} is none of the steps BEFORE_TOOLCHAIN names for this job, with its name and script alone: ${JSON.stringify(s)}`);
+    } else {
+      // A step of BEFORE_TOOLCHAIN: its name and script alone, or with exactly the variables its
+      // entry names, when it names any.
+      const allowed = BEFORE_TOOLCHAIN.get(String(s.run ?? "").trim());
+      const keysOk = allowed?.env === undefined ? stepKeysAre(s, ["name", "run"]) : stepKeysAre(s, ["name", "env", "run"]) && JSON.stringify(s.env) === JSON.stringify(allowed.env);
+      if (!keysOk || allowed?.job !== key) found.push(`${where} is none of the steps BEFORE_TOOLCHAIN names for this job, with its name, its script and the variables its entry names alone: ${JSON.stringify(s)}`);
     }
   }
   if (checkouts !== 1) found.push(`${key} checks out ${checkouts} times before the check, not once`);
@@ -3051,7 +3139,7 @@ check("a node line without the flag that refuses code from strings is read as on
 
 /// The other jobs that name an environment, each with its name: the Pages deployment, whose
 /// environment holds no secret.
-const OTHER_ENVIRONMENTS = new Map([["pages.yml#deploy", "github-pages"]]);
+const OTHER_ENVIRONMENTS = new Map([[PAGES_DEPLOY_JOB, "github-pages"]]);
 
 /// What is wrong with a job's environment: a job of SECRET_JOBS names SECRET_ENVIRONMENT, as a
 /// literal string, a job of OTHER_ENVIRONMENTS names its own, and no other job names any, so that
@@ -3138,7 +3226,7 @@ check("every job that holds a secret names the environment benchmark, for main a
     ["prelim.yml#prelim", { environment: "${{ inputs.environment }}" }],
     ["benchmark.yml#build", { environment: SECRET_ENVIRONMENT }],
     ["ci.yml#test", { environment: "staging" }],
-    ["pages.yml#deploy", { environment: { name: SECRET_ENVIRONMENT } }],
+    ["pages-publish.yml#deploy", { environment: { name: SECRET_ENVIRONMENT } }],
   ]) {
     assert.ok(environmentProblems(key, job).length > 0, `the environment rule lets through ${key}: ${JSON.stringify(job)}`);
   }
@@ -3514,6 +3602,16 @@ const GATE_FILES = [
   "/.gitattributes",
   "/tools/quick.mjs",
   "/tools/quick-checks.json",
+  "/tools/local-limits.mjs",
+  "/tools/local-limits.test.mjs",
+  "/tools/capped.ps1",
+  "/tools/capped.mjs",
+  "/tools/cargo.mjs",
+  "/tools/mn.mjs",
+  "/tools/raw-build.mjs",
+  "/tools/raw-build-guard.mjs",
+  "/tools/store-apps.mjs",
+  "/.claude/settings.json",
 ];
 
 /// Whether a CODEOWNERS pattern of the forms GATE_FILES uses owns a file: `/dir/` every file under
@@ -3688,6 +3786,380 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
   assert.deepEqual(missed.slice(0, 20), [], `${missed.length} files whose change tools/quick.mjs would not check against this policy`);
 });
 
+/// The local limits' files: the module that defines them, the job object's script and the type it
+/// shares with CI, the entry points, cargo's runner, the raw-build hook, and their proofs
+/// (tools/local-limits.mjs).
+const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/capped.mjs", "tools/cargo.mjs", "tools/mn.mjs", "tools/raw-build.mjs", "tools/raw-build-guard.mjs", "tools/store-apps.mjs", "tools/local-limits.test.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
+/// The most the local limits may give: builds at once, GB committed by a process and by a tree, and
+/// minutes, those --minutes may ask for among them.
+const LOCAL_CEILING = { slots: 2, processGB: 8, jobGB: 16, minutes: 60 };
+
+/// The arguments of each call of `name` in `toks`, each argument its tokens, split at the commas of
+/// the call's own depth.
+function callArguments(toks, name) {
+  const calls = [];
+  for (let i = 0; i < toks.length; i++) {
+    if (toks[i].t !== "id" || toks[i].v !== name || toks[i + 1]?.v !== "(" || toks[i - 1]?.v === ".") continue;
+    const args = [[]];
+    let depth = 0;
+    for (let j = i + 2; j < toks.length; j++) {
+      const v = toks[j].v;
+      if (depth === 0 && v === ")") break;
+      if (depth === 0 && v === ",") {
+        args.push([]);
+        continue;
+      }
+      if (["(", "[", "{"].includes(v)) depth++;
+      if ([")", "]", "}"].includes(v)) depth--;
+      args.at(-1).push(toks[j]);
+    }
+    calls.push(args);
+  }
+  return calls;
+}
+
+/// Whether `toks` hold `seq`, a run of token values, anywhere.
+const holds = (toks, seq) => toks.some((t, i) => seq.every((v, k) => toks[i + k]?.v === v));
+
+/// What keeps the quick checks from running every command in a build slot and under the local
+/// limits, from the texts of tools/quick.mjs (`quick`), tools/local-limits.mjs (`limits`),
+/// tools/capped.ps1 (`capped`), tools/mn.mjs (`mn`) and tools/cargo.mjs (`cargo`), and the quick
+/// map (`map`):
+/// - quick.mjs starts no process but git's and runCapped's: it imports nothing else that could, it
+///   calls execFileSync only on "git", it takes a slot, and runs each check by runCapped with BUILD;
+/// - local-limits.mjs gives no more than LOCAL_CEILING, --minutes included; it starts capped.ps1 by
+///   Windows PowerShell's path in System32, never pwsh, and hands it the command as JSON in
+///   MENTE_CAPPED, never as arguments (the review of 8f03074); it starts one process, and a command
+///   untouched only off Windows or, with menteOnly, outside a checkout of this repository;
+/// - capped.ps1 reads its call from MENTE_CAPPED alone, and starts the command only through the job
+///   object's Run, after Confine;
+/// - mn.mjs and cargo.mjs hold their slot from before their first run to after their last;
+/// - quick.mjs, cargo.mjs and mn.mjs require cargo's runner to be tools/capped.mjs before they take
+///   a slot, as local-limits.mjs's requireRunner reads it (the review of round 4);
+/// - the quick map runs the proofs for a change to any file of LOCAL_LIMITS.
+export function localLimitsProblems({ quick, limits, capped, mn, cargo, map }) {
+  const problems = [];
+  const q = jsTokens(quick);
+  const allowed = new Set(["node:child_process", "node:fs", "./local-limits.mjs"]);
+  for (const s of jsImports(q).specifiers) if (!allowed.has(s.v)) problems.push(`tools/quick.mjs imports ${s.v}, which could start a process past the limits`);
+  const starters = ["spawn", "spawnSync", "exec", "execSync", "execFile", "fork"];
+  for (const t of q) if (t.t === "id" && starters.includes(t.v)) problems.push(`tools/quick.mjs:${t.line}: ${t.v} starts a process past the limits`);
+  for (const args of callArguments(q, "execFileSync")) {
+    if (!(args[0]?.length === 1 && args[0][0].t === "str" && args[0][0].v === "git")) problems.push("tools/quick.mjs calls execFileSync on something other than git");
+  }
+  if (q.some((t, i) => t.t === "id" && t.v === "execFileSync" && !["(", "}", ","].includes(q[i + 1]?.v))) problems.push("tools/quick.mjs passes execFileSync around, where no reading follows it");
+  if (callArguments(q, "acquireSlot").length !== 1) problems.push("tools/quick.mjs takes no build slot, or more than one");
+  const runs = callArguments(q, "runCapped");
+  if (runs.length === 0) problems.push("tools/quick.mjs runs no check through runCapped");
+  for (const args of runs) {
+    if (!(args[1]?.length === 1 && args[1][0].v === "BUILD")) problems.push("tools/quick.mjs runs a check under other limits than BUILD");
+  }
+
+  const l = jsTokens(limits);
+  const number = (name, key) => {
+    const at = l.findIndex((t, i) => t.t === "id" && t.v === name && l[i + 1]?.v === "=");
+    if (at < 0) return NaN;
+    if (key === null) return l[at + 2]?.t === "num" ? Number(l[at + 2].v) : NaN;
+    for (let j = at; j < Math.min(l.length, at + 30); j++) if (l[j].t === "id" && l[j].v === key && l[j + 1]?.v === ":" && l[j + 2]?.t === "num") return Number(l[j + 2].v);
+    return NaN;
+  };
+  const slots = number("SLOTS", null);
+  if (!(slots >= 1 && slots <= LOCAL_CEILING.slots)) problems.push(`tools/local-limits.mjs lets ${slots} builds run at once, past ${LOCAL_CEILING.slots}`);
+  for (const set of ["BUILD", "PROBE"]) {
+    for (const key of ["processGB", "jobGB", "minutes"]) {
+      const v = number(set, key);
+      if (!(v > 0 && v <= LOCAL_CEILING[key])) problems.push(`tools/local-limits.mjs gives ${set}.${key} ${v}, past ${LOCAL_CEILING[key]}`);
+    }
+  }
+  const most = number("MAX_MINUTES", null);
+  if (!(most > 0 && most <= LOCAL_CEILING.minutes)) problems.push(`tools/local-limits.mjs lets --minutes ask for ${most}, past ${LOCAL_CEILING.minutes}`);
+  if (!holds(l, ["minutes", "<", "=", "MAX_MINUTES"])) problems.push("tools/local-limits.mjs does not hold --minutes to MAX_MINUTES");
+  if (l.some((t) => /pwsh/i.test(t.v))) problems.push("tools/local-limits.mjs names pwsh, which takes the processes it starts out of the job");
+  const strings = new Set(l.filter((t) => t.t === "str").map((t) => t.v));
+  for (const s of ["System32", "WindowsPowerShell", "v1.0", "powershell.exe", "capped.ps1", "-File"]) if (!strings.has(s)) problems.push(`tools/local-limits.mjs does not name ${s} in the way it starts capped.ps1`);
+  if (!holds(l, ["MENTE_CAPPED", ":", "JSON", ".", "stringify", "(", "call", ")"]) || !holds(l, ["command", ":", "run"])) problems.push("tools/local-limits.mjs does not hand capped.ps1 the command as JSON in MENTE_CAPPED");
+  const at = l.findIndex((t, i) => t.v === "args" && l[i + 1]?.v === ":" && l[i + 2]?.v === "[");
+  let close = at;
+  while (close >= 0 && close < l.length && l[close].v !== "]") close++;
+  if (at < 0 || l.slice(at + 3, close).some((t) => !(t.t === "str" || t.v === "CAPPED" || t.v === ","))) problems.push("tools/local-limits.mjs hands capped.ps1 arguments past its own options, which PowerShell's parser would change");
+  const spawns = callArguments(l, "spawnSync");
+  if (spawns.length !== 1 || spawns[0][0]?.map((t) => t.v).join("") !== "spawned.cmd" || spawns[0][1]?.map((t) => t.v).join("") !== "spawned.args") problems.push("tools/local-limits.mjs starts a process other than the one runCapped chose");
+  if (!holds(l, ["const", "{", "cmd", ",", "args", ",", "env", "}", "=", "capped", "(", "run", ",", "limits", ")"])) problems.push("tools/local-limits.mjs runs a command other than capped() gives");
+  // The Store's pwsh, started in a job, takes every process it starts out of it (Norman,
+  // 2026-11-22): a capped run refuses it as its program, and its PATH holds no WindowsApps
+  // directory, where it is found by name.
+  if (!jsImports(l).specifiers.some((s) => s.v === "./store-apps.mjs")) problems.push("tools/local-limits.mjs does not take the Store's apps from tools/store-apps.mjs");
+  if (!holds(l, ["if", "(", "storePowerShell", "(", "run", "[", "0", "]", ")", ")"])) problems.push("tools/local-limits.mjs does not refuse the Store's pwsh as a capped command");
+  if (!holds(l, ["env", ":", "{", ".", ".", ".", "withoutStoreApps", "(", "process", ".", "env", ")"])) problems.push("tools/local-limits.mjs leaves the WindowsApps directories on a capped command's PATH");
+  const untouched = [...limits.matchAll(/spawned = \{ cmd: run\[0\]/g)].length;
+  const gated = [...limits.matchAll(/(?:if|else if) \(([^\n]*)\) \{\n(?:\s*console\.error\([^\n]*\);\n)?\s*spawned = \{ cmd: run\[0\]/g)].map((m) => m[1]);
+  if (gated.length !== untouched || gated.some((c) => !["menteOnly && !inMente(cwd ?? process.cwd())", "!WINDOWS"].includes(c))) problems.push("tools/local-limits.mjs runs a command untouched where it should bound it");
+
+  const code = capped.split(/\r?\n/).filter((line) => !/^\s*#/.test(line)).join("\n");
+  const confine = code.indexOf("[JobLimits]::Confine(");
+  const run = code.indexOf("[JobLimits]::Run(");
+  if (!/Add-Type -Path \(Join-Path \$PSScriptRoot '\.\.\/\.github\/scripts\/lib\/job-object\.cs'\)/.test(code)) problems.push("tools/capped.ps1 does not load the job object CI's Windows jobs use");
+  if (confine < 0 || run < 0 || run < confine) problems.push("tools/capped.ps1 does not start the command in the job, after setting the job up");
+  if (/Start-Process|Diagnostics\.Process\]::Start|Invoke-Expression|\biex\b|&\s*\$|pwsh/i.test(code)) problems.push("tools/capped.ps1 starts a process outside the job object's Run");
+  if (!code.includes("$env:MENTE_CAPPED") || /\$args\b/i.test(code)) problems.push("tools/capped.ps1 reads its call from somewhere other than MENTE_CAPPED");
+
+  for (const [file, text] of [["tools/quick.mjs", quick], ["tools/mn.mjs", mn], ["tools/cargo.mjs", cargo]]) {
+    const t = jsTokens(text);
+    const first = (name) => t.findIndex((x, i) => x.t === "id" && x.v === name && t[i + 1]?.v === "(" && t[i - 1]?.v !== ".");
+    const required = first("requireRunner");
+    if (required < 0 || required > first("acquireSlot")) problems.push(`${file} does not require cargo's runner before it takes a slot`);
+  }
+  for (const s of ["capped.mjs", "x86_64-pc-windows-msvc", "config.toml"]) if (!strings.has(s)) problems.push(`tools/local-limits.mjs does not name ${s} in the runner it requires`);
+  // The line it tells the laptop to add, and what it takes for that runner, both with --mente-only.
+  if (!/^export const runnerLine = [^\n]*"capped\.mjs"[^\n]*, "--mente-only", "--"\]`;$/m.test(limits)) problems.push("tools/local-limits.mjs tells the laptop to add a runner line other than tools/capped.mjs --mente-only --");
+  if (!holds(l, ["words", "[", "2", "]", "=", "=", "=", "--mente-only"]) || !holds(l, ["words", "[", "3", "]", "=", "=", "=", "--"])) problems.push("tools/local-limits.mjs takes a runner without --mente-only -- for the capped one");
+  for (const [file, text] of [["tools/mn.mjs", mn], ["tools/cargo.mjs", cargo]]) {
+    const t = jsTokens(text);
+    const calls = (name, dotted) => t.map((x, i) => (x.t === "id" && x.v === name && t[i + 1]?.v === "(" && (t[i - 1]?.v === ".") === dotted ? i : -1)).filter((i) => i >= 0);
+    const slot = calls("acquireSlot", false);
+    const ran = calls("runCapped", false);
+    const released = calls("release", true);
+    if (slot.length !== 1 || ran.length === 0 || slot[0] > ran[0] || released.length === 0 || released.some((r) => r < ran.at(-1))) problems.push(`${file} does not hold its slot from before its first run to after its last`);
+  }
+
+  const proofs = (map.checks ?? []).filter((c) => Array.isArray(c.run) && c.run.join(" ") === "node --test tools/local-limits.test.mjs");
+  const when = proofs.map((c) => (Object.hasOwn(map.patterns ?? {}, c.when) && typeof map.patterns[c.when] === "string" ? new RegExp(map.patterns[c.when]) : null)).filter(Boolean);
+  for (const f of LOCAL_LIMITS) if (!when.some((w) => w.test(f))) problems.push(`no quick check runs the local limits' proofs for a change to ${f}`);
+  return problems;
+}
+
+check("the quick checks run every command in one of the machine's build slots, under the local limits", () => {
+  // On 2026-11-22 a test binary committed 107 GB on the laptop, where several sessions build and
+  // test at once, and the machine reset: nothing bounded a local process. tools/quick.mjs runs each
+  // check in a Windows job object that bounds each process's memory, the tree's and the time, in one
+  // of two build slots for the machine (tools/local-limits.mjs). Read as text, never run.
+  const texts = { quick: read("tools/quick.mjs"), limits: read("tools/local-limits.mjs"), capped: read("tools/capped.ps1"), mn: read("tools/mn.mjs"), cargo: read("tools/cargo.mjs"), map: JSON.parse(read(QUICK_MAP)) };
+  for (const f of LOCAL_LIMITS) assert.ok(tracked().has(f), `${f} is not in the repository`);
+  // Each is a gate file, so that no edit lifts a limit without its owner's review (the review of
+  // 8f03074's round: cargo's runner, tools/capped.mjs, came in without an owner).
+  for (const f of LOCAL_LIMITS) assert.ok(GATE_FILES.some((p) => owns(p, f)), `${f}, one of the local limits, has no owner in .github/CODEOWNERS`);
+  assert.deepEqual(localLimitsProblems(texts), []);
+  // Planted, one at a time: each must be refused.
+  const plants = [
+    ["quick", 'import { execFileSync } from "node:child_process";', 'import { execFileSync, spawnSync } from "node:child_process";', "a direct spawnSync"],
+    ["quick", "  results.push([check.name, runCapped(check.run, BUILD) === 0]);", "  results.push([check.name, runCapped(check.run, { processGB: 64, jobGB: 64, minutes: 600 }) === 0]);", "other limits"],
+    ["quick", "const slot = acquireSlot(`tools/quick.mjs: ${due.length} check(s)`);", "const slot = { release() {} };", "no slot"],
+    ["quick", 'execFileSync("git", args', 'execFileSync("cargo", args', "execFileSync on cargo"],
+    ["quick", 'import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";', 'import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";\nimport { run } from "./other.mjs";', "another module"],
+    ["limits", "export const SLOTS = 2;", "export const SLOTS = 4;", "four slots"],
+    ["limits", "export const BUILD = Object.freeze({ processGB: 8,", "export const BUILD = Object.freeze({ processGB: 64,", "64 GB a process"],
+    ["limits", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });", "export const PROBE = Object.freeze({ processGB: 4, jobGB: 80, minutes: 5 });", "80 GB a probe's tree"],
+    ["limits", "export const MAX_MINUTES = 60;", "export const MAX_MINUTES = 600;", "600 minutes"],
+    ["limits", "  if (!(minutes > 0 && minutes <= MAX_MINUTES)) {", "  if (!(minutes > 0)) {", "--minutes with no ceiling"],
+    ["limits", 'export const WINDOWS_POWERSHELL = path.join(process.env.SystemRoot || "C:\\\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");', 'export const WINDOWS_POWERSHELL = "pwsh";', "the Store's pwsh"],
+    ["limits", '"-File", CAPPED]', '"-File", CAPPED, ...run]', "the command as arguments"],
+    ["limits", "  const { cmd, args, env } = capped(run, limits);", "  const { cmd, args, env } = { cmd: run[0], args: run.slice(1), env: {} };", "no capped()"],
+    ["limits", "  if (menteOnly && !inMente(cwd ?? process.cwd())) {", "  if (true) {", "always untouched"],
+    ["limits", "    if (storePowerShell(run[0])) {", "    if (false) {", "the Store's pwsh let through"],
+    ["limits", "env: { ...withoutStoreApps(process.env),", "env: { ...process.env,", "the WindowsApps directories left on PATH"],
+    ["limits", "  const r = spawnSync(spawned.cmd, spawned.args, { stdio: \"inherit\", env: spawned.env, cwd });", "  spawnSync(run[0], run.slice(1));\n  const r = spawnSync(spawned.cmd, spawned.args, { stdio: \"inherit\", env: spawned.env, cwd });", "a second process"],
+    ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds, [int]$call.parent, [ref] $end)", "$status = (Start-Process $application -PassThru -Wait).ExitCode", "Start-Process"],
+    ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds, [int]$call.parent, [ref] $end)", "& $program @rest; $status = $LASTEXITCODE", "the call operator"],
+    ["capped", "Add-Type -Path (Join-Path $PSScriptRoot '../.github/scripts/lib/job-object.cs')", "Add-Type -Path (Join-Path $PSScriptRoot 'other.cs')", "another job object"],
+    ["capped", "  $call = $env:MENTE_CAPPED | ConvertFrom-Json", "  $call = $args | ConvertFrom-Json", "the call from its arguments"],
+    ["mn", 'let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });', 'let status = runCapped(["cargo", "build", "--quiet", "--bin", "mn"], BUILD, { cwd: ROOT });\nslot.release();', "the probe's slot let go before its run"],
+    ["cargo", 'const slot = acquireSlot(`cargo ${args.join(" ")}`);', "const slot = { release() {} };", "cargo with no slot"],
+    ["quick", "if (!requireRunner()) process.exit(2);\n", "", "quick.mjs with no runner required"],
+    ["cargo", "if (!requireRunner()) process.exit(2);\n", "", "cargo.mjs with no runner required"],
+    ["mn", "if (!requireRunner()) process.exit(2);\n", "", "mn.mjs with no runner required"],
+    ["limits", '"--mente-only", "--"]`;', '"--"]`;', "a runner line without --mente-only"],
+  ];
+  for (const [part, from, to, what] of plants) {
+    assert.equal(texts[part].split(from).length, 2, `the plant "${what}" finds no place in ${part}`);
+    assert.ok(localLimitsProblems({ ...texts, [part]: texts[part].replace(from, () => to) }).length > 0, `the plant "${what}" passed`);
+  }
+  // What the Store's pwsh is, and the PATH a capped command gets.
+  for (const p of ["pwsh", "PWSH.EXE", "C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe", "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\\pwsh.exe", "C:/Users/x/AppData/Local/Microsoft/WindowsApps/winget.exe"]) assert.ok(storePowerShell(p), `${p} was not taken for a Store app`);
+  for (const p of [SYSTEM_POWERSHELL, "powershell", "cargo", "C:\\Windows\\System32\\cmd.exe", "C:\\tools\\mywindowsappsdemo\\x.exe"]) assert.ok(!storePowerShell(p), `${p} was taken for a Store app`);
+  const trimmed = withoutStoreApps({ Path: "C:\\Windows\\System32;C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\x\\.cargo\\bin;C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\\;D:\\x\\WINDOWSAPPS\\", OTHER: "kept" });
+  assert.deepEqual(trimmed, { Path: "C:\\Windows\\System32;C:\\Users\\x\\.cargo\\bin", OTHER: "kept" });
+  const noProofs = { ...texts.map, checks: texts.map.checks.filter((c) => c.run.join(" ") !== "node --test tools/local-limits.test.mjs") };
+  assert.ok(localLimitsProblems({ ...texts, map: noProofs }).length > 0, "a map that runs no proof of the local limits passed");
+});
+
+/// The project's settings, and the command they run the guard by.
+const GUARD_SETTINGS = ".claude/settings.json";
+// `|| exit 2`: a guard that fails to load exits 1, which Claude Code lets pass; this refuses.
+const GUARD_COMMAND = 'node "$CLAUDE_PROJECT_DIR/tools/raw-build-guard.mjs" || exit 2';
+
+/// What keeps `settings`, the project's Claude Code settings as parsed, from running the guard
+/// before every Bash and PowerShell command: a PreToolUse hook whose matcher takes both tools'
+/// names, with the guard's command among its hooks.
+export function guardSettingsProblems(settings) {
+  const takes = (matcher, name) => {
+    try {
+      return new RegExp(`^(?:${matcher})$`).test(name);
+    } catch {
+      return false;
+    }
+  };
+  const before = Array.isArray(settings?.hooks?.PreToolUse) ? settings.hooks.PreToolUse : [];
+  const problems = [];
+  for (const tool of ["Bash", "PowerShell"]) {
+    const runs = before.some((h) => typeof h?.matcher === "string" && takes(h.matcher, tool) && Array.isArray(h.hooks) && h.hooks.some((x) => x?.type === "command" && x.command === GUARD_COMMAND));
+    if (!runs) problems.push(`${GUARD_SETTINGS} does not run \`${GUARD_COMMAND}\` before each ${tool} command`);
+  }
+  return problems;
+}
+
+check("the raw-build guard refuses a build outside the local limits and names the capped command to run instead", () => {
+  // The hook a session runs before each shell command (tools/raw-build-guard.mjs, which
+  // tools/raw-build.mjs decides for): a raw `cargo test`, or a binary run from target/, would run
+  // past the job object and the slots, as the test binary of 2026-11-22 did. The refusal names the
+  // command to run instead, as a diagnostic names its fix. Each case: the command, and what the
+  // guard must name instead, or null to let it through.
+  const cases = [
+    ["cargo test", "node tools/cargo.mjs test"],
+    ["cargo test -p mente-cli", "node tools/cargo.mjs test -p mente-cli"],
+    ["cd compiler && cargo build --release", "node tools/cargo.mjs build --release"],
+    ["CARGO_BUILD_JOBS=4 cargo t", "node tools/cargo.mjs t"],
+    ["cargo +nightly run --bin mn -- spec", "node tools/cargo.mjs +nightly run --bin mn -- spec"],
+    ["& cargo clippy --all-targets", "node tools/cargo.mjs clippy --all-targets"],
+    ['cargo test -p x -- "a b" && echo done', 'node tools/cargo.mjs test -p x -- "a b"'],
+    ["if true; then cargo test; fi", "node tools/cargo.mjs test"],
+    ["C:/Users/Dancr/.cargo/bin/cargo.exe check", "node tools/cargo.mjs check"],
+    ["target/debug/mn.exe check x.mn", "node tools/mn.mjs check x.mn"],
+    ["C:\\Repos\\Mente\\target\\release\\mn.exe run a.mn", "node tools/mn.mjs run a.mn"],
+    ["./target/debug/deps/mn-0e02cc27629dbce7.exe --list", "node tools/cargo.mjs test -- --list"],
+    ["node tools/cargo.mjs test -p mente-cli", null],
+    ["node tools/mn.mjs check examples/a.mn", null],
+    ["node tools/quick.mjs -- -p mente-cli x", null],
+    ["cargo fmt --all --check", null],
+    ["cargo metadata --format-version 1", null],
+    ['git commit -m "run cargo test before"', null],
+    ['git commit -m "fix the floor; cargo test passes"', null],
+    ["ls target/debug/", null],
+    ["grep -r cargo test.txt", null],
+    ["echo cargo test", null],
+    // The review of 8f03074: forms the regular expressions missed, each now read as a command.
+    ["cmd /c cargo test", "node tools/cargo.mjs test"],
+    ["cargo -q test", "node tools/cargo.mjs -q test"],
+    ["cargo --locked test", "node tools/cargo.mjs --locked test"],
+    ["foreach ($x in 1..2) { cargo test }", "node tools/cargo.mjs test"],
+    ["timeout 600 cargo test", "node tools/cargo.mjs test"],
+    ["env cargo test", "node tools/cargo.mjs test"],
+    ["Cargo test", "node tools/cargo.mjs test"],
+    ["cargo llvm-cov", "node tools/cargo.mjs llvm-cov"],
+    ["cargo fix", "node tools/cargo.mjs fix"],
+    ['bash -c "cargo build"', "node tools/cargo.mjs build"],
+    ["cargo test 2>&1 | tail -5", "node tools/cargo.mjs test 2>&1"],
+    // A cargo command not known as harmless is refused, so a new one is too.
+    ["cargo testing-tool", "node tools/cargo.mjs testing-tool"],
+    // And what the regular expressions refused wrongly: a heredoc's body and a comment.
+    ["git commit -F - <<'EOF'\ncargo test passes now\nEOF", null],
+    ["cat <<-EOF > notes.txt\n\tcargo build\n\tEOF", null],
+    ["# then cargo test", null],
+    ["echo done # cargo test", null],
+    ["echo done # then; cargo test", null],
+    ["cargo -q fmt --check", null],
+    ["cargo --locked metadata --format-version 1", null],
+    ["$m = @'\ncargo test\n'@\ngit commit -m $m", null],
+    ["cargo --version", null],
+    ["cargo", null],
+    // tools/capped.mjs asked to run the Store's pwsh, by name or by path, through either separator,
+    // gets Windows PowerShell in its place; its command is the word after its first `--`, and
+    // cargo.mjs and mn.mjs run cargo and mn whatever their arguments name (the review of 55c40e7).
+    ["node tools/capped.mjs -- pwsh -NoProfile -c x", `node tools/capped.mjs -- ${SYSTEM_POWERSHELL} -NoProfile -c x`],
+    ["node tools\\capped.mjs -- pwsh -c x", `node tools\\capped.mjs -- ${SYSTEM_POWERSHELL} -c x`],
+    ["node tools/capped.mjs --mente-only -- pwsh.exe", `node tools/capped.mjs --mente-only -- ${SYSTEM_POWERSHELL}`],
+    ["node tools/capped.mjs -- C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe -c 1", `node tools/capped.mjs -- ${SYSTEM_POWERSHELL} -c 1`],
+    ["node tools/capped.mjs -- node probe.js pwsh", null],
+    ["node tools/cargo.mjs test -- --skip pwsh", null],
+    ["node tools/cargo.mjs run --bin probe -- pwsh", null],
+    ["node tools/capped.mjs -- powershell.exe -c x", null],
+    ["node tools/mn.mjs check a.mn", null],
+    ["pwsh -c 1", null],
+  ];
+  const wrong = cases.filter(([command, instead]) => (rawBuildRefusal(command)?.instead ?? null) !== instead).map(([command, instead]) => `${command}: ${rawBuildRefusal(command)?.instead ?? null}, not ${instead}`);
+  assert.deepEqual(wrong, []);
+  // The words a session reads name the command found and the one to run.
+  const planted = rawBuildRefusal("cargo test");
+  assert.match(rawBuildMessage(planted), /^"cargo test" would run outside the local limits\. Run this instead: node tools\/cargo\.mjs test\n/);
+  for (const name of ["build", "test", "run", "clippy", "nextest", "check", "llvm-cov", "fix", "bench", "doc", "mutants"]) assert.ok(!CARGO_HARMLESS.includes(name), `the guard lets cargo ${name} through`);
+  // The hook fails closed: an event it cannot read, or one with no command, refuses the command.
+  for (const input of ["not json", "", '{"tool_input":{"command":42}}', "{}"]) {
+    const answer = rawBuildDecide(input);
+    assert.equal(answer.status, 2, `the hook lets a command through on ${JSON.stringify(input)}`);
+    assert.match(answer.words, /^the raw-build guard /);
+  }
+  assert.deepEqual(rawBuildDecide(JSON.stringify({ tool_input: { command: "node tools/cargo.mjs test" } })), { status: 0, words: "" });
+  assert.equal(rawBuildDecide(JSON.stringify({ tool_input: { command: "cargo test" } })).status, 2);
+  // The project's settings, which every checkout and every session of it reads, run the guard
+  // before each Bash and PowerShell command (Norman, 2026-11-22).
+  const settings = JSON.parse(read(GUARD_SETTINGS));
+  assert.deepEqual(guardSettingsProblems(settings), []);
+  const hook = (matcher, command) => ({ hooks: { PreToolUse: [{ matcher, hooks: [{ type: "command", command }] }] } });
+  const ours = settings.hooks.PreToolUse.find((h) => h.hooks?.some((x) => x.command === GUARD_COMMAND));
+  for (const [plant, what] of [
+    [hook("Bash", GUARD_COMMAND), "the guard for Bash alone"],
+    [hook(ours.matcher, 'node "$CLAUDE_PROJECT_DIR/tools/other.mjs"'), "another script"],
+    [{ hooks: { PostToolUse: settings.hooks.PreToolUse } }, "the guard after the command, not before"],
+    [{}, "no hook"],
+  ]) {
+    assert.ok(guardSettingsProblems(plant).length > 0, `settings with ${what} passed`);
+  }
+});
+
+/// The program generator, its differential runs and their coverage: modules of mn's own binary.
+const GENERATOR_DIR = "compiler/mente-cli/src/mir_run/";
+const GENERATOR_RUN = ["cargo", "test", "-p", "mente-cli", "--bin", "mn", "--"];
+
+/// What keeps the quick map (`map`, as parsed) from running the program generator's own tests for a
+/// change to any of `files`, the tracked files of GENERATOR_DIR, with `main`, the text of mn's
+/// main.rs: one check whose pattern takes every one of them runs `cargo test` on mn's binary with,
+/// for each module a file of the directory is, a filter every test of that module's path contains,
+/// and no option among them (`--exact` or `--skip` would turn the filters into something else); and
+/// main.rs declares mir_run, so that the binary holds those tests at all. A filter that matched no
+/// test would pass with none run.
+export function generatorQuickProblems(map, files, main) {
+  const problems = [];
+  if (!/^mod mir_run;$/m.test(main)) problems.push("compiler/mente-cli/src/main.rs declares no `mod mir_run;`, so mn's binary holds none of the generator's tests");
+  const modules = files.filter((f) => f.endsWith(".rs")).map((f) => `mir_run::${f.slice(GENERATOR_DIR.length, -".rs".length).replace(/\/mod$/, "").replace(/\//g, "::")}::`);
+  const runs = (map.checks ?? []).filter((c) => Array.isArray(c.run) && GENERATOR_RUN.every((a, k) => c.run[k] === a));
+  const covering = runs.filter((c) => {
+    const source = Object.hasOwn(map.patterns ?? {}, c.when) ? map.patterns[c.when] : null;
+    if (typeof source !== "string") return false;
+    const when = new RegExp(source);
+    const filters = c.run.slice(GENERATOR_RUN.length);
+    return files.every((f) => when.test(f)) && !filters.some((a) => a.startsWith("-")) && modules.every((m) => filters.some((a) => m.includes(a)));
+  });
+  if (covering.length === 0) {
+    problems.push(`no check of ${QUICK_MAP} runs \`${GENERATOR_RUN.join(" ")}\` with a filter for each of ${modules.join(", ")}, for a change to any file of ${GENERATOR_DIR}`);
+  }
+  return problems;
+}
+
+check("tools/quick.mjs runs the program generator's own tests for a change to it", () => {
+  // A change to the program generator can break what only its own tests hold: every construct of
+  // the grammar reached, every generated program well typed and replayable, the three paths
+  // agreeing on them. No other quick check runs them, so such a change passed the quick checks and
+  // failed only on CI (compiler-fixes, 2026-11-22). A module added to the directory needs its
+  // filter in the map too.
+  const files = [...tracked()].filter((f) => f.startsWith(GENERATOR_DIR));
+  assert.ok(files.some((f) => f.endsWith("/generate.rs")), `${GENERATOR_DIR} holds no generate.rs: the generator moved, and this check with it`);
+  const main = read("compiler/mente-cli/src/main.rs");
+  const map = JSON.parse(read(QUICK_MAP));
+  assert.deepEqual(generatorQuickProblems(map, files, main), []);
+  // Planted: a module added to the directory, a pattern that misses a file, a filter turned exact,
+  // one module's filter alone, the filters run on another test target, the check gone, and mir_run
+  // no longer a module of the binary.
+  const generator = map.checks.find((c) => generatorQuickProblems({ ...map, checks: [c] }, files, main).length === 0);
+  const withRun = (run) => ({ ...map, checks: map.checks.map((c) => (c === generator ? { ...c, run } : c)) });
+  assert.equal(generatorQuickProblems(map, [...files, `${GENERATOR_DIR}shrink.rs`], main).length, 1, "a module added to the generator's directory passed without its filter");
+  assert.equal(generatorQuickProblems({ ...map, patterns: { ...map.patterns, [generator.when]: `^${GENERATOR_DIR}generate\\.rs$` } }, files, main).length, 1, "a pattern that misses a file of the directory passed");
+  assert.equal(generatorQuickProblems(withRun([...generator.run, "--exact"]), files, main).length, 1, "filters turned exact passed");
+  assert.equal(generatorQuickProblems(withRun([...GENERATOR_RUN, "mir_run::generate::"]), files, main).length, 1, "a run of one module's tests passed");
+  assert.equal(generatorQuickProblems(withRun(["cargo", "test", "-p", "mente-cli", "--test", "cli", "--", ...generator.run.slice(GENERATOR_RUN.length)]), files, main).length, 1, "the filters run against a test target that holds none of the generator's tests passed");
+  assert.equal(generatorQuickProblems({ ...map, checks: map.checks.filter((c) => c !== generator) }, files, main).length, 1, "a map without the generator's check passed");
+  assert.equal(generatorQuickProblems(map, files, main.replace(/^mod mir_run;$/m, "")).length, 1, "mir_run outside mn's binary passed");
+  assert.deepEqual(generatorQuickProblems(withRun([...GENERATOR_RUN, "mir_run::"]), files, main), [], "one filter that every module's tests contain was refused");
+});
+
 check("the required checks are listed once each", () => {
   const names = requiredChecks();
   assert.ok(names.length > 0);
@@ -3813,6 +4285,360 @@ check("no two jobs of any workflow report a check of the same name", () => {
 /// push to main. A dispatched or scheduled run, or one with inputs, could report the job's check
 /// on a pull request's head with the work it chose.
 const REQUIRED_EVENTS = new Set(["pull_request", "merge_group", "push"]);
+
+/// The jobs that run on pull requests, or on pushes to a branch other than main, and are no required
+/// check, each with why it gates nothing. A check that runs on a pull request or a branch and is not
+/// required looks like a gate and is not one: "Build the site" ran on pull requests through a
+/// `paths:` filter for weeks, which kept it from being required, so a change that broke the site
+/// could merge. Read job by job, so that a job beside a required one of its workflow is held too,
+/// and with a reason each (the review of 7ba7a5c).
+const ADVISORY_JOBS = new Map([
+  ["ci.yml#coverage", "a report of line coverage, in the run summary and as lcov, of the tests the required Rust jobs run as the gate"],
+  ["spike-cranelift.yml#check", "a spike in a workspace of its own (spikes/cranelift-debug-info), whose findings are data for the register; ci.yml's Debuggers checks are the gate"],
+  ["spike-error-return.yml#check", "a spike in a workspace of its own (spikes/error-return-registers), whose findings are data for the register"],
+  ["spike-tier1.yml#measure", "the Tier-1 latency spike's measurement, data for the register; ci.yml's Tier-1 latency is the gate, and the Rust jobs run the spike's tests"],
+]);
+
+/// Whether triggers `on` run a workflow on a pull request, or on a push to a branch other than
+/// main: a push with no filter, with paths alone, or with branches other than main exactly. A push
+/// of tags alone runs on no branch.
+export function runsBeyondMain(on) {
+  if ("pull_request" in on || "pull_request_target" in on) return true;
+  if (!("push" in on)) return false;
+  const push = on.push;
+  if (!isPlain(push)) return true;
+  const branches = "branches" in push || "branches-ignore" in push;
+  if (!branches) return !("tags" in push || "tags-ignore" in push);
+  return !(Array.isArray(push.branches) && push.branches.length === 1 && push.branches[0] === "main" && !("branches-ignore" in push));
+}
+
+/// Why the jobs `jobs` ({ file, id, on }) are not each a required check, one of `required`
+/// ("file#id"), or one `advisory` names with a reason, when they run beyond main; and why
+/// `advisory` names what it should not.
+export function advisoryProblems(jobs, required, advisory) {
+  const found = [];
+  const keys = new Set();
+  for (const { file, id, on } of jobs) {
+    const key = `${file}#${id}`;
+    keys.add(key);
+    const beyond = runsBeyondMain(on);
+    const listed = advisory.has(key);
+    const reason = advisory.get(key);
+    if (beyond && !required.has(key) && !listed) found.push(`${key} runs on pull requests or on a branch other than main, and is no required check: make it one, or name it in ADVISORY_JOBS with why it gates nothing`);
+    if (listed && (typeof reason !== "string" || reason.trim() === "")) found.push(`${key} is in ADVISORY_JOBS with no reason`);
+    if (listed && required.has(key)) found.push(`${key} is in ADVISORY_JOBS, and is a required check`);
+    if (listed && !beyond) found.push(`${key} is in ADVISORY_JOBS, and runs on no pull request and no branch other than main`);
+  }
+  for (const key of advisory.keys()) if (!keys.has(key)) found.push(`ADVISORY_JOBS names ${key}, which is no job`);
+  return found;
+}
+
+check("every job that runs on pull requests or on a branch other than main is a gate, or says why it gates nothing", () => {
+  const jobs = allJobs().map(({ file, doc, id }) => ({ file, id, on: triggers(doc) }));
+  const required = new Set(requiredJobs().map(({ file, id }) => `${file}#${id}`));
+  assert.deepEqual(advisoryProblems(jobs, required, ADVISORY_JOBS), []);
+  assert.ok(required.has("pages.yml#build"), "the site's build is no required check");
+  const refused = (list, req = required, advisory = ADVISORY_JOBS) => advisoryProblems(list, req, advisory);
+  const pages = jobs.find((j) => j.file === "pages.yml" && j.id === "build");
+  // Planted: the site's build as it was, required by nothing; a job beside it in its required
+  // workflow; a pull_request_target workflow; and each push that reaches a branch other than main.
+  assert.ok(refused(jobs, new Set([...required].filter((k) => k !== "pages.yml#build"))).some((p) => p.startsWith("pages.yml#build runs on")), "the site's build, required by nothing, passes");
+  assert.ok(refused([...jobs, { ...pages, id: "extra" }]).some((p) => p.startsWith("pages.yml#extra runs on")), "a job beside a required one passes");
+  assert.ok(refused([{ file: "x.yml", id: "j", on: { pull_request_target: null } }]).some((p) => p.startsWith("x.yml#j runs on")), "a job on pull_request_target passes");
+  for (const push of [null, { paths: ["src/**"] }, { branches: ["main", "dev"] }, { branches: ["*"] }, { "branches-ignore": ["main"] }, { branches: ["main"], "branches-ignore": ["x"] }, { tags: ["m*"], branches: ["dev"] }]) {
+    assert.ok(refused([{ file: "x.yml", id: "j", on: { push } }]).some((p) => p.startsWith("x.yml#j runs on")), `a job on push ${JSON.stringify(push)} passes`);
+  }
+  // What is no gate's business: main's pushes, tags alone, a schedule, a run by hand.
+  for (const on of [{ push: { branches: ["main"] } }, { push: { tags: ["m*"] } }, { schedule: [{ cron: "0 0 * * *" }] }, { workflow_dispatch: null }]) {
+    assert.deepEqual(refused([{ file: "x.yml", id: "j", on }], required, new Map()), [], JSON.stringify(on));
+  }
+  // A reason that is empty or blank; a listed job that is required, that runs on no pull request,
+  // or that is no job.
+  for (const reason of ["", "   ", undefined]) {
+    assert.ok(refused(jobs, required, new Map([...ADVISORY_JOBS, ["spike-tier1.yml#measure", reason]])).includes("spike-tier1.yml#measure is in ADVISORY_JOBS with no reason"), `the reason ${JSON.stringify(reason)} passes`);
+  }
+  assert.ok(refused(jobs, new Set([...required, "spike-tier1.yml#measure"])).includes("spike-tier1.yml#measure is in ADVISORY_JOBS, and is a required check"), "a listed required check passes");
+  const byHand = jobs.map((j) => (j.file === "spike-tier1.yml" ? { ...j, on: { workflow_dispatch: null } } : j));
+  assert.ok(refused(byHand).includes("spike-tier1.yml#measure is in ADVISORY_JOBS, and runs on no pull request and no branch other than main"), "a listed job that runs on no pull request passes");
+  assert.ok(refused(jobs, required, new Map([...ADVISORY_JOBS, ["gone.yml#j", "x"]])).includes("ADVISORY_JOBS names gone.yml#j, which is no job"), "a listed name of no job passes");
+});
+
+/// What is wrong with how pages-publish.yml publishes the site (Norman, 2026-11-17): it runs by hand
+/// alone, with a required `tag` as its one input, and every job runs only from main, so that its
+/// definition is always main's. A push of a tag would run the workflow as the tagged commit holds
+/// it, which could drop the check that the tag is on main.
+export function publishProblems(doc) {
+  const found = [];
+  const on = triggers(doc);
+  const events = Object.keys(on);
+  if (events.length !== 1 || events[0] !== "workflow_dispatch") found.push(`pages-publish.yml runs on ${events.join(", ") || "nothing"}, not by hand alone`);
+  const inputs = on.workflow_dispatch?.inputs;
+  if (!isPlain(inputs) || !sameKeys(inputs, ["tag"]) || inputs.tag?.required !== true || inputs.tag?.type !== "string") found.push("pages-publish.yml takes other inputs than one required string, tag");
+  const jobs = isPlain(doc.jobs) ? Object.entries(doc.jobs) : [];
+  if (jobs.length === 0) found.push("pages-publish.yml has no job");
+  for (const [id, job] of jobs) {
+    if (normalize(String(job?.if ?? "")) !== "github.ref == 'refs/heads/main'") found.push(`pages-publish.yml, job ${id}, runs from refs other than main: if: ${job?.if ?? "(none)"}`);
+  }
+  return found;
+}
+
+/// A nightly alarm's last step, exactly, and its job's permissions: the issues it writes, the run's
+/// jobs it reads, the repository it checks out, and nothing more.
+const ALARM_STEP = { name: "Open, comment on or close the workflow's one issue", env: { GITHUB_TOKEN: "${{ github.token }}", RESULTS: "${{ toJSON(needs) }}" }, run: "node .github/scripts/nightly-alarm.mjs" };
+const ALARM_PERMISSIONS = { contents: "read", actions: "read", issues: "write" };
+/// A value with its keys in order, so that two equal maps compare equal however they were written.
+const canonical = (v) => (Array.isArray(v) ? v.map(canonical) : isPlain(v) ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, canonical(v[k])])) : v);
+const sameValue = (a, b) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
+
+/// What is wrong with a workflow's nightly alarm (Norman, 2026-11-21): a workflow that runs on a
+/// schedule ends in a job alarm that needs every other job of it, runs on every scheduled run
+/// whatever they ended in, holds ALARM_PERMISSIONS, ends with ALARM_STEP, and is pinned whole and
+/// gate-only. The nightlies were red nearly every night from 11-10, and nobody saw.
+export function alarmProblems(file, doc) {
+  if (!("schedule" in triggers(doc))) return [];
+  const jobs = isPlain(doc.jobs) ? doc.jobs : {};
+  const alarm = jobs.alarm;
+  if (!isPlain(alarm)) return [`${file} runs on a schedule and has no job alarm: a scheduled run that fails would go unseen`];
+  const found = [];
+  const others = Object.keys(jobs).filter((id) => id !== "alarm").sort();
+  const needs = (Array.isArray(alarm.needs) ? alarm.needs : [alarm.needs]).filter((n) => n !== undefined).map(String).sort();
+  if (!sameValue(needs, others)) found.push(`${file}, job alarm, needs ${needs.join(", ") || "nothing"}, not every other job: ${others.join(", ")}`);
+  if (normalize(String(alarm.if ?? "")) !== "always() && github.event_name == 'schedule'") found.push(`${file}, job alarm, runs if: ${alarm.if ?? "(none)"}, not always() on a scheduled run: a run that timed out, was cancelled or passed would say nothing`);
+  if (!sameValue(alarm.permissions, ALARM_PERMISSIONS)) found.push(`${file}, job alarm, holds the permissions ${JSON.stringify(alarm.permissions ?? null)}, not ALARM_PERMISSIONS`);
+  const all = steps(alarm);
+  if (all.length === 0 || !sameValue(all[all.length - 1], ALARM_STEP)) found.push(`${file}, job alarm, does not end with ALARM_STEP: ${JSON.stringify(all[all.length - 1] ?? null)}`);
+  if (!PINNED_JOBS.has(`${file}#alarm`)) found.push(`${file}, job alarm, is not pinned whole in PINNED_JOBS`);
+  if (!GATE_ONLY.has(`${file}#alarm`)) found.push(`${file}, job alarm, is not in GATE_ONLY`);
+  return found;
+}
+
+check("every workflow that runs on a schedule raises its one alarm, and no other job writes issues", () => {
+  const scheduled = workflows().filter((w) => "schedule" in triggers(w.doc));
+  assert.deepEqual(scheduled.map((w) => `${w.file}#alarm`).sort(), [...NIGHTLY_ALARM_JOBS].sort(), "NIGHTLY_ALARM_JOBS names other jobs than the alarms of the workflows that run on a schedule");
+  for (const { file, doc } of workflows()) assert.deepEqual(alarmProblems(file, doc), []);
+  // Planted on a nightly: each way its failure could go unseen, or its token reach further.
+  const fuzz = workflows().find((w) => w.file === "fuzz-nightly.yml").doc;
+  const planted = (change) => {
+    const d = JSON.parse(JSON.stringify(fuzz));
+    change(d);
+    return alarmProblems("fuzz-nightly.yml", d);
+  };
+  for (const [what, change] of [
+    ["no alarm", (d) => delete d.jobs.alarm],
+    ["an alarm that needs no job", (d) => (d.jobs.alarm.needs = [])],
+    ["a job the alarm does not need", (d) => (d.jobs.extra = { "runs-on": "ubuntu-24.04", steps: [] })],
+    ["an alarm on failure alone", (d) => (d.jobs.alarm.if = "failure()")],
+    ["an alarm on every run, by hand too", (d) => (d.jobs.alarm.if = "always()")],
+    ["an alarm that writes the repository", (d) => (d.jobs.alarm.permissions = { ...d.jobs.alarm.permissions, contents: "write" })],
+    ["an alarm that runs another script", (d) => (d.jobs.alarm.steps[d.jobs.alarm.steps.length - 1].run = "node x.mjs")],
+    ["an alarm handed a secret", (d) => (d.jobs.alarm.steps[d.jobs.alarm.steps.length - 1].env.X = "${{ secrets.X }}")],
+    ["a step after the alarm's", (d) => d.jobs.alarm.steps.push({ run: "echo done" })],
+  ]) {
+    assert.ok(planted(change).length > 0, `${what} passes`);
+  }
+  // issues: write anywhere but a nightly alarm: a job of that name in a workflow on no schedule,
+  // another job of a nightly, and a nightly's top.
+  const writes = (file, doc) => permissionProblems(file, doc).some((p) => p.includes("issues: write, which only a nightly alarm may hold"));
+  assert.ok(writes("ci.yml", { on: { pull_request: null }, permissions: { contents: "read" }, jobs: { alarm: { permissions: { issues: "write" } } } }), "an alarm of a workflow on no schedule writes issues");
+  assert.ok(writes("fuzz-nightly.yml", { ...fuzz, jobs: { fuzz: { permissions: { issues: "write" } } } }), "another job of a nightly writes issues");
+  assert.ok(writes("fuzz-nightly.yml", { ...fuzz, permissions: { contents: "read", issues: "write" } }), "a nightly's top writes issues");
+  assert.ok(!writes("fuzz-nightly.yml", fuzz), "the nightly's own alarm may not write issues");
+});
+
+check("the nightly alarm keeps one issue per workflow: it opens it, comments on it and closes it", async () => {
+  // A stand-in for GitHub's issues, as .github/scripts/nightly-alarm.mjs reaches them. `lost` makes
+  // the next creation fail after it made the issue, as an answer lost on the way would; `fail`, before
+  // it made anything.
+  const github = () => {
+    const issues = [];
+    const comments = [];
+    let next = 1;
+    const state = { lost: 0, fail: 0 };
+    const api = {
+      openIssues: async () => issues.filter((i) => i.state === "open").map((i) => ({ number: i.number, title: i.title, body: i.body, user: { login: i.user } })),
+      create: async ({ title, body, labels, assignees }) => {
+        if (state.fail > 0) {
+          state.fail--;
+          throw new Error("502: nothing made");
+        }
+        const i = { number: next++, title, body, labels, assignees, state: "open", user: ALARM_AUTHOR };
+        issues.push(i);
+        if (state.lost > 0) {
+          state.lost--;
+          throw new Error("502: the answer was lost");
+        }
+        return { number: i.number };
+      },
+      comment: async (n, body) => void comments.push({ n, body }),
+      close: async (n) => void (issues.find((i) => i.number === n).state = "closed"),
+    };
+    return { issues, comments, api, state };
+  };
+  const FUZZ = ".github/workflows/fuzz-nightly.yml";
+  const g = github();
+  const run = (v, body = "it failed", name = "Fuzz, nightly") => keepAlarm({ verdict: v, file: FUZZ, name, sha: "a".repeat(40), runUrl: "https://example.invalid/run", body, api: g.api });
+  assert.deepEqual(await run("success"), { action: "nothing", closed: [] }, "a green run with no issue open");
+  const first = await run("failure", "first");
+  assert.equal(first.action, "opened");
+  assert.deepEqual(g.issues.map((i) => [i.title, i.labels, i.assignees, i.state, i.body]), [["Nightly: Fuzz, nightly failing", [ALARM_LABEL], [ALARM_OWNER], "open", `${alarmMarker(FUZZ)}\nfirst`]]);
+  const second = await run("failure", "second");
+  assert.equal(second.action, "commented");
+  assert.equal(g.issues.length, 1, "a later failure opened a second issue");
+  assert.deepEqual(g.comments.at(-1), { n: first.issue, body: "second" });
+  // The workflow renamed: its file is the same, and so is its issue (the review of 4ae3c27).
+  const renamed = await run("failure", "renamed", "Fuzz, every night");
+  assert.deepEqual([renamed.action, renamed.issue, g.issues.length], ["commented", first.issue, 1], "a renamed workflow opened a second issue");
+  const green = await run("success");
+  assert.deepEqual(green, { action: "closed", closed: [first.issue] });
+  assert.equal(g.comments.at(-1).body, `Green again at ${"a".repeat(40)}: https://example.invalid/run`);
+  assert.equal(g.issues[0].state, "closed");
+  const again = await run("failure", "again");
+  assert.equal(again.action, "opened", "a failure after the issue closed opens a new one");
+  assert.equal(g.issues.filter((i) => i.state === "open").length, 1);
+  // A creation whose answer was lost made the issue all the same: read again, never made twice.
+  const lost = github();
+  lost.state.lost = 1;
+  const once = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "d".repeat(40), runUrl: "u", body: "x", api: lost.api });
+  assert.deepEqual([once.action, once.issue, lost.issues.length], ["opened", 1, 1], "a lost answer made a second issue");
+  // A creation that failed and made nothing is tried once more.
+  const flaky = github();
+  flaky.state.fail = 1;
+  const retried = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "d".repeat(40), runUrl: "u", body: "x", api: flaky.api });
+  assert.deepEqual([retried.action, retried.issue, flaky.issues.length], ["opened", 1, 1], "a creation that failed once left the night without an issue");
+  // Never two open: of two open issues of the workflow, the oldest is kept and the other closed.
+  const two = github();
+  for (const body of ["x", "y"]) await two.api.create({ title: "anything", body: `${alarmMarker(FUZZ)}\n${body}`, labels: [], assignees: [] });
+  const kept = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "b".repeat(40), runUrl: "u", body: "z", api: two.api });
+  assert.deepEqual([kept.issue, kept.closedDuplicates], [1, [2]]);
+  assert.deepEqual(two.issues.map((i) => i.state), ["open", "closed"]);
+  // Anyone's issue that holds the marker, an issue of the title without it, and the alarm of another
+  // workflow, are no alarm's of this one: left alone.
+  const others = github();
+  others.issues.push({ number: 7, title: "Nightly: Fuzz, nightly failing", body: alarmMarker(FUZZ), state: "open", user: "someone" });
+  others.issues.push({ number: 8, title: "Nightly: Fuzz, nightly failing", body: "no marker", state: "open", user: ALARM_AUTHOR });
+  others.issues.push({ number: 9, title: "Nightly: Mutants, full run failing", body: alarmMarker(".github/workflows/mutants-full.yml"), state: "open", user: ALARM_AUTHOR });
+  const own = await keepAlarm({ verdict: "failure", file: FUZZ, name: "Fuzz, nightly", sha: "c".repeat(40), runUrl: "u", body: "w", api: others.api });
+  assert.equal(own.action, "opened");
+  assert.deepEqual(others.comments, []);
+  await assert.rejects(() => keepAlarm({ verdict: "maybe", file: FUZZ, name: "x", sha: "s", runUrl: "u", body: "", api: g.api }), /no verdict the alarm knows/);
+  // A workflow's last run that ran: a run that ended in startup_failure, or that has no job, never
+  // started its jobs, its alarm among them, and is passed over; the jobs of a startup_failure are
+  // not even asked for (the review of d15fe30).
+  const jobsOf = new Map([[11, 0], [12, 3], [13, 1]]);
+  const asked = [];
+  const countJobs = async (run) => (asked.push(run.id), jobsOf.get(run.id) ?? 1);
+  const listed = [
+    { id: 10, created_at: "2026-11-21T11:00:00Z", conclusion: "startup_failure" },
+    { id: 11, created_at: "2026-11-21T10:00:00Z", conclusion: "failure" },
+    { id: 12, created_at: "2026-11-20T09:00:00Z", conclusion: "success" },
+    { id: 13, created_at: "2026-11-19T09:00:00Z", conclusion: "success" },
+  ];
+  assert.equal(await lastRealRun(listed, countJobs), "2026-11-20T09:00:00Z");
+  assert.deepEqual(asked, [11, 12], "the jobs of a startup_failure were asked for, or of runs past the one found");
+  assert.equal(await lastRealRun([], countJobs), null);
+  assert.equal(await lastRealRun([listed[0], listed[1]], countJobs), null, "runs that never started a job count as runs");
+  // A nightly that has not run within its period, or whose latest runs never started a job, opens
+  // its own issue, unless one is open; one that ran in time does not. Generated programs' latest run
+  // is an hour-old startup_failure, behind which it last ran 27 hours ago.
+  const now = Date.parse("2026-11-21T12:00:00Z");
+  const runs = new Map([
+    [".github/workflows/generated-nightly.yml", listed],
+    [".github/workflows/mutants-full.yml", [listed[0], listed[1]]],
+  ]);
+  const stale = github();
+  const latestRun = async (file) => lastRealRun(runs.get(file) ?? [{ id: 20, created_at: "2026-11-21T11:00:00Z", conclusion: "failure" }], countJobs);
+  const opened = await keepRunning({ now, api: { ...stale.api, latestRun } });
+  assert.deepEqual(stale.issues.map((i) => [i.title, i.body]), [
+    ["Nightly: generated-nightly.yml has not run", `${alarmMarker(".github/workflows/generated-nightly.yml")}\n.github/workflows/generated-nightly.yml has not run within 26 hours: its last scheduled run that started a job was at 2026-11-20T09:00:00Z.`],
+    ["Nightly: mutants-full.yml has not run", `${alarmMarker(".github/workflows/mutants-full.yml")}\n.github/workflows/mutants-full.yml has not run within 192 hours: none of its latest scheduled runs started a job.`],
+  ]);
+  assert.deepEqual(opened, [1, 2]);
+  assert.deepEqual(await keepRunning({ now, api: { ...stale.api, latestRun } }), [], "a nightly already alarmed opened a second issue");
+  assert.deepEqual(await keepRunning({ now, api: { ...github().api, latestRun: async () => "2026-11-21T00:00:00Z" } }), [], "nightlies that ran in time opened an issue");
+  // A run's verdict, from its jobs' results: green only when every job succeeded; no job, a job of
+  // no result, a cancellation, a skip and a failure are each a failure.
+  assert.equal(alarmVerdict({ fuzz: { result: "success" } }).verdict, "success");
+  for (const needs of [{ fuzz: { result: "failure" } }, { full: { result: "cancelled" } }, { paths: { result: "skipped" } }, { fuzz: { result: "success" }, full: { result: "failure" } }, {}, null, { fuzz: {} }]) {
+    assert.equal(alarmVerdict(needs).verdict, "failure", JSON.stringify(needs));
+  }
+  // The first comment names the jobs from the run's own results; a job's name cannot open code.
+  assert.equal(failureBody({ runUrl: "u", sha: "s", failing: [{ job: "fu`zz", result: "cancelled" }] }), "The scheduled run u failed, at s.\n\n- `fu'zz`: cancelled");
+  // The details name the failing jobs: completed, neither passed nor skipped; the alarm's own job,
+  // still running, is none of them (the review of 4ae3c27).
+  assert.deepEqual(failingJobs([{ name: "a", status: "completed", conclusion: "failure" }, { name: "b", status: "completed", conclusion: "success" }, { name: "c", status: "completed", conclusion: "skipped" }, { name: "Nightly alarm (Fuzz)", status: "in_progress", conclusion: null }, { name: "d", status: "completed", conclusion: "timed_out" }]).map((j) => j.name), ["a", "d"]);
+  // The error lines of a log, and a comment no line of a log can leave its fence in.
+  assert.deepEqual(errorLines("2026-11-21T00:00:00.0Z ##[error]boom\nok\n##[error]  second  \n"), ["boom", "second"]);
+  assert.equal(errorLines(Array.from({ length: 9 }, (_, k) => `##[error]e${k}`).join("\n")).length, 5);
+  const body = detailsBody({ runUrl: "u", jobs: [{ name: "fuzz", result: "failure", errors: ["````", "@someone ping"] }] });
+  const opening = /\n(`{5,})text\n/.exec(body);
+  assert.ok(opening && body.endsWith(opening[1]), `a log's own fence closed the comment's: ${body}`);
+});
+
+check("the nightly alarm knows each nightly workflow and its schedule", () => {
+  // NIGHTLIES holds every workflow that runs on a schedule, each with its period and the slack the
+  // alarm gives it: a cron of every day, 24 hours and 2; of one day of the week, 168 and 24.
+  const scheduled = workflows().filter((w) => "schedule" in triggers(w.doc));
+  const period = (cron) => {
+    const fields = String(cron).trim().split(/\s+/);
+    assert.equal(fields.length, 5, `a cron of another form: ${cron}`);
+    const [, , day, month, weekday] = fields;
+    if (day === "*" && month === "*" && weekday === "*") return 24 + 2;
+    if (day === "*" && month === "*" && /^[0-6]$/.test(weekday)) return 7 * 24 + 24;
+    throw new Error(`a schedule the alarm has no period for: ${cron}`);
+  };
+  const expected = new Map(
+    scheduled.map((w) => {
+      const crons = triggers(w.doc).schedule.map((s) => s.cron);
+      assert.equal(crons.length, 1, `${w.file} runs on ${crons.length} schedules`);
+      return [`${WORKFLOWS}/${w.file}`, period(crons[0])];
+    }),
+  );
+  assert.deepEqual(new Map([...NIGHTLIES].sort()), new Map([...expected].sort()), "NIGHTLIES in lib/nightly-alarm.mjs is not the workflows that run on a schedule, with their periods");
+});
+
+check("the site is published only by hand, from main's own definition, of a tag on main", () => {
+  const doc = workflows().find((w) => w.file === "pages-publish.yml").doc;
+  assert.deepEqual(publishProblems(doc), []);
+  // The tag is proven on main before anything of it is checked out, and only then.
+  const build = steps(doc.jobs.build);
+  assert.equal(build[1]?.run, "bash .github/scripts/publish-tag.sh", "the build's step after the checkout is not the tag's proof");
+  assert.match(read(".github/scripts/publish-tag.sh"), /\n"\$BASH" \.github\/scripts\/commit-on-main\.sh "refs\/tags\/\$tag"\ngit -c advice\.detachedHead=false checkout --quiet --detach "refs\/tags\/\$tag"\n/, "publish-tag.sh checks out the tag other than right after proving it on main");
+  // Planted: a push of tags, beside the run by hand or alone; any push; a schedule; no input, an
+  // optional one, or one more; and a job that runs from another ref, or from any.
+  const clone = () => JSON.parse(JSON.stringify(doc));
+  const planted = (change) => {
+    const d = clone();
+    change(d);
+    return publishProblems(d).length > 0;
+  };
+  for (const [what, change] of [
+    ["a push of tags beside the run by hand", (d) => (d.on.push = { tags: ["m*"] })],
+    ["a push of tags alone", (d) => (d.on = { push: { tags: ["m*"] } })],
+    ["a push to main", (d) => (d.on.push = { branches: ["main"] })],
+    ["a schedule", (d) => (d.on.schedule = [{ cron: "0 0 * * 1" }])],
+    ["no input", (d) => delete d.on.workflow_dispatch.inputs],
+    ["an optional tag", (d) => (d.on.workflow_dispatch.inputs.tag.required = false)],
+    ["an input more", (d) => (d.on.workflow_dispatch.inputs.ref = { required: false, type: "string" })],
+    ["a build from any ref", (d) => delete d.jobs.build.if],
+    ["a deployment from a tag", (d) => (d.jobs.deploy.if = "github.ref_type == 'tag'")],
+    ["a job more, from any ref", (d) => (d.jobs.extra = { "runs-on": "ubuntu-24.04", steps: [] })],
+  ]) {
+    assert.ok(planted(change), `${what} passes`);
+  }
+  // The tag's step carries its one variable, exactly, before the toolchain: planted, a variable
+  // more, another value, and none.
+  assert.deepEqual(beforeToolchainProblems("pages-publish.yml", "build", doc, doc.jobs.build), []);
+  for (const [what, env] of [
+    ["a variable more", { TAG: "${{ inputs.tag }}", BASH_ENV: "./x.sh" }],
+    ["another value", { TAG: "${{ github.event.inputs.tag }}" }],
+    ["none", undefined],
+  ]) {
+    const d = clone();
+    if (env === undefined) delete d.jobs.build.steps[1].env;
+    else d.jobs.build.steps[1].env = env;
+    assert.ok(beforeToolchainProblems("pages-publish.yml", "build", d, d.jobs.build).length > 0, `the tag's step with ${what} passes`);
+  }
+});
 
 check("a workflow that holds a required job runs only on pull requests, the queue and main", () => {
   for (const file of new Set(requiredJobs().map((j) => j.file))) {
@@ -3987,6 +4813,7 @@ const TIMEOUTS = new Map([
   ["mir-mutants.yml#gate", 30],
   ["perf.yml#kernels", 60],
   ["harness.yml#fixtures", 30],
+  ["pages.yml#build", 15],
 ]);
 
 /// The time an ignored test may take where a required job runs it by name, in release: those runs
@@ -4583,9 +5410,10 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const build = (status) => ({ phase: "Build", duration: 2.8, process_status: status });
   const test = (status) => ({ phase: "Test", duration: 0.15, process_status: status });
   const FAILED = "\x1b[1;31m        FAIL\x1b[0m [   0.004s] mente-syntax tests::x\n";
-  // nextest's own line, in each mutant's log, that it hands the test executables to the sandbox
-  // (the form of the logs of pull requests 139 and 140, coloured as nextest writes it).
-  const SANDBOXED = "\x1b[1minfo\x1b[0m: using target runner `\x1b[1m/usr/bin/bash /opt/mente-test-sandbox/test-sandbox.sh run\x1b[0m` defined by environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`\n";
+  // nextest's own line, in each mutant's log, that it hands the test executables to the sandbox's
+  // program (the form of the logs of pull requests 139 and 140, coloured as nextest writes it, with
+  // the runner of pull request 179).
+  const SANDBOXED = "\x1b[1minfo\x1b[0m: using target runner `\x1b[1m/opt/mente-test-sandbox/test-sandbox run\x1b[0m` defined by environment variable `CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER`\n";
   const real = [
     outcome("caught", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${SANDBOXED}${FAILED}*** result: Failure(100)\n`),
     outcome("timeout", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}        TIMEOUT [  40.104s] mente-cli::bin/mn x\n`),
@@ -4604,6 +5432,10 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
     outcome("caught, no test failed", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${SANDBOXED}error: no tests to run\n`),
     outcome("caught, by tests that ran outside the sandbox", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `*** cargo nextest run\n${FAILED}*** result: Failure(100)\n`),
     outcome("caught, by tests another runner took", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`env\` defined by \`--config\`\n${FAILED}`),
+    // A runner named like the sandbox's, by another path, and the shell's wrapper the program
+    // replaced: neither is the program setup installed.
+    outcome("caught, by a runner of the program's name elsewhere", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`/tmp/opt/mente-test-sandbox/test-sandbox run\` defined by x\n${FAILED}`),
+    outcome("caught, by the shell's old wrapper", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `info: using target runner \`/usr/bin/bash /opt/mente-test-sandbox/test-sandbox.sh run\` defined by x\n${FAILED}`),
     outcome("caught, the runner's line printed by a test", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `    Starting 3 tests across 1 binary\n${SANDBOXED}${FAILED}`),
     outcome("caught, the runner's line after the failure", "CaughtMutant", [build("Success"), test({ Failure: 100 })], `${FAILED}${SANDBOXED}`),
     outcome("unviable, built", "Unviable", [build("Success")], diagnostic("E0277", [span(12, 9, 27)]), DIFF),

@@ -1,0 +1,6 @@
+module o
+fn bump(mut x:u8)->8
+ensures x==9 e u=0{f}
+pub fn f()->u8[9..9]{var x:u8=0
+val y=x*1+bump(mut x)
+y}

@@ -92,8 +92,11 @@ impl fmt::Display for IntTy {
 pub enum Ty {
     Int(IntTy),
     Bool,
-    /// The address of memory: a stack slot, an element of one, or what a caller passed.
-    Addr,
+    /// The address of memory of a shape ([`Mem`]): a stack slot, an element or a field of one,
+    /// or what a caller passed. Two addresses have one type only where they point at memory of
+    /// one shape, so a join, a call and a copy agree on it, and the verifier holds every slot,
+    /// element, load and store to it ([`verify`]).
+    Addr(MemId),
     /// What an instruction without a result has.
     Unit,
     /// The latest effect where a block begins: the type of its last parameter, and of no other,
@@ -102,14 +105,117 @@ pub enum Ty {
     Effect,
 }
 
+impl Ty {
+    /// The shape of the memory an address points at; none for a value that is no address.
+    pub fn mem(self) -> Option<MemId> {
+        match self {
+            Ty::Addr(m) => Some(m),
+            Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Effect => None,
+        }
+    }
+}
+
 impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Ty::Int(t) => write!(f, "{}", t),
             Ty::Bool => write!(f, "bool"),
-            Ty::Addr => write!(f, "addr"),
+            Ty::Addr(_) => write!(f, "addr"),
             Ty::Unit => write!(f, "unit"),
             Ty::Effect => write!(f, "effect"),
+        }
+    }
+}
+
+/// What memory holds at an address, so its every access: an integer, a boolean, an array of
+/// elements of one shape, or a record of fields at their offsets. A value is built in memory of
+/// one shape and read in that shape, never in another: an array of `i64` is not read as one of
+/// `u8`, whose elements lie at another stride.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Mem {
+    Int(IntTy),
+    /// A boolean, in a byte.
+    Bool,
+    /// No bytes: the element of an array of no elements.
+    Empty,
+    /// `len` elements of one shape, each its size past the one before.
+    Array {
+        len: u32,
+        elem: MemId,
+    },
+    /// Fields at their offsets within `size` bytes: a struct's, or an enum's tag at offset 0
+    /// and the fields of every variant's payload, where those of two variants may overlap.
+    Record {
+        size: u32,
+        fields: Vec<(u32, MemId)>,
+    },
+}
+
+/// A shape of memory, by its place in its module's table ([`Mems`]).
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct MemId(pub u32);
+
+/// The shapes of memory a module's addresses point at, each held once: two addresses point at
+/// memory of one shape exactly where their [`MemId`]s are equal. A shape is added after the
+/// shapes it holds, so the table has no cycle.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Mems {
+    all: Vec<Mem>,
+    ids: std::collections::HashMap<Mem, MemId>,
+}
+
+impl Mems {
+    /// The id of `m`, added to the table if it is not there yet.
+    pub fn of(&mut self, m: Mem) -> MemId {
+        if let Some(id) = self.ids.get(&m) {
+            return *id;
+        }
+        let id = MemId(self.all.len() as u32);
+        self.all.push(m.clone());
+        self.ids.insert(m, id);
+        id
+    }
+
+    pub fn get(&self, id: MemId) -> Option<&Mem> {
+        self.all.get(id.0 as usize)
+    }
+
+    /// The bytes memory of the shape `id` takes.
+    pub fn size(&self, id: MemId) -> Option<u32> {
+        Some(match self.get(id)? {
+            Mem::Int(t) => t.bytes(),
+            Mem::Bool => 1,
+            Mem::Empty => 0,
+            Mem::Array { len, elem } => len.checked_mul(self.size(*elem)?)?,
+            Mem::Record { size, .. } => *size,
+        })
+    }
+
+    /// The type a load of memory of the shape `id` gives, and a store into it takes: an
+    /// integer's or a boolean's, none for an aggregate.
+    pub fn scalar(&self, id: MemId) -> Option<Ty> {
+        match self.get(id)? {
+            Mem::Int(t) => Some(Ty::Int(*t)),
+            Mem::Bool => Some(Ty::Bool),
+            Mem::Empty | Mem::Array { .. } | Mem::Record { .. } => None,
+        }
+    }
+
+    /// The shape `id`, as a diagnostic names it: `[4]u8`, `{0: u8, 8: [2]i64}`.
+    pub fn name(&self, id: MemId) -> String {
+        match self.get(id) {
+            None => format!("m{}", id.0),
+            Some(Mem::Int(t)) => t.to_string(),
+            Some(Mem::Bool) => "bool".into(),
+            Some(Mem::Empty) => "()".into(),
+            Some(Mem::Array { len, elem }) => format!("[{}]{}", len, self.name(*elem)),
+            Some(Mem::Record { fields, .. }) => {
+                let fields: Vec<String> = fields
+                    .iter()
+                    .map(|(at, m)| format!("{}: {}", at, self.name(*m)))
+                    .collect();
+                format!("{{{}}}", fields.join(", "))
+            }
         }
     }
 }
@@ -251,7 +357,7 @@ pub enum CmpOp {
 fn int_ty(t: Ty) -> Option<IntTy> {
     match t {
         Ty::Int(i) => Some(i),
-        Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => None,
+        Ty::Bool | Ty::Addr(_) | Ty::Unit | Ty::Effect => None,
     }
 }
 
@@ -723,7 +829,7 @@ impl Function {
             Op::Param => "param".into(),
             Op::Int(bits) => match self.ty(v) {
                 Ty::Int(t) => format!("int {}", Num::from_bits(*bits, t)),
-                Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => format!("int {}", bits),
+                Ty::Bool | Ty::Addr(_) | Ty::Unit | Ty::Effect => format!("int {}", bits),
             },
             Op::Bool(b) => format!("bool {}", b),
             Op::Arith { op, trap } => {
@@ -773,6 +879,8 @@ pub struct Module {
     /// The run's stack budget in bytes, which the lowering takes from the one the checker
     /// defines (`core-calculus.md`, item 25): every [`Op::Enter`] counts against it.
     pub budget: u128,
+    /// The shapes of memory its addresses point at ([`Ty::Addr`]).
+    pub mems: Mems,
 }
 
 impl Module {
@@ -1002,8 +1110,36 @@ impl Builder {
 
 /// The ways a function can be malformed, each found by [`verify`].
 pub fn verify(m: &Module) -> Result<(), String> {
+    verify_mems(&m.mems)?;
     for f in &m.functions {
         verify_function(m, f).map_err(|e| format!("fn {}: {}", f.name, e))?;
+    }
+    Ok(())
+}
+
+/// Every shape of memory holds only shapes added before it, so the table has no cycle; an
+/// array's bytes fit 32 bits; and a record's fields lie within its bytes.
+fn verify_mems(mems: &Mems) -> Result<(), String> {
+    for (i, m) in mems.all.iter().enumerate() {
+        let id = MemId(i as u32);
+        let before = |c: &MemId| c.0 < id.0;
+        let fits = match m {
+            Mem::Int(_) | Mem::Bool | Mem::Empty => true,
+            Mem::Array { elem, .. } => before(elem) && mems.size(id).is_some(),
+            Mem::Record { size, fields } => fields.iter().all(|(at, f)| {
+                before(f)
+                    && mems
+                        .size(*f)
+                        .and_then(|s| at.checked_add(s))
+                        .is_some_and(|end| end <= *size)
+            }),
+        };
+        if !fits {
+            return Err(format!(
+                "memory m{} holds a shape not added before it, or more bytes than it has",
+                id.0
+            ));
+        }
     }
     Ok(())
 }
@@ -1015,12 +1151,40 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
     if entry_tys != f.params {
         return Err("the entry block's parameters are not the function's".into());
     }
+    // Every address points at memory of a shape the module holds.
+    if let Some(v) = (0..n).find(|&v| match f.tys[v] {
+        Ty::Addr(id) => m.mems.get(id).is_none(),
+        Ty::Int(_) | Ty::Bool | Ty::Unit | Ty::Effect => false,
+    }) {
+        return Err(format!(
+            "v{} is the address of memory of a shape the module does not hold",
+            v
+        ));
+    }
     let defined = |v: NodeId| (v.0 as usize) < n;
     let jump = |(b, args): &(BlockId, Vec<NodeId>)| -> Result<(), String> {
         let target = f
             .blocks
             .get(b.0 as usize)
             .ok_or(format!("a jump to block {} that does not exist", b.0))?;
+        // Where branches meet, an array built in one shape is never taken in another.
+        for (a, p) in args
+            .iter()
+            .zip(&target.params)
+            .filter(|(a, _)| defined(**a))
+        {
+            match (f.ty(*a).mem(), f.ty(*p).mem()) {
+                (Some(given), Some(taken)) if given != taken => {
+                    return Err(format!(
+                        "a jump to block {} passes memory of {} where it takes memory of {}",
+                        b.0,
+                        m.mems.name(given),
+                        m.mems.name(taken)
+                    ));
+                }
+                (Some(_) | None, Some(_) | None) => {}
+            }
+        }
         let admitted = args.len() == target.params.len()
             && args
                 .iter()
@@ -1046,6 +1210,7 @@ fn verify_function(m: &Module, f: &Function) -> Result<(), String> {
                 return Err(format!("{}: an operand that does not exist", at()));
             }
             check_inst(m, f, v).map_err(|e| format!("{}: {}", at(), e))?;
+            check_memory(&m.mems, f, v).map_err(|e| format!("{}: {}", at(), e))?;
         }
         match &b.term {
             Term::Jump(t, args) => jump(&(*t, args.clone()))?,
@@ -1450,6 +1615,8 @@ enum Want {
     Is(Ty),
     Int,
     IntOrBool,
+    /// An address, of memory of any shape, which [`check_memory`] holds to its access.
+    Addr,
     /// A value of any type but unit: an argument as evaluated.
     Value,
     /// Any value: what a parameter of type [`Ty::Effect`] admits.
@@ -1462,6 +1629,7 @@ impl Want {
             Want::Is(x) => x == t,
             Want::Int => matches!(t, Ty::Int(_)),
             Want::IntOrBool => matches!(t, Ty::Int(_) | Ty::Bool),
+            Want::Addr => t.mem().is_some(),
             Want::Value => t != Ty::Unit,
             Want::Any => true,
         }
@@ -1471,7 +1639,7 @@ impl Want {
     fn param(t: Ty) -> Want {
         match t {
             Ty::Effect => Want::Any,
-            Ty::Int(_) | Ty::Bool | Ty::Addr | Ty::Unit => Want::Is(t),
+            Ty::Int(_) | Ty::Bool | Ty::Addr(_) | Ty::Unit => Want::Is(t),
         }
     }
 }
@@ -1532,23 +1700,11 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             }
             (same, vec![Want::Int], None)
         }
-        Op::Slot { .. } => (Want::Is(Ty::Addr), vec![], None),
-        Op::Elem { .. } => (
-            Want::Is(Ty::Addr),
-            vec![Want::Is(Ty::Addr), Want::Int],
-            None,
-        ),
-        Op::Load => (Want::IntOrBool, vec![Want::Is(Ty::Addr)], None),
-        Op::Store => (
-            Want::Is(Ty::Unit),
-            vec![Want::Is(Ty::Addr), Want::IntOrBool],
-            None,
-        ),
-        Op::Copy { .. } => (
-            Want::Is(Ty::Unit),
-            vec![Want::Is(Ty::Addr), Want::Is(Ty::Addr)],
-            None,
-        ),
+        Op::Slot { .. } => (Want::Addr, vec![], None),
+        Op::Elem { .. } => (Want::Addr, vec![Want::Addr, Want::Int], None),
+        Op::Load => (Want::IntOrBool, vec![Want::Addr], None),
+        Op::Store => (Want::Is(Ty::Unit), vec![Want::Addr, Want::IntOrBool], None),
+        Op::Copy { .. } => (Want::Is(Ty::Unit), vec![Want::Addr, Want::Addr], None),
         Op::Call(c) => {
             let callee = m
                 .functions
@@ -1587,6 +1743,102 @@ fn check_inst(m: &Module, f: &Function, v: NodeId) -> Result<(), String> {
             f.op(v)
         )),
     }
+}
+
+/// Checks an access against the shape of the memory it reaches ([`Mem`]): a slot takes the
+/// bytes of its shape; an element of an array is one of its elements, at their stride, and an
+/// element of a record is a field, at its offset; a load gives, and a store takes, the type of
+/// the integer or boolean there; and a copy moves all the bytes of memory of one shape between
+/// two addresses of it. Where branches meet and where a call passes an address, the address's
+/// type ([`Ty::Addr`]) holds the shape, so they agree on it too. So an array built in one shape
+/// is never read in another, as one of `i64` read at the stride of `u8` would be.
+fn check_memory(mems: &Mems, f: &Function, v: NodeId) -> Result<(), String> {
+    let addr = |x: NodeId| {
+        f.ty(x)
+            .mem()
+            .ok_or_else(|| format!("v{} is no address", x.0))
+    };
+    let arg = |k: usize| {
+        f.own_args(v)
+            .get(k)
+            .copied()
+            .ok_or_else(|| format!("no operand {}", k))
+    };
+    let name = |id: MemId| mems.name(id);
+    match f.op(v) {
+        Op::Slot { bytes } => {
+            let at = addr(v)?;
+            if mems.size(at) != Some(*bytes) {
+                return Err(format!(
+                    "a slot of {} bytes for memory of {}",
+                    bytes,
+                    name(at)
+                ));
+            }
+        }
+        Op::Elem { stride } => {
+            let (base, at) = (addr(arg(0)?)?, addr(v)?);
+            let fits = match mems.get(base) {
+                Some(Mem::Array { elem, .. }) => *elem == at && mems.size(at) == Some(*stride),
+                // A field, at the offset a constant index gives.
+                Some(Mem::Record { fields, .. }) => match f.fact(arg(1)?) {
+                    Some(Fact::Within(k, last)) if *stride == 1 && k == last && !k.neg => {
+                        u32::try_from(k.mag).is_ok_and(|k| fields.contains(&(k, at)))
+                    }
+                    Some(Fact::Within(..) | Fact::NonZero) | None => false,
+                },
+                Some(Mem::Int(_) | Mem::Bool | Mem::Empty) | None => false,
+            };
+            if !fits {
+                return Err(format!(
+                    "an element of memory of {} taken as {} at a stride of {}",
+                    name(base),
+                    name(at),
+                    stride
+                ));
+            }
+        }
+        Op::Load => {
+            let at = addr(arg(0)?)?;
+            if mems.scalar(at) != Some(f.ty(v)) {
+                return Err(format!("a load of {} from memory of {}", f.ty(v), name(at)));
+            }
+        }
+        Op::Store => {
+            let (at, x) = (addr(arg(0)?)?, f.ty(arg(1)?));
+            if mems.scalar(at) != Some(x) {
+                return Err(format!("a store of {} into memory of {}", x, name(at)));
+            }
+        }
+        Op::Copy { bytes } => {
+            let (to, from) = (addr(arg(0)?)?, addr(arg(1)?)?);
+            if to != from || mems.size(to) != Some(*bytes) {
+                return Err(format!(
+                    "a copy of {} bytes from memory of {} into memory of {}",
+                    bytes,
+                    name(from),
+                    name(to)
+                ));
+            }
+        }
+        Op::Param
+        | Op::Int(_)
+        | Op::Bool(_)
+        | Op::Arith { .. }
+        | Op::Neg { .. }
+        | Op::Bits(_)
+        | Op::Not
+        | Op::Shl { .. }
+        | Op::Shr
+        | Op::Cmp(_)
+        | Op::Cast
+        | Op::Check { .. }
+        | Op::Guard { .. }
+        | Op::Assume(_)
+        | Op::Call(_)
+        | Op::Enter { .. } => {}
+    }
+    Ok(())
 }
 
 // -------------------------------------------------------------------------------------------
@@ -1697,7 +1949,7 @@ impl Memory {
                 Ok(Val::Int(Num::from_bits(u128::from_le_bytes(bits), t)))
             }
             Ty::Bool => Ok(Val::Bool(self.bytes[self.range(at, 1)?.start] != 0)),
-            Ty::Addr | Ty::Unit | Ty::Effect => Err(Stop::Broken(format!("a load of {}", ty))),
+            Ty::Addr(_) | Ty::Unit | Ty::Effect => Err(Stop::Broken(format!("a load of {}", ty))),
         }
     }
 
@@ -1951,7 +2203,7 @@ impl<'m> Machine<'m> {
             Op::Param => return Err(broken("a parameter in a block's instructions")),
             Op::Int(bits) => match ty {
                 Ty::Int(t) => Val::Int(Num::from_bits(*bits, t)),
-                Ty::Bool | Ty::Addr | Ty::Unit | Ty::Effect => {
+                Ty::Bool | Ty::Addr(_) | Ty::Unit | Ty::Effect => {
                     return Err(broken("an integer of a type that is not one"))
                 }
             },
@@ -2265,10 +2517,29 @@ mod tests {
     /// The budget of the modules these tests build.
     const BUDGET: u128 = 1 << 20;
 
+    /// The shapes of memory these tests' addresses point at, each with its address's type below.
+    fn mems() -> Mems {
+        let mut m = Mems::default();
+        let byte = m.of(Mem::Int(U8));
+        m.of(Mem::Array { len: 3, elem: byte });
+        m.of(Mem::Bool);
+        m.of(Mem::Array { len: 4, elem: byte });
+        m.of(Mem::Int(IntTy::new(16, false)));
+        m.of(Mem::Int(I64));
+        m
+    }
+    const BYTE: Ty = Ty::Addr(MemId(0));
+    const BYTES3: Ty = Ty::Addr(MemId(1));
+    const FLAG: Ty = Ty::Addr(MemId(2));
+    const BYTES4: Ty = Ty::Addr(MemId(3));
+    const WORD: Ty = Ty::Addr(MemId(4));
+    const LONG: Ty = Ty::Addr(MemId(5));
+
     fn module(functions: Vec<Function>) -> Module {
         let m = Module {
             functions,
             budget: BUDGET,
+            mems: mems(),
         };
         verify(&m).unwrap();
         m
@@ -2442,6 +2713,7 @@ mod tests {
         let unverified = Module {
             functions: vec![b.finish()],
             budget: BUDGET,
+            mems: mems(),
         };
         assert!(verify(&unverified).is_err());
         assert!(matches!(
@@ -2510,6 +2782,7 @@ mod tests {
             Module {
                 functions: vec![b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             }
         };
         let m = product(true);
@@ -2725,10 +2998,10 @@ mod tests {
     #[test]
     fn test_memory_holds_arrays_and_mut_parameters() {
         // `fn bump(a: addr)`: a[1] += 1 through the address a caller passed, as `mut a: [3]u8`.
-        let mut b = Builder::new("bump", &[Ty::Addr], None);
+        let mut b = Builder::new("bump", &[BYTES3], None);
         let a = b.params(BlockId(0))[0];
         let one = b.int(U64, Num::from_i128(1));
-        let at = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[a, one]);
+        let at = b.inst(Op::Elem { stride: 1 }, BYTE, &[a, one]);
         let x = b.inst(Op::Load, Ty::Int(U8), &[at]);
         let k = b.int(U8, Num::from_i128(1));
         let y = b.inst(add(None), Ty::Int(U8), &[x, k]);
@@ -2736,21 +3009,21 @@ mod tests {
         b.ret(None);
         // `fn main() -> u8`: a slot of u16s, filled, bumped, copied, read back.
         let mut m = Builder::new("main", &[], Some(Ty::Int(U8)));
-        let slot = m.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
+        let slot = m.inst(Op::Slot { bytes: 3 }, BYTES3, &[]);
         for i in 0..3 {
             let idx = m.int(U64, Num::from_i128(i));
-            let at = m.inst(Op::Elem { stride: 1 }, Ty::Addr, &[slot, idx]);
+            let at = m.inst(Op::Elem { stride: 1 }, BYTE, &[slot, idx]);
             let v = m.int(U8, Num::from_i128(10 * i + 1));
             m.inst(Op::Store, Ty::Unit, &[at, v]);
         }
         call(&mut m, 0, Ty::Unit, &[slot]);
-        let copy = m.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
+        let copy = m.inst(Op::Slot { bytes: 3 }, BYTES3, &[]);
         m.inst(Op::Copy { bytes: 3 }, Ty::Unit, &[copy, slot]);
         let two = m.int(U64, Num::from_i128(2));
-        let last = m.inst(Op::Elem { stride: 1 }, Ty::Addr, &[copy, two]);
+        let last = m.inst(Op::Elem { stride: 1 }, BYTE, &[copy, two]);
         let r2 = m.inst(Op::Load, Ty::Int(U8), &[last]);
         let one = m.int(U64, Num::from_i128(1));
-        let at = m.inst(Op::Elem { stride: 1 }, Ty::Addr, &[copy, one]);
+        let at = m.inst(Op::Elem { stride: 1 }, BYTE, &[copy, one]);
         let r1 = m.inst(Op::Load, Ty::Int(U8), &[at]);
         let r = m.inst(add(None), Ty::Int(U8), &[r1, r2]);
         m.ret(Some(r));
@@ -2777,6 +3050,192 @@ mod tests {
         assert_eq!(memory.load(w, Ty::Bool), Ok(Val::Bool(true)));
         assert!(memory.load(w + 30, Ty::Int(U64)).is_err());
         assert_eq!(w % 16, 0);
+    }
+
+    /// Every access agrees with the shape of the memory it reaches, or the MIR is broken: an
+    /// array built as one of `i64` and copied, joined or read as one of `u8` (the nightly triage's
+    /// root causes 2 and 11, and the `if` and indexing forms its review found) stops compilation
+    /// on every path instead of reading past a slot or reading the wrong bytes.
+    #[test]
+    fn test_every_access_agrees_with_the_shape_of_its_memory() {
+        let mut mems = Mems::default();
+        let (u8m, i64m, u64m) = (
+            mems.of(Mem::Int(U8)),
+            mems.of(Mem::Int(I64)),
+            mems.of(Mem::Int(U64)),
+        );
+        let bytes4 = mems.of(Mem::Array { len: 4, elem: u8m });
+        let longs4 = mems.of(Mem::Array { len: 4, elem: i64m });
+        let longs2 = mems.of(Mem::Array { len: 2, elem: i64m });
+        let bytes2 = mems.of(Mem::Array { len: 2, elem: u8m });
+        let words2 = mems.of(Mem::Array { len: 2, elem: u64m });
+        // `{0: u8, 8: [2]i64}`: a tag, and a field at offset 8.
+        let record = mems.of(Mem::Record {
+            size: 24,
+            fields: vec![(0, u8m), (8, longs2)],
+        });
+        assert_eq!(mems.name(record), "{0: u8, 8: [2]i64}");
+        let verified = |functions: Vec<Function>| {
+            verify(&Module {
+                functions,
+                budget: BUDGET,
+                mems: mems.clone(),
+            })
+        };
+        let refused = |functions: Vec<Function>, why: &str| match verified(functions) {
+            Err(e) => assert!(e.contains(why), "{} does not say {}", e, why),
+            Ok(()) => panic!("verified, where {} breaks it", why),
+        };
+        let a = Ty::Addr;
+        let slot = |b: &mut Builder, m: MemId| {
+            let bytes = mems.size(m).unwrap_or(0);
+            b.inst(Op::Slot { bytes }, a(m), &[])
+        };
+        // `copy 4` of a [4]i64 into a [4]u8, as root cause 11's `if` did.
+        let copy = |from: MemId, bytes: u32| {
+            let mut b = Builder::new("copy", &[], None);
+            let to = slot(&mut b, bytes4);
+            let src = slot(&mut b, from);
+            b.inst(Op::Copy { bytes }, Ty::Unit, &[to, src]);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![copy(bytes4, 4)]), Ok(()));
+        refused(
+            vec![copy(longs4, 4)],
+            "a copy of 4 bytes from memory of [4]i64 into memory of [4]u8",
+        );
+        refused(vec![copy(bytes4, 3)], "a copy of 3 bytes");
+        // A slot takes the bytes of its shape.
+        let mut b = Builder::new("slot", &[], None);
+        b.inst(Op::Slot { bytes: 5 }, a(bytes4), &[]);
+        b.ret(None);
+        refused(vec![b.finish()], "a slot of 5 bytes for memory of [4]u8");
+        // Branches that meet with arrays of [2]i64 and [2]u8, as the review's `f1` did.
+        let join = |other: MemId| {
+            let mut b = Builder::new("join", &[Ty::Bool], None);
+            let c = b.params(BlockId(0))[0];
+            let (yes, no) = (b.block(&[]), b.block(&[]));
+            let met = b.block(&[a(longs2)]);
+            b.branch(c, (yes, vec![]), (no, vec![]));
+            for (block, m) in [(yes, longs2), (no, other)] {
+                b.switch(block);
+                let s = slot(&mut b, m);
+                b.jump(met, vec![s]);
+            }
+            b.switch(met);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![join(longs2)]), Ok(()));
+        refused(
+            vec![join(bytes2)],
+            "passes memory of [2]u8 where it takes memory of [2]i64",
+        );
+        // An element and its load: a [2]u64 read as `i64`, as the review's indexing did, and
+        // elements taken at another stride or as another shape.
+        let read = |arr: MemId, stride: u32, elem: MemId, ty: Ty| {
+            let mut b = Builder::new("read", &[a(arr), Ty::Int(U64)], Some(ty));
+            let [base, i] = b.params(BlockId(0))[..] else {
+                panic!("two parameters")
+            };
+            let i = b.assume(i, Fact::Within(Num::ZERO, Num::from_i128(1)));
+            let at = b.inst(Op::Elem { stride }, a(elem), &[base, i]);
+            let x = b.inst(Op::Load, ty, &[at]);
+            b.ret(Some(x));
+            b.finish()
+        };
+        assert_eq!(verified(vec![read(words2, 8, u64m, Ty::Int(U64))]), Ok(()));
+        refused(
+            vec![read(words2, 8, u64m, Ty::Int(I64))],
+            "a load of i64 from memory of u64",
+        );
+        refused(
+            vec![read(longs2, 1, i64m, Ty::Int(I64))],
+            "an element of memory of [2]i64 taken as i64 at a stride of 1",
+        );
+        refused(
+            vec![read(longs2, 8, u64m, Ty::Int(U64))],
+            "an element of memory of [2]i64 taken as u64",
+        );
+        // A field of a record: one at its offset, of its shape, and none elsewhere.
+        let field = |offset: u128, elem: MemId| {
+            let mut b = Builder::new("field", &[a(record)], None);
+            let base = b.params(BlockId(0))[0];
+            let k = b.int(U64, Num::new(false, offset));
+            b.inst(Op::Elem { stride: 1 }, a(elem), &[base, k]);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![field(8, longs2)]), Ok(()));
+        refused(
+            vec![field(4, longs2)],
+            "an element of memory of {0: u8, 8: [2]i64}",
+        );
+        refused(vec![field(8, bytes2)], "taken as [2]u8");
+        // A field is taken at a stride of 1 alone, though its offset is the constant index.
+        let mut b = Builder::new("stride", &[a(record)], None);
+        let base = b.params(BlockId(0))[0];
+        let eight = b.int(U64, Num::from_i128(8));
+        b.inst(Op::Elem { stride: 8 }, a(longs2), &[base, eight]);
+        b.ret(None);
+        refused(
+            vec![b.finish()],
+            "an element of memory of {0: u8, 8: [2]i64} taken as [2]i64 at a stride of 8",
+        );
+        // An address of a shape the module does not hold.
+        let mut b = Builder::new("unknown", &[a(MemId(99))], None);
+        b.ret(None);
+        refused(vec![b.finish()], "a shape the module does not hold");
+        // A store takes the type its memory holds.
+        let mut b = Builder::new("store", &[a(u8m)], None);
+        let at = b.params(BlockId(0))[0];
+        let x = b.int(I64, Num::from_i128(1));
+        b.inst(Op::Store, Ty::Unit, &[at, x]);
+        b.ret(None);
+        refused(vec![b.finish()], "a store of i64 into memory of u8");
+        // A call passes an address of the shape its callee takes.
+        let callee = || {
+            let mut c = Builder::new("callee", &[a(bytes4)], None);
+            c.ret(None);
+            c.finish()
+        };
+        let caller = |m: MemId| {
+            let mut b = Builder::new("caller", &[], None);
+            let s = slot(&mut b, m);
+            call(&mut b, 0, Ty::Unit, &[s]);
+            b.ret(None);
+            b.finish()
+        };
+        assert_eq!(verified(vec![callee(), caller(bytes4)]), Ok(()));
+        assert!(verified(vec![callee(), caller(longs4)]).is_err());
+        // The table itself: a field past its record's bytes, or a shape held before it is added.
+        let mut past = Mems::default();
+        let long = past.of(Mem::Int(I64));
+        past.of(Mem::Record {
+            size: 4,
+            fields: vec![(0, long)],
+        });
+        let mut ahead = Mems::default();
+        ahead.of(Mem::Array {
+            len: 1,
+            elem: MemId(1),
+        });
+        ahead.of(Mem::Int(U8));
+        // A shape that holds itself, whose size has no end.
+        let mut itself = Mems::default();
+        itself.of(Mem::Array {
+            len: 1,
+            elem: MemId(0),
+        });
+        for mems in [past, ahead, itself] {
+            assert!(verify(&Module {
+                functions: vec![],
+                budget: BUDGET,
+                mems,
+            })
+            .is_err());
+        }
     }
 
     /// The order of values is checked in time and memory that grow with the function, not with
@@ -2807,6 +3266,7 @@ mod tests {
         assert!(verify(&Module {
             functions: vec![b.finish()],
             budget: BUDGET,
+            mems: mems(),
         })
         .is_ok());
         assert!(started.elapsed().as_secs() < 10, "{:?}", started.elapsed());
@@ -2821,6 +3281,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         // `x + 1`, the constant after the addition that takes it.
@@ -2944,6 +3405,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         let (f, [_, _, check1, pos, check2, q, one, s, neg]) = chained();
@@ -2954,6 +3416,7 @@ mod tests {
                 &Module {
                     functions: vec![f.clone()],
                     budget: BUDGET,
+                    mems: mems(),
                 },
                 0,
                 &[int(7), int(2)]
@@ -3068,6 +3531,7 @@ mod tests {
             verify(&Module {
                 functions: vec![b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         let within =
@@ -3092,6 +3556,7 @@ mod tests {
             let verified = verify(&Module {
                 functions: vec![b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             });
             assert_eq!(verified.is_ok(), ok, "{}", n);
         }
@@ -3112,6 +3577,7 @@ mod tests {
                 verify(&Module {
                     functions: vec![b.finish()],
                     budget: BUDGET,
+                    mems: mems(),
                 })
             };
             assert!(checked(None).is_err());
@@ -3125,13 +3591,10 @@ mod tests {
             Num::ZERO,
             Num::new(false, u128::from(u64::MAX) + 1),
         ));
-        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, None).is_err());
-        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, within(-1, 5)).is_err());
-        assert!(check(elem.clone(), Ty::Addr, &[Ty::Addr, i], 1, past).is_err());
-        assert_eq!(
-            check(elem, Ty::Addr, &[Ty::Addr, i], 1, within(0, 5)),
-            Ok(())
-        );
+        assert!(check(elem.clone(), BYTE, &[BYTES3, i], 1, None).is_err());
+        assert!(check(elem.clone(), BYTE, &[BYTES3, i], 1, within(-1, 5)).is_err());
+        assert!(check(elem.clone(), BYTE, &[BYTES3, i], 1, past).is_err());
+        assert_eq!(check(elem, BYTE, &[BYTES3, i], 1, within(0, 5)), Ok(()));
         // An i64 into a u8, and a u8 into an i64.
         assert!(check(Op::Cast, u, &[i], 0, None).is_err());
         assert!(check(Op::Cast, u, &[i], 0, within(-1, 255)).is_err());
@@ -3159,6 +3622,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             }),
             Ok(())
         );
@@ -3213,6 +3677,7 @@ mod tests {
             Module {
                 functions: vec![leaf.clone(), b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             }
         };
         // The count only in `otherwise`, the call after the join: the join is entered with the
@@ -3340,6 +3805,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
             .unwrap_err()
         };
@@ -3430,6 +3896,7 @@ mod tests {
             verify(&Module {
                 functions: vec![f],
                 budget: BUDGET,
+                mems: mems(),
             })
         };
         let add = |trap| Op::Arith {
@@ -3449,14 +3916,8 @@ mod tests {
                 &[0, 1, 2],
                 &[&["", "", ""]],
             ),
-            one(
-                Op::Elem { stride: 1 },
-                Ty::Addr,
-                &[Ty::Addr, u],
-                &[0, 1],
-                &[],
-            ),
-            one(Op::Store, Ty::Unit, &[Ty::Addr, Ty::Bool], &[0, 1], &[]),
+            one(Op::Elem { stride: 1 }, BYTE, &[BYTES3, u], &[0, 1], &[]),
+            one(Op::Store, Ty::Unit, &[FLAG, Ty::Bool], &[0, 1], &[]),
             one(
                 Op::Cmp(CmpOp::Eq),
                 Ty::Bool,
@@ -3496,18 +3957,18 @@ mod tests {
             ),
             one(
                 Op::Elem { stride: 1 },
-                Ty::Addr,
-                &[Ty::Addr, Ty::Bool],
+                BYTES3,
+                &[BYTES3, Ty::Bool],
                 &[0, 1],
                 &[],
             ),
-            one(Op::Load, Ty::Addr, &[Ty::Addr], &[0], &[]),
+            one(Op::Load, BYTES3, &[BYTES3], &[0], &[]),
             one(Op::Store, Ty::Unit, &[i, i], &[0, 1], &[]),
             one(Op::Cmp(CmpOp::Lt), Ty::Bool, &[i, u], &[0, 1], &[]),
             one(
                 Op::Cmp(CmpOp::Lt),
                 Ty::Bool,
-                &[Ty::Addr, Ty::Addr],
+                &[BYTES3, BYTES3],
                 &[0, 1],
                 &[],
             ),
@@ -3520,15 +3981,9 @@ mod tests {
             ),
             one(Op::Shr, u, &[i, u], &[0, 1], &[]),
             one(Op::Cast, u, &[Ty::Bool], &[0], &[]),
-            one(Op::Not, Ty::Addr, &[Ty::Addr], &[0], &[]),
+            one(Op::Not, BYTES3, &[BYTES3], &[0], &[]),
             one(Op::Bits(BitOp::And), u, &[u, i], &[0, 1], &[]),
-            one(
-                Op::Copy { bytes: 1 },
-                Ty::Unit,
-                &[Ty::Addr, u],
-                &[0, 1],
-                &[],
-            ),
+            one(Op::Copy { bytes: 1 }, Ty::Unit, &[BYTES3, u], &[0, 1], &[]),
             one(Op::Int(1), Ty::Bool, &[], &[], &[]),
             one(Op::Bool(true), u, &[], &[], &[]),
             one(Op::Slot { bytes: 1 }, u, &[], &[], &[]),
@@ -3551,6 +4006,7 @@ mod tests {
             Module {
                 functions: vec![callee.clone(), b.finish()],
                 budget: BUDGET,
+                mems: mems(),
             }
         };
         assert_eq!(verify(&caller(i, u)), Ok(()));
@@ -3563,6 +4019,7 @@ mod tests {
         assert!(verify(&Module {
             functions: vec![f],
             budget: BUDGET,
+            mems: mems(),
         })
         .unwrap_err()
         .contains("does not exist"));
@@ -3574,7 +4031,7 @@ mod tests {
     fn test_unwritten_memory_holds_its_fill_and_runs_count_their_steps() {
         // `fn peek() -> u16`: a slot's first two bytes, never written.
         let mut b = Builder::new("peek", &[], Some(Ty::Int(IntTy::new(16, false))));
-        let s = b.inst(Op::Slot { bytes: 2 }, Ty::Addr, &[]);
+        let s = b.inst(Op::Slot { bytes: 2 }, WORD, &[]);
         let v = b.inst(Op::Load, Ty::Int(IntTy::new(16, false)), &[s]);
         b.ret(Some(v));
         let m = module(vec![b.finish()]);
@@ -3600,15 +4057,22 @@ mod tests {
             let u16 = IntTy::new(16, false);
             let mut b = Builder::new("at", &[Ty::Int(t)], Some(Ty::Int(u16)));
             let i = b.params(BlockId(0))[0];
-            let s = b.inst(Op::Slot { bytes: 3 }, Ty::Addr, &[]);
-            let _next = b.inst(Op::Slot { bytes: 4 }, Ty::Addr, &[]);
+            let s = b.inst(Op::Slot { bytes: 3 }, BYTES3, &[]);
+            let _next = b.inst(Op::Slot { bytes: 4 }, BYTES4, &[]);
             let inside = Fact::Within(Num::ZERO, Num::new(false, u128::from(u64::MAX)));
             let i = b.assume(i, inside);
-            let e = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[s, i]);
+            let e = b.inst(Op::Elem { stride: 1 }, BYTE, &[s, i]);
             let v = b.inst(Op::Load, Ty::Int(u16), &[e]);
             b.ret(Some(v));
+            // A `u16` read from memory of bytes is no access the verifier admits: the run shows
+            // what the interpreter makes of MIR that breaks it, as a mutant may.
+            let unverified = Module {
+                functions: vec![b.finish()],
+                budget: BUDGET,
+                mems: mems(),
+            };
             run(
-                &module(vec![b.finish()]),
+                &unverified,
                 FuncId(0),
                 &[int(index)],
                 &mut Memory::filled(7),
@@ -3658,7 +4122,7 @@ mod tests {
     fn test_runs_count_steps_and_give_back_memory() {
         // Three instructions: a slot, a constant and its store.
         let mut b = Builder::new("three", &[], None);
-        let s = b.inst(Op::Slot { bytes: 8 }, Ty::Addr, &[]);
+        let s = b.inst(Op::Slot { bytes: 8 }, LONG, &[]);
         let k = b.int(I64, Num::from_i128(7));
         b.inst(Op::Store, Ty::Unit, &[s, k]);
         b.ret(None);

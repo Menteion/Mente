@@ -1,0 +1,42 @@
+// expect: E0502 E0502 E0502
+module conformance
+// A guard of a loop's body whose condition leaves on one branch, by `return`, `break` or
+// `continue`, is no candidate (spec item 2, "Facts at a loop head"): its evaluation does not
+// always end where it started, so whether it gives `true` is no fact of the state at the head.
+// Each loop's head keeps no fact of `x`, and `x` may be 6 after the loop. Held as a candidate,
+// each guard once proved `x <= 5` there, a refinement the reference interpreter traps on.
+pub fn returns(x: u8, n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n {
+    guard (if x > 5 { return 9 } else { 0 }) == 0 else {
+      return 7
+    }
+    i += 1
+  }
+  val y: u8[0..=5] = x
+  y
+}
+
+pub fn breaks(x: u8, n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n {
+    guard (if x > 5 { break } else { 0 }) == 0 else {
+      return 7
+    }
+    i += 1
+  }
+  val y: u8[0..=5] = x
+  y
+}
+
+pub fn continues(x: u8, n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n {
+    i += 1
+    guard (if x > 5 { continue } else { 0 }) == 0 else {
+      return 7
+    }
+  }
+  val y: u8[0..=5] = x
+  y
+}

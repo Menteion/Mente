@@ -1,0 +1,23 @@
+// expect: E0236
+module conformance
+// A condition decides and changes nothing (core-calculus.md, item 10): a conjunct of this loop's
+// condition assigns in a branch of an `if`. Before the rule it was a candidate fact Tier 1 kept
+// at the head (PR 182's review, b2): its evaluation set `j` to 0 there, which proved `j + 250`
+// fits in `u8` in the round, where the body has set `j` to 9.
+fn take(x: u8) -> u8 = x
+
+pub fn f(n: u8) -> u8 {
+  var i: u8 = 0
+  var j: u8 = 0
+  while take(j + 250) > 0 and (if n < 255 {
+    j = 0
+    0
+  } else {
+    j = 0
+    0
+  }) == 0 and i < 3 {
+    j = 9
+    i += 1
+  }
+  i
+}

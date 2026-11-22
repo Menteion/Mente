@@ -1,0 +1,36 @@
+// expect: E0502 E0502 E0502
+module conformance
+// A conjunct of a loop's condition that may stop at `todo` or `unreachable`, in a branch of an
+// `if` or an arm of a `match`, is no candidate (spec item 2, "Facts at a loop head"), so the
+// loop's head keeps no fact of `x`, and after the loop `x` may lie outside the refinement. Held
+// as a candidate, each once proved the refinement from the branches that never end.
+pub fn todo_on_one_branch(x: u8, n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n and (if x > 5 { todo("t") } else { 0 }) == 0 {
+    i += 1
+  }
+  val y: u8[0..=5] = x
+  y
+}
+
+pub fn unreachable_on_one_branch(x: u8, n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n and (if x > 5 { unreachable("u") } else { 0 }) == 0 {
+    i += 1
+  }
+  val y: u8[0..=5] = x
+  y
+}
+
+pub fn unreachable_in_one_arm(x: u8, n: u8) -> u8 {
+  var i: u8 = 0
+  while i < n and (match x {
+    0 => 0
+    1 => 0
+    _ => unreachable("x")
+  }) == 0 {
+    i += 1
+  }
+  val y: u8[0..=1] = x
+  y
+}

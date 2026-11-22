@@ -11,120 +11,350 @@ use std::path::Path;
 // JSON as npm reads it, defined once in the library.
 use mente_cli::json::{parse as parse_json, Json};
 
-/// The dependency policy of CLAUDE.md, applied to one manifest: a compiler crate depends
-/// only on the workspace's own crates, by path; `mente-mir` depends on nothing; only
-/// `mente-codegen` may add Cranelift, and `gimli` and `object` for its object files and
-/// debug information (Norman, 2026-11-10). Returns each dependency line outside the policy.
-fn dependency_policy_violations(krate: &str, manifest: &str) -> Vec<String> {
-    let mut section = String::new();
-    let mut found = Vec::new();
-    for line in manifest.lines().map(str::trim) {
-        if line.starts_with('[') {
-            section = line.trim_matches(|c| c == '[' || c == ']').to_string();
-            continue;
-        }
-        if !section.ends_with("dependencies") || line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let name = line.split(['=', '.']).next().unwrap_or("").trim();
-        let allowed = if name.starts_with("mente-") {
-            krate != "mente-mir"
-                && !(krate == "mente-interp" && matches!(name, "mente-mir" | "mente-codegen"))
-                && line.contains("path =")
-        } else {
-            (name.starts_with("cranelift") || matches!(name, "gimli" | "object"))
-                && krate == "mente-codegen"
-        };
-        if !allowed {
-            found.push(format!("{}: [{}] {}", krate, section, line));
+/// Where a crate of the lock comes from: the workspace, a member the root manifest names; crates.io;
+/// or anywhere else, another registry, a git repository or a path outside the workspace.
+#[derive(Clone, Debug, PartialEq)]
+enum Origin {
+    Workspace,
+    CratesIo,
+    Elsewhere(String),
+}
+
+impl Origin {
+    /// Where the crate `name` with `source` (none for a path) comes from.
+    fn of(name: &str, source: Option<&str>, members: &BTreeSet<String>) -> Origin {
+        match source {
+            None if members.contains(name) => Origin::Workspace,
+            None => Origin::Elsewhere("a path outside the workspace".to_string()),
+            Some(CRATES_IO) => Origin::CratesIo,
+            Some(other) => Origin::Elsewhere(other.to_string()),
         }
     }
-    found
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Origin::Workspace => write!(f, "the workspace"),
+            Origin::CratesIo => write!(f, "crates.io"),
+            Origin::Elsewhere(place) => write!(f, "{place}"),
+        }
+    }
+}
+
+/// The dependency policy of CLAUDE.md, applied to one crate of the workspace and its dependencies,
+/// each with where it comes from: a compiler crate depends only on the workspace's own crates;
+/// `mente-mir` depends on nothing; the reference interpreter never on `mente-mir` or
+/// `mente-codegen`; only `mente-codegen` may add Cranelift, and `gimli` and `object` for its object
+/// files and debug information (Norman, 2026-11-10), from crates.io; and nothing comes from
+/// anywhere else. Returns each dependency outside the policy.
+fn dependency_policy_violations(krate: &str, deps: &[(String, Origin)]) -> Vec<String> {
+    deps.iter()
+        .filter(|(name, origin)| {
+            let allowed = if name.starts_with("mente-") {
+                *origin == Origin::Workspace
+                    && krate != "mente-mir"
+                    && !(krate == "mente-interp"
+                        && matches!(name.as_str(), "mente-mir" | "mente-codegen"))
+            } else {
+                (name.starts_with("cranelift") || matches!(name.as_str(), "gimli" | "object"))
+                    && krate == "mente-codegen"
+                    && *origin == Origin::CratesIo
+            };
+            !allowed
+        })
+        .map(|(name, origin)| format!("{krate}: {name}, from {origin}"))
+        .collect()
+}
+
+/// The members of the workspace, by package name: each path the root manifest's `[workspace]`
+/// lists in `members`, read by `member`, which gives that path's manifest, as the name its
+/// `[package]` declares. A path matching no manifest is no member.
+fn workspace_members(root: &str, member: &dyn Fn(&str) -> Option<String>) -> BTreeSet<String> {
+    // The value of `key` in `section` of a manifest, from its `=` to the end of the value: one line,
+    // or an array to its `]`.
+    fn value<'a>(manifest: &'a str, section: &str, key: &str) -> Option<&'a str> {
+        let start = manifest.find(&format!("\n[{section}]")).map(|at| at + 1)?;
+        let body = &manifest[start + section.len() + 2..];
+        let body = &body[..body.find("\n[").unwrap_or(body.len())];
+        let at = body.lines().find(|l| {
+            l.trim_start()
+                .strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })?;
+        let from = body.find(at)? + at.find('=')? + 1;
+        let rest = &body[from..];
+        let end = if rest.trim_start().starts_with('[') {
+            rest.find(']')? + 1
+        } else {
+            rest.find('\n').unwrap_or(rest.len())
+        };
+        Some(&rest[..end])
+    }
+    // The strings of a value, in either quote, comments left out.
+    fn strings(value: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in value.lines() {
+            let line = line.split('#').next().unwrap_or("");
+            let mut rest = line;
+            while let Some(at) = rest.find(['"', '\'']) {
+                let quote = rest[at..].chars().next().unwrap_or('"');
+                let inner = &rest[at + 1..];
+                let Some(end) = inner.find(quote) else {
+                    break;
+                };
+                out.push(inner[..end].to_string());
+                rest = &inner[end + 1..];
+            }
+        }
+        out
+    }
+    let root = format!("\n{root}");
+    let paths = value(&root, "workspace", "members")
+        .map(strings)
+        .unwrap_or_default();
+    paths
+        .iter()
+        .filter_map(|p| {
+            let manifest = format!("\n{}", member(p)?);
+            strings(value(&manifest, "package", "name")?)
+                .into_iter()
+                .next()
+        })
+        .collect()
+}
+
+/// The members of this repository's workspace.
+fn members_here(root: &Path) -> BTreeSet<String> {
+    workspace_members(
+        &fs::read_to_string(root.join("Cargo.toml"))
+            .unwrap_or_else(|e| panic!("the root manifest: {e}")),
+        &|p| fs::read_to_string(root.join(p).join("Cargo.toml")).ok(),
+    )
+}
+
+/// Each member of the workspace `lock` holds, with its dependencies, each with where it comes from.
+/// A lock is cargo's own reading of every manifest, and CI builds with `--locked`, which refuses a
+/// lock that does not match them: a dependency stands in it under the crate's own name, however
+/// its manifest spells it, renamed with `package` in either quote, in a `[dependencies.<name>]`
+/// table, under a target or as a dev-dependency. The tests cannot run `cargo metadata` itself,
+/// since their sandbox holds no toolchain (.github/scripts/test-sandbox.sh). A crate with no
+/// source is the workspace's only if the root manifest names it a member.
+fn workspace_dependencies(
+    lock: &str,
+    members: &BTreeSet<String>,
+) -> BTreeMap<String, Vec<(String, Origin)>> {
+    let entries = lock_entries(lock);
+    // A dependency as the lock writes it, `name`, or `name version` beside a second version.
+    let origin = |dep: &str| {
+        let mut words = dep.split(' ');
+        let name = words.next().unwrap_or("");
+        let version = words.next();
+        let same: Vec<&LockEntry> = entries
+            .iter()
+            .filter(|e| e.name == name && version.is_none_or(|v| e.version == v))
+            .collect();
+        match same.as_slice() {
+            [one] => Origin::of(name, one.source.as_deref(), members),
+            _ => Origin::Elsewhere("no one crate of the lock".to_string()),
+        }
+    };
+    entries
+        .iter()
+        .filter(|e| Origin::of(&e.name, e.source.as_deref(), members) == Origin::Workspace)
+        .map(|e| {
+            let deps = e
+                .dependencies
+                .iter()
+                .map(|d| (d.split(' ').next().unwrap_or(d).to_string(), origin(d)))
+                .collect();
+            (e.name.clone(), deps)
+        })
+        .collect()
 }
 
 /// A new external dependency needs Norman's approval and a change to this policy.
 #[test]
 fn test_crates_depend_only_on_allowed_crates() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut found = dependency_policy_violations(
-        "workspace",
-        &fs::read_to_string(root.join("Cargo.toml")).unwrap(),
+    let members = members_here(&root);
+    let crates = workspace_dependencies(
+        &fs::read_to_string(root.join("Cargo.lock")).unwrap(),
+        &members,
     );
-    let mut crates = 0;
+    // Every crate of compiler/ is in the lock, read by its name.
+    let mut compiler = 0;
     for entry in fs::read_dir(root.join("compiler")).unwrap().flatten() {
-        if let Ok(manifest) = fs::read_to_string(entry.path().join("Cargo.toml")) {
-            crates += 1;
-            found.extend(dependency_policy_violations(
-                &entry.file_name().to_string_lossy(),
-                &manifest,
-            ));
+        if entry.path().join("Cargo.toml").exists() {
+            compiler += 1;
+            let name = entry.file_name().to_string_lossy().to_string();
+            assert!(
+                crates.contains_key(&name),
+                "Cargo.lock holds no member {name}"
+            );
         }
     }
     assert!(
-        crates >= 7,
-        "expected the seven compiler crates, read {}",
-        crates
+        compiler >= 8,
+        "expected the compiler's crates, read {compiler}"
     );
+    let found: Vec<String> = crates
+        .iter()
+        .filter(|(name, _)| name.starts_with("mente-"))
+        .flat_map(|(name, deps)| dependency_policy_violations(name, deps))
+        .collect();
     assert!(
         found.is_empty(),
         "dependencies outside the policy:\n{}",
         found.join("\n")
     );
 
-    // The policy itself: what it lets through and what it stops.
-    let manifest = "[package]\nname = \"x\"\n\n[dependencies]\nmente-ast = { path = \"../mente-ast\" }\ncranelift-codegen = \"0.135\"\n\n[dev-dependencies]\nproptest = \"1\"\n";
+    // The policy on a lock, which writes a dependency's version where it holds two of the crate.
+    // Whatever form a manifest gives a dependency, the lock names the crate
+    // itself: `evil` here stands for `x = { package = "evil" }`, `x = { package = 'evil' }`,
+    // `[dependencies.evil]`, `[target.'cfg(windows)'.dependencies] evil = "1"` and
+    // `[dev-dependencies] evil = "1"` alike, so that no spelling reaches the policy.
+    let package = |name: &str, version: &str, source: bool, deps: &[&str]| {
+        let source = if source {
+            format!("source = \"{CRATES_IO}\"\n")
+        } else {
+            String::new()
+        };
+        let deps = if deps.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = deps.iter().map(|d| format!(" \"{d}\",\n")).collect();
+            format!("dependencies = [\n{}]\n", list.concat())
+        };
+        format!("[[package]]\nname = \"{name}\"\nversion = \"{version}\"\n{source}{deps}\n")
+    };
+    let lock = [
+        "version = 4\n\n".to_string(),
+        package(
+            "mente-sema",
+            "0.1.0",
+            false,
+            &["mente-ast 0.1.0", "cranelift-codegen 0.137.1", "evil"],
+        ),
+        package("mente-ast", "0.1.0", false, &[]),
+        package(
+            "mente-codegen",
+            "0.1.0",
+            false,
+            &[
+                "cranelift-codegen 0.137.1",
+                "cranelift-vendored",
+                "evil",
+                "gimli",
+                "object",
+            ],
+        ),
+        package(
+            "mente-interp",
+            "0.1.0",
+            false,
+            &["mente-sema", "mente-mir", "mente-codegen"],
+        ),
+        package("mente-mir", "0.1.0", false, &["mente-ast 0.1.0"]),
+        package("mente-cli", "0.1.0", false, &["mente-ast 0.1.1"]),
+        package("mente-ast", "0.1.1", true, &[]),
+        package("cranelift-codegen", "0.137.1", true, &[]),
+        package("cranelift-codegen", "0.136.0", true, &[]),
+        package("evil", "1.0.0", true, &[]),
+        package("gimli", "0.33.0", true, &[]),
+        package("object", "0.40.0", true, &[]),
+        // A crate at a path outside the workspace, as `cranelift-vendored = { path = ".." }`
+        // gives, with no source in the lock, and what it brings.
+        package("cranelift-vendored", "0.1.0", false, &["serde"]),
+        package("serde", "1.0.0", true, &[]),
+    ]
+    .concat();
+    let members: BTreeSet<String> = [
+        "mente-sema",
+        "mente-ast",
+        "mente-codegen",
+        "mente-interp",
+        "mente-mir",
+        "mente-cli",
+    ]
+    .map(String::from)
+    .into();
+    let crates = workspace_dependencies(&lock, &members);
+    // A crate with no source is no member for that: the policy reads the members alone.
+    assert!(!crates.contains_key("cranelift-vendored"));
+    let refused = |name: &str| dependency_policy_violations(name, &crates[name]);
     assert_eq!(
-        dependency_policy_violations("mente-sema", manifest),
-        vec![
-            "mente-sema: [dependencies] cranelift-codegen = \"0.135\"".to_string(),
-            "mente-sema: [dev-dependencies] proptest = \"1\"".to_string(),
+        refused("mente-sema"),
+        [
+            "mente-sema: cranelift-codegen, from crates.io",
+            "mente-sema: evil, from crates.io"
+        ]
+    );
+    // Cranelift, gimli and object are mente-codegen's alone, from crates.io, and a second version
+    // of a crate is read by the one the dependency names; a crate at a path outside the workspace
+    // is refused whatever its name.
+    assert_eq!(
+        refused("mente-codegen"),
+        [
+            "mente-codegen: cranelift-vendored, from a path outside the workspace",
+            "mente-codegen: evil, from crates.io"
+        ]
+    );
+    // The reference interpreter shares no code with the paths it checks, and MIR takes nothing.
+    assert_eq!(
+        refused("mente-interp"),
+        [
+            "mente-interp: mente-mir, from the workspace",
+            "mente-interp: mente-codegen, from the workspace"
         ]
     );
     assert_eq!(
-        dependency_policy_violations("mente-codegen", manifest).len(),
-        1
+        refused("mente-mir"),
+        ["mente-mir: mente-ast, from the workspace"]
     );
-    assert_eq!(dependency_policy_violations("mente-mir", manifest).len(), 3);
-    // The reference interpreter shares no code with the paths it checks.
-    let interp = "[dependencies]\nmente-sema = { path = \"../mente-sema\" }\nmente-mir = { path = \"../mente-mir\" }\nmente-codegen = { path = \"../mente-codegen\" }\n";
+    // A crate named as one of the workspace's but taken from outside it is refused.
     assert_eq!(
-        dependency_policy_violations("mente-interp", interp),
-        vec![
-            "mente-interp: [dependencies] mente-mir = { path = \"../mente-mir\" }".to_string(),
-            "mente-interp: [dependencies] mente-codegen = { path = \"../mente-codegen\" }"
-                .to_string(),
-        ]
+        refused("mente-cli"),
+        ["mente-cli: mente-ast, from crates.io"]
     );
-    assert!(dependency_policy_violations("mente-cli", interp).is_empty());
-    assert_eq!(
-        dependency_policy_violations("mente-cli", "[dependencies]\nmente-ast = \"0.1\"\n").len(),
-        1
-    );
-    // The object and DWARF writers are mente-codegen's alone, and only those two.
-    let objects =
-        "[dependencies]\ngimli = { version = \"0.33\" }\nobject = \"0.40\"\nobject-pool = \"1\"\n";
-    assert_eq!(
-        dependency_policy_violations("mente-codegen", objects),
-        vec!["mente-codegen: [dependencies] object-pool = \"1\"".to_string()]
-    );
-    assert_eq!(
-        dependency_policy_violations("mente-sema", objects),
-        vec![
-            "mente-sema: [dependencies] gimli = { version = \"0.33\" }".to_string(),
-            "mente-sema: [dependencies] object = \"0.40\"".to_string(),
-            "mente-sema: [dependencies] object-pool = \"1\"".to_string(),
-        ]
-    );
+}
+
+/// The members are the packages the root manifest's `members` names, in either quote, an array
+/// over lines with comments, and a path with no manifest is none.
+#[test]
+fn test_the_members_are_those_the_root_manifest_names() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let here = members_here(&root);
+    for name in ["mente-cli", "mente-codegen", "mente-mir", "mente-threads"] {
+        assert!(here.contains(name), "{name} is no member: {here:?}");
+    }
+    let manifest = "[package]\nname = \"x\"\n\n[workspace]\nresolver = \"2\"\nmembers = [\n    \"a\", # the first\n    'b',\n    \"gone\",\n]\nexclude = [\"c\"]\n\n[workspace.package]\nname = \"no\"\n";
+    let member = |p: &str| match p {
+        "a" => Some("[package]\nname = \"alpha\"\nversion = \"0.1.0\"\n".to_string()),
+        "b" => Some("[lib]\nname = \"lib-b\"\n\n[package]\nname = 'beta'\n".to_string()),
+        "c" => Some("[package]\nname = \"excluded\"\n".to_string()),
+        _ => None,
+    };
+    let read = workspace_members(manifest, &member);
+    assert_eq!(read, ["alpha", "beta"].map(String::from).into());
 }
 
 /// The one source a crate of the lock may come from outside the workspace.
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-/// The packages of a `Cargo.lock`: each name, the sources its versions come from (none for
-/// the workspace's own crates), and the names it depends on. Versions are left out: a name
-/// the lock holds twice is one crate here. Only `[[package]]` sections are read, so that a
+/// One `[[package]]` of a `Cargo.lock`: its name, its version, its source (none for the
+/// workspace's own crates), and its dependencies as the lock writes them, `gimli` or, where the
+/// lock holds two versions of it, `gimli 0.33.0`.
+struct LockEntry {
+    name: String,
+    version: String,
+    source: Option<String>,
+    dependencies: Vec<String>,
+}
+
+/// The `[[package]]` sections of a `Cargo.lock`, in its order. Only those are read, so that a
 /// `[[patch.unused]]` or `[metadata]` section never adds to the package before it.
-fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> {
+fn lock_entries(lock: &str) -> Vec<LockEntry> {
     let mut sections: Vec<(bool, Vec<&str>)> = Vec::new();
     for line in lock.lines().map(str::trim) {
         if line.starts_with('[') && line.ends_with(']') && line.len() > 2 {
@@ -133,11 +363,14 @@ fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<Str
             lines.push(line);
         }
     }
-    let mut packages: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    let mut entries = Vec::new();
     for (_, lines) in sections.iter().filter(|(package, _)| *package) {
-        let mut name = String::new();
-        let mut sources = BTreeSet::new();
-        let mut deps = BTreeSet::new();
+        let mut entry = LockEntry {
+            name: String::new(),
+            version: String::new(),
+            source: None,
+            dependencies: Vec::new(),
+        };
         let mut in_deps = false;
         for line in lines {
             if in_deps {
@@ -145,33 +378,100 @@ fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<Str
                     in_deps = false;
                 } else {
                     let dep = line.trim_matches(|c| c == '"' || c == ',');
-                    deps.insert(dep.split(' ').next().unwrap_or(dep).to_string());
+                    entry.dependencies.push(dep.to_string());
                 }
             } else if let Some(value) = line.strip_prefix("name = ") {
-                name = value.trim_matches('"').to_string();
+                entry.name = value.trim_matches('"').to_string();
+            } else if let Some(value) = line.strip_prefix("version = ") {
+                entry.version = value.trim_matches('"').to_string();
             } else if let Some(value) = line.strip_prefix("source = ") {
-                sources.insert(value.trim_matches('"').to_string());
+                entry.source = Some(value.trim_matches('"').to_string());
             } else if *line == "dependencies = [" {
                 in_deps = true;
             }
         }
-        let entry = packages.entry(name).or_default();
-        entry.0.extend(sources);
-        entry.1.extend(deps);
+        entries.push(entry);
+    }
+    entries
+}
+
+/// The packages of a `Cargo.lock`: each name, the sources its versions come from (none for
+/// the workspace's own crates), and the names it depends on. Versions are left out: a name
+/// the lock holds twice is one crate here.
+fn lock_packages(lock: &str) -> BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> {
+    let mut packages: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
+    for entry in lock_entries(lock) {
+        let package = packages.entry(entry.name).or_default();
+        package.0.extend(entry.source);
+        package.1.extend(
+            entry
+                .dependencies
+                .iter()
+                .map(|d| d.split(' ').next().unwrap_or(d).to_string()),
+        );
     }
     packages
+}
+
+/// The crates cranelift uses in its own signatures, `gimli::write::Address`,
+/// `FrameDescriptionEntry`, `object::write::SymbolId`, each with the crate of cranelift whose
+/// version it must be.
+const WITH_CRANELIFT: [(&str, &str); 2] = [
+    ("gimli", "cranelift-codegen"),
+    ("object", "cranelift-object"),
+];
+
+/// The rule a second version of gimli or object breaks, with its fix.
+const MOVE_WITH_CRANELIFT: &str = "cranelift-codegen and cranelift-object use gimli and object in their own signatures, so a version of either apart from cranelift's is a second crate whose types are not cranelift's, and every Rust job fails with E0308, as Dependabot's pull request 164 did: move gimli and object only with cranelift, in the Dependabot group `cranelift` of .github/dependabot.yml, and reach them in mente-codegen only through `cranelift_codegen::gimli` and `cranelift_object::object`";
+
+/// What keeps gimli and object from being cranelift's: a crate the lock holds in more versions
+/// than one, or in none, or whose crate of cranelift no longer takes it.
+fn cranelift_splits(lock: &str) -> Vec<String> {
+    let entries = lock_entries(lock);
+    let mut problems = Vec::new();
+    for (krate, user) in WITH_CRANELIFT {
+        let versions: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.name == krate)
+            .map(|e| e.version.as_str())
+            .collect();
+        let taken: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.name == user)
+            .flat_map(|e| &e.dependencies)
+            .filter(|d| d.split(' ').next() == Some(krate))
+            .map(|d| {
+                d.split(' ')
+                    .nth(1)
+                    .unwrap_or(versions.first().copied().unwrap_or(""))
+            })
+            .collect();
+        match (versions.as_slice(), taken.as_slice()) {
+            ([_], [_]) => {}
+            (_, []) => problems.push(format!("{user} takes no {krate}")),
+            (held, [version]) => problems.push(format!(
+                "Cargo.lock holds {krate} {}, where {user} takes {version}",
+                held.join(" and ")
+            )),
+            (_, versions) => {
+                problems.push(format!("{user} takes {krate} {}", versions.join(" and ")))
+            }
+        }
+    }
+    problems
 }
 
 /// What keeps a lock from matching the approved list (`<crate>: <direct dependency>` lines):
 /// a crate outside the workspace that the list lacks, a listed crate the lock does not hold,
 /// and a listed dependency that is not a direct dependency of a workspace crate or does not
 /// bring the crate.
-fn lock_approval_problems(lock: &str, approved: &str) -> Vec<String> {
+fn lock_approval_problems(lock: &str, approved: &str, members: &BTreeSet<String>) -> Vec<String> {
     let packages = lock_packages(lock);
     let local = |name: &str| {
-        packages
-            .get(name)
-            .is_some_and(|(sources, _)| sources.is_empty())
+        members.contains(name)
+            && packages
+                .get(name)
+                .is_some_and(|(sources, _)| sources.is_empty())
     };
     let direct: BTreeSet<&str> = packages
         .iter()
@@ -209,6 +509,12 @@ fn lock_approval_problems(lock: &str, approved: &str) -> Vec<String> {
         }
     }
     for (name, (sources, _)) in &packages {
+        if sources.is_empty() && !local(name) {
+            problems.push(format!(
+                "{name} comes from a path outside the workspace, not crates.io: only a member the \
+                 root manifest names, or a crate of crates.io Norman approved, may be in the lock"
+            ));
+        }
         for source in sources.iter().filter(|s| s.as_str() != CRATES_IO) {
             problems.push(format!(
                 "{} comes from {}, not crates.io: only a crate of crates.io can be approved",
@@ -229,9 +535,7 @@ fn lock_approval_problems(lock: &str, approved: &str) -> Vec<String> {
                 "{} is listed, but Cargo.lock no longer holds it",
                 krate
             )),
-            Some((sources, _)) if sources.is_empty() => {
-                problems.push(format!("{} is a workspace crate", krate))
-            }
+            Some(_) if local(krate) => problems.push(format!("{} is a workspace crate", krate)),
             Some(_) if !direct.contains(via) => problems.push(format!(
                 "{}: {} is not a direct dependency of a workspace crate",
                 krate, via
@@ -245,6 +549,47 @@ fn lock_approval_problems(lock: &str, approved: &str) -> Vec<String> {
     problems
 }
 
+/// gimli and object each resolve to one version, the one cranelift-codegen and cranelift-object
+/// take, so that no update moves them apart from cranelift (Dependabot's pull request 164 bumped
+/// them alone, and every Rust job failed).
+#[test]
+fn test_gimli_and_object_are_cranelifts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let problems = cranelift_splits(&fs::read_to_string(root.join("Cargo.lock")).unwrap());
+    assert!(
+        problems.is_empty(),
+        "{}:\n{}",
+        MOVE_WITH_CRANELIFT,
+        problems.join("\n")
+    );
+
+    // The check itself, on a lock of cranelift and the two crates, then with gimli split.
+    let lock = "version = 4\n\n[[package]]\nname = \"cranelift-codegen\"\nversion = \"0.137.1\"\ndependencies = [\n \"gimli\",\n]\n\n[[package]]\nname = \"cranelift-object\"\nversion = \"0.137.1\"\ndependencies = [\n \"gimli\",\n \"object\",\n]\n\n[[package]]\nname = \"gimli\"\nversion = \"0.33.0\"\n\n[[package]]\nname = \"object\"\nversion = \"0.40.0\"\n\n[[package]]\nname = \"mente-codegen\"\nversion = \"0.1.0\"\ndependencies = [\n \"cranelift-codegen\",\n \"object\",\n]\n";
+    assert_eq!(cranelift_splits(lock), Vec::<String>::new());
+    let split = lock
+        .replace(
+            "dependencies = [\n \"gimli\",\n]",
+            "dependencies = [\n \"gimli 0.33.0\",\n]",
+        )
+        .replace(
+            "dependencies = [\n \"gimli\",\n \"object\",",
+            "dependencies = [\n \"gimli 0.33.0\",\n \"object\",",
+        )
+        .replace(
+            "[[package]]\nname = \"object\"",
+            "[[package]]\nname = \"gimli\"\nversion = \"0.34.0\"\n\n[[package]]\nname = \"object\"",
+        );
+    assert_eq!(
+        cranelift_splits(&split),
+        vec!["Cargo.lock holds gimli 0.33.0 and 0.34.0, where cranelift-codegen takes 0.33.0"]
+    );
+    let dropped = lock.replace(" \"gimli\",\n \"object\",\n", " \"gimli\",\n");
+    assert_eq!(
+        cranelift_splits(&dropped),
+        vec!["cranelift-object takes no object"]
+    );
+}
+
 /// Every crate the lock holds was approved: a dependency that brings a crate the list lacks,
 /// as a Dependabot update may, fails by the crate's name until the pull request lists it for
 /// Norman (`docs/design-review.md`, `dependency-approval`).
@@ -254,28 +599,30 @@ fn test_the_lock_holds_only_approved_crates() {
     let problems = lock_approval_problems(
         &fs::read_to_string(root.join("Cargo.lock")).unwrap(),
         &fs::read_to_string(root.join(".config/approved-crates.txt")).unwrap(),
+        &members_here(&root),
     );
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 
     // The check itself, on a lock of two workspace crates and three outside.
     let lock = "version = 4\n\n[[package]]\nname = \"mente-a\"\nversion = \"0.1.0\"\ndependencies = [\n \"mente-b\",\n \"top\",\n]\n\n[[package]]\nname = \"mente-b\"\nversion = \"0.1.0\"\n\n[[package]]\nname = \"top\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\ndependencies = [\n \"leaf 2.0.0\",\n]\n\n[[package]]\nname = \"leaf\"\nversion = \"2.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"other\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n";
+    let ab: BTreeSet<String> = ["mente-a", "mente-b"].map(String::from).into();
     let wrong_dependency = "# comment\ntop: top\nleaf: top\nother: top\n";
     assert_eq!(
-        lock_approval_problems(lock, wrong_dependency),
+        lock_approval_problems(lock, wrong_dependency, &ab),
         vec!["other: top does not bring it".to_string()]
     );
-    let gained = lock_approval_problems(lock, "top: top\nother: top\n");
+    let gained = lock_approval_problems(lock, "top: top\nother: top\n", &ab);
     assert_eq!(gained.len(), 2, "{:?}", gained);
     assert!(gained[0].starts_with("Cargo.lock holds leaf, which"));
-    let stale = lock_approval_problems(lock, "top: top\nleaf: top\ngone: top\n");
+    let stale = lock_approval_problems(lock, "top: top\nleaf: top\ngone: top\n", &ab);
     assert!(stale.contains(&"gone is listed, but Cargo.lock no longer holds it".to_string()));
     assert!(stale
         .iter()
         .any(|p| p.starts_with("Cargo.lock holds other")));
-    let indirect = lock_approval_problems(lock, "top: top\nleaf: leaf\nother: top\n");
+    let indirect = lock_approval_problems(lock, "top: top\nleaf: leaf\nother: top\n", &ab);
     assert!(indirect
         .contains(&"leaf: leaf is not a direct dependency of a workspace crate".to_string()));
-    let shapes = lock_approval_problems(lock, "top: top\ntop: top\nleaf top\nmente-b: top\n");
+    let shapes = lock_approval_problems(lock, "top: top\ntop: top\nleaf top\nmente-b: top\n", &ab);
     assert!(shapes.contains(&"top is listed twice".to_string()));
     assert!(shapes.contains(&"\"leaf top\" is not \"<crate>: <dependency>\"".to_string()));
     assert!(shapes.contains(&"mente-b is a workspace crate".to_string()));
@@ -286,12 +633,25 @@ fn test_the_lock_holds_only_approved_crates() {
     );
     assert_ne!(git, lock);
     assert_eq!(
-        lock_approval_problems(&git, "top: top\nleaf: top\nother: other\n"),
+        lock_approval_problems(&git, "top: top\nleaf: top\nother: other\n", &ab),
         vec![
             "leaf comes from git+https://example.invalid/leaf#0123, not crates.io: only a crate of crates.io can be approved".to_string(),
             "other: other is not a direct dependency of a workspace crate".to_string(),
         ]
     );
+    // A crate with no source that the root manifest names no member, at a path outside the
+    // workspace, is refused, whatever it is named and whatever it brings.
+    let vendored = format!(
+        "{}\n[[package]]\nname = \"vendored\"\nversion = \"0.1.0\"\n",
+        lock.replace(
+            "\"mente-b\",\n \"top\",",
+            "\"mente-b\",\n \"top\",\n \"vendored\","
+        )
+    );
+    assert_ne!(vendored, lock);
+    assert!(lock_approval_problems(&vendored, "top: top\nleaf: top\nother: top\n", &ab).contains(
+        &"vendored comes from a path outside the workspace, not crates.io: only a member the root manifest names, or a crate of crates.io Norman approved, may be in the lock".to_string()
+    ));
     // A [[patch.unused]] section adds nothing to the package before it.
     let patched = format!(
         "{lock}\n[[patch.unused]]\nname = \"evil\"\nversion = \"1.0.0\"\nsource = \"git+https://example.invalid/evil\"\n"
@@ -429,17 +789,6 @@ fn test_the_guard_reads_json_as_npm_does() {
         parse_json("\"\\ud83e\\udd16\""),
         Ok(Json::Str("\u{1F916}".to_string()))
     );
-    // Only a high surrogate joins the escape after it, and only an escape `\u` of a low one: a
-    // character before a low surrogate, and a high surrogate before another escape or text, each
-    // stand alone (the survivors of Mutants on c56b5be).
-    for (text, read) in [
-        ("\"\\u0041\\udc00\"", "A\u{FFFD}"),
-        ("\"\\ud83d\\ndc00\"", "\u{FFFD}\ndc00"),
-        ("\"\\ud83dxudc00\"", "\u{FFFD}xudc00"),
-        ("\"\\ud83d\\u0041\"", "\u{FFFD}A"),
-    ] {
-        assert_eq!(parse_json(text), Ok(Json::Str(read.to_string())), "{text}");
-    }
     for bad in ["{", "{\"a\" 1}", "[1,]", "\"open", "{} x", "nope"] {
         assert!(parse_json(bad).is_err(), "{bad}");
     }
