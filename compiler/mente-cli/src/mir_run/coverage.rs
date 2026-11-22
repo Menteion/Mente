@@ -1736,12 +1736,15 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 seed
             ));
         }
-        (seed, seen, c.claims, c.regenerated, problems)
+        let bits = c.program.bits.len();
+        (seed, seen, c.claims, (c.regenerated, bits), problems)
     });
-    for (seed, seen, claimed, again, wrong) in programs {
+    let mut bits = 0;
+    for (seed, seen, claimed, (again, written), wrong) in programs {
         problems.extend(wrong);
         claims.extend(claimed.into_iter().map(|c| (seed, c)));
         regenerated += again;
+        bits += written;
         for name in seen {
             seeds.entry(name).or_default().push(seed);
         }
@@ -1751,6 +1754,12 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
     // Some function is generated again, so that a program replayed from its attempts is seen.
     if regenerated == 0 {
         problems.push("no function of these seeds is generated again".to_string());
+    }
+    // Some bit operation of literals alone is written, so that the check of the type each takes
+    // (`generate::literals_as_written`, in `generate::checked`) checks something.
+    if bits == 0 {
+        problems
+            .push("no program of these seeds writes a bit operation of literals alone".to_string());
     }
     assert!(
         problems.is_empty(),

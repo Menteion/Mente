@@ -43,6 +43,26 @@ const POLICY_DIR = ".github/scripts/policy/";
 
 /// The shell and PowerShell scripts under .github/scripts a text names by path.
 const namedScripts = (text) => [...String(text).matchAll(/\.github\/scripts\/[\w./-]+\.(?:sh|ps1)\b/g)].map((m) => m[0]);
+/// The files a module `file` names as `path.join(NAME, "<literal>", ...)`, where it defines NAME as
+/// its own directory, `path.dirname(fileURLToPath(import.meta.url))`, or as a directory resolved from
+/// it, `path.resolve(<its directory>, "<literal>")`; a run test spawns a script so (the review of
+/// 5264a01: policy-run.test.mjs spawned commits-body.mjs, unpinned, by `path.join(HERE, ...)`).
+export function joinedFiles(file, text) {
+  const own = String.raw`path\.dirname\(fileURLToPath\(import\.meta\.url\)\)`;
+  const dirs = new Map();
+  for (const m of String(text).matchAll(new RegExp(String.raw`\bconst (\w+) = ${own};`, "g"))) dirs.set(m[1], path.posix.dirname(file));
+  for (const m of String(text).matchAll(new RegExp(String.raw`\bconst (\w+) = path\.resolve\((\w+|${own}), "([^"]+)"\);`, "g"))) {
+    const from = m[2].startsWith("path.") ? path.posix.dirname(file) : dirs.get(m[2]);
+    if (from !== undefined) dirs.set(m[1], path.posix.normalize(path.posix.join(from, m[3])));
+  }
+  const out = [];
+  for (const m of String(text).matchAll(/\bpath\.join\((\w+)((?:\s*,\s*"[^"]*")+)\s*\)/g)) {
+    if (!dirs.has(m[1])) continue;
+    const parts = [...m[2].matchAll(/"([^"]*)"/g)].map((p) => p[1]);
+    out.push(path.posix.normalize(path.posix.join(dirs.get(m[1]), ...parts)));
+  }
+  return out;
+}
 
 check("the scripts and jobs that run the tests are the ones the policy pins", () => {
   const changed = [];
@@ -71,7 +91,6 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
     assert.ok(steps(read).length > 0, `${key} is read nowhere`);
     for (const f of repoPaths(scriptTexts(w.doc, read))) if (toPin(f)) pending.push([key, f]);
   }
-  for (const f of PINNED_FILES.keys()) pending.push(["PINNED_FILES", f]);
   // The policy's own files, exactly those its list names, are exempt; any other script under its
   // directory that a pinned job runs is pinned like every other (the review of f217d1e: `bash
   // .github/scripts/policy/helper.sh` in a pinned job passed unpinned).
@@ -99,16 +118,45 @@ check("the scripts and jobs that run the tests are the ones the policy pins", ()
   // And an edit to one, as the review planted it, changes the digest the pin holds.
   const installer = "benchmark/harness/install-toolchains.sh";
   assert.notEqual(digest(`${read(installer)}echo "BASH_ENV=$RUNNER_TEMP/x.sh" >> "$GITHUB_ENV"\n`), PINNED_FILES.get(installer), "an edit to install-toolchains.sh keeps its pin");
-  const seen = new Set();
-  while (pending.length > 0) {
-    const [from, f] = pending.pop();
-    if (seen.has(f)) continue;
-    seen.add(f);
-    assert.ok(PINNED_FILES.has(f), `${from} runs ${f}, which PINNED_FILES does not hold`);
-    for (const g of namedScripts(read(f))) pending.push([f, g]);
-    // A pinned module's imports are pinned too.
-    if (JS_MODULE.test(f)) for (const g of repoPaths([`node ${f}`])) if (g !== f) pending.push([f, g]);
-  }
+  // Every file a pinned job or file runs, through the closure from the jobs' scripts (`start`) and
+  // the pins, that `pinned` does not hold.
+  const unpinned = (pinned, start, readText = read) => {
+    const todo = [...start, ...[...pinned.keys()].map((f) => ["PINNED_FILES", f])];
+    const seen = new Set();
+    const found = [];
+    while (todo.length > 0) {
+      const [from, f] = todo.pop();
+      if (seen.has(f)) continue;
+      seen.add(f);
+      if (!pinned.has(f)) found.push(`${from} runs ${f}, which PINNED_FILES does not hold`);
+      for (const g of namedScripts(readText(f))) todo.push([f, g]);
+      // A pinned module's imports are pinned too, and the scripts it names by its own directory.
+      if (JS_MODULE.test(f)) {
+        for (const g of repoPaths([`node ${f}`])) if (g !== f) todo.push([f, g]);
+        for (const g of joinedFiles(f, readText(f))) if (toPin(g) && g !== f) todo.push([f, g]);
+      }
+    }
+    return found;
+  };
+  assert.deepEqual(unpinned(PINNED_FILES, pending), []);
+  // Planted: the body CLI the run tests spawn by `path.join(HERE, ...)`, left out of the pins.
+  const withoutCli = new Map(PINNED_FILES);
+  withoutCli.delete(".github/scripts/commits-body.mjs");
+  assert.deepEqual(unpinned(withoutCli, pending), [".github/scripts/policy-run.test.mjs runs .github/scripts/commits-body.mjs, which PINNED_FILES does not hold"], "a script a run test spawns by path.join(HERE, ...) passed unpinned");
+  // What the reading follows, and what it leaves: a name it defines from the module's own directory,
+  // one resolved from that, either form of it, and every literal part; not a name it does not define.
+  const planted = [
+    'const HERE = path.dirname(fileURLToPath(import.meta.url));',
+    'const ROOT = path.resolve(HERE, "../..");',
+    'const UP = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");',
+    'spawn(process.execPath, [path.join(HERE, "a.mjs")]);',
+    'spawnSync(bash, [path.join(ROOT, ".github/scripts/b.sh")]);',
+    'spawnSync(bash, [path.join(ROOT, "tools", "c.mjs")]);',
+    'spawnSync(bash, [path.join(UP, "d.mjs")]);',
+    'path.join(dir, "e.mjs");',
+    'path.join(HERE, name);',
+  ].join("\n");
+  assert.deepEqual(joinedFiles(".github/scripts/x.test.mjs", planted), [".github/scripts/a.mjs", ".github/scripts/b.sh", "tools/c.mjs", ".github/d.mjs"]);
   // A script the policy cannot name, its path made of a variable, could be any script.
   const variablePath = /\.github\/scripts\/[^\s"'`]*\$/;
   for (const f of PINNED_FILES.keys()) assert.doesNotMatch(read(f), variablePath, `${f} names a script under .github/scripts by a variable`);

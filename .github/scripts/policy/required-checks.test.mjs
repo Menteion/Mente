@@ -5,7 +5,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { FACTS, read } from "./repo.mjs";
 import { SANDBOX_SOURCES, runnersOf } from "./sandbox.mjs";
-import { REPORT_FORMS, REQUIRED_EVENTS, REQUIRED_FILE, WATCH_FORMS, WORKFLOWS, allJobs, hasWatch, isPlain, isReport, logicalLines, normalize, requiredChecks, requiredJobs, scriptTexts, stepKey, steps, triggers, workflows } from "./workflows.mjs";
+import { REPORT_FORMS, REQUIRED_EVENTS, REQUIRED_FILE, WATCH_FORMS, WORKFLOWS, allJobs, hasWatch, isPlain, isReport, logicalLines, needsOf, normalize, requiredChecks, requiredJobs, scriptTexts, stepKey, steps, triggers, workflows } from "./workflows.mjs";
 
 /// Every check of this module counts itself when it runs, and the module fails when fewer ran than
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
@@ -32,6 +32,8 @@ const STEP_CONDITIONS = new Map([
   ["ci.yml#rust#clippy", "matrix.os == 'ubuntu-24.04'"],
   // Windows' runner has cdb; Linux's needs gdb installed.
   ["ci.yml#debuggers#Install gdb", "runner.os == 'Linux'"],
+  // A shard keeps its outcomes and logs whether it passed or not.
+  ["mutants.yml#shard#Keep this shard's outcomes and logs", "always()"],
 ]);
 /// The steps of required jobs that may fail without failing the job, each with its reason.
 const CONTINUE_ON_ERROR = new Map([
@@ -149,10 +151,10 @@ function gateCommands() {
   return out;
 }
 
-/// The gate commands that run inside a compound command of their step, each with its reason.
-const NESTED_GATES = new Map([
-  ["mutants.yml#in-diff: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt", "shard 0 alone checks the floor of the whole diff"],
-]);
+/// The gate commands that run inside a compound command of their step, each with its reason: none
+/// since the plan of "Mutants in the diff" checks the floor of the whole diff, which shard 0 alone
+/// did inside an `if`.
+const NESTED_GATES = new Map([]);
 
 /// Why a step's script could pass though a gate command in it failed, or run it other than as
 /// declared: no line of the script is the command exactly (so nothing is added to it, no argument,
@@ -197,11 +199,18 @@ export function gateLineProblems(script, command, pipefail, nested = false) {
 check("every required job runs the commands it exists for, in steps that cannot be skipped", () => {
   const declared = gateCommands();
   const required = requiredJobs();
+  const requiredNames = new Set(requiredChecks());
   for (const key of declared.keys()) {
     assert.ok(required.some(({ file, id }) => `${file}#${id}` === key), `.github/gate-commands.txt names ${key}, which is no required job`);
   }
-  for (const { file, doc, id, job } of required) {
+  for (const { file, doc, id, job, names } of required) {
     const key = `${file}#${id}`;
+    // An aggregate, a job of a required check's name that needs others, runs no command of its
+    // own: aggregateProblems holds its one step. The jobs it needs run theirs.
+    if (needsOf(job).length > 0 && names.some((n) => requiredNames.has(n))) {
+      assert.ok(!declared.has(key), `${key}, an aggregate, is named in .github/gate-commands.txt`);
+      continue;
+    }
     const commands = declared.get(key) ?? [];
     assert.ok(commands.length > 0, `${key} is a required job with no command in .github/gate-commands.txt`);
     const releases = scriptTexts(doc, job).some((t) => /\bcargo\s+(build|test|run)\b[^\n]*--release/.test(t));
@@ -287,7 +296,9 @@ const TIMEOUTS = new Map([
   ["ci.yml#tier1-latency", 30],
   ["ci.yml#docs", 20],
   ["commits.yml#commits", 10],
-  ["mutants.yml#in-diff", 360],
+  ["mutants.yml#plan", 60],
+  ["mutants.yml#shard", 360],
+  ["mutants.yml#aggregate", 5],
   ["generated.yml#paths", 120],
   ["smt.yml#z3", 45],
   ["fuzz.yml#fuzz", 30],
@@ -339,8 +350,77 @@ check("every required job takes at most the time the policy holds for it", () =>
   assert.deepEqual([...TIMEOUTS.keys()].filter((k) => !keys.has(k)), [], "TIMEOUTS holds a time for a job that is not required");
 });
 
+/// The one condition an aggregate carries: it runs whatever the jobs it needs did, since a job
+/// skipped, as a job with needs: is when one it needs fails, reports a check GitHub counts as
+/// passing; `!cancelled()` would skip it on a cancellation.
+const AGGREGATE_IF = "always()";
+/// The values an aggregate's step may read: the event, and the result and outputs of a job it
+/// needs, each an expression of its own.
+const AGGREGATE_ENV = /^\$\{\{ (github\.event_name|needs\.([\w-]+)\.(result|outputs\.[\w-]+)) \}\}$/;
+
+/// The one job-level condition each job an aggregate needs may carry, by workflow and job: a job
+/// with none runs whenever the aggregate's workflow does (the review of 560ccd9: the shards'
+/// condition was held by the pin alone).
+const PART_JOB_IF = new Map([["mutants.yml#shard", "needs.plan.outputs.run == 'true' && needs.plan.outputs.count != '0'"]]);
+
+/// Why a job an aggregate needs could let the aggregate pass with less checked: it may continue on
+/// error, which reports success for a failed job, or it runs under a condition other than its
+/// PART_JOB_IF entry, or under one where it has none.
+export function partProblems(key, job) {
+  const found = [];
+  if ("continue-on-error" in job) found.push(`${key}: a job a required aggregate needs may continue on error, and so report success when it failed`);
+  const held = PART_JOB_IF.get(key);
+  if ("if" in job ? normalize(job.if) !== held : held !== undefined) found.push(`${key} runs if: ${job.if ?? "(none)"}, where the policy holds ${held ?? "no condition"} (PART_JOB_IF)`);
+  return found;
+}
+
+/// Why an output a job gives could say other than a step of it found: each output an aggregate
+/// reads is exactly `${{ steps.<id>.outputs.<the same key> }}` of a step of that job, never a value
+/// written into the workflow (the review of 560ccd9: `reason: no-mutants` and `count: "0"` written
+/// so passed every check but the pin).
+export function outputProblems(key, need, outputKey) {
+  const value = need?.outputs?.[outputKey];
+  const m = /^\$\{\{ steps\.([\w-]+)\.outputs\.([\w-]+) \}\}$/.exec(String(value ?? ""));
+  if (!m || m[2] !== outputKey || !steps(need ?? {}).some((s) => s.id === m[1])) return [`${key} gives outputs.${outputKey} as ${JSON.stringify(value ?? null)}, not \${{ steps.<id>.outputs.${outputKey} }} of a step of its own`];
+  return [];
+}
+
+/// Why a required job that needs others is no aggregate of its workflow, which passes only when
+/// they do: it runs if: always(); it needs every other job of its workflow; it is a name, a runner,
+/// a time limit and one step, with no matrix, container, services or defaults; and that step is a
+/// name, variables and a script, no action and so no checkout, whose every variable is the event or
+/// the result or an output of a job it needs, and which reads every such job's result. What its
+/// script decides is pinned whole (PINNED_JOBS), and mutation.test.mjs runs the script of "Mutants
+/// in the diff" over the results its jobs can give.
+export function aggregateProblems(key, doc, job) {
+  const found = [];
+  const [file, id] = key.split("#");
+  const needs = needsOf(job);
+  const others = Object.keys(doc.jobs ?? {}).filter((other) => other !== id);
+  if (normalize(job.if ?? "") !== AGGREGATE_IF) found.push(`${key} runs if: ${job.if ?? "(none)"}, not ${AGGREGATE_IF}: a skipped aggregate reports a check GitHub counts as passing`);
+  if ([...needs].sort().join(",") !== [...others].sort().join(",")) found.push(`${key} needs ${needs.join(", ") || "nothing"}, not every other job of its workflow: ${others.join(", ")}`);
+  const keys = Object.keys(job).filter((k) => !["name", "needs", "if", "runs-on", "timeout-minutes", "steps"].includes(k));
+  if (keys.length > 0) found.push(`${key} sets ${keys.join(", ")}, beyond a name, its needs, its condition, a runner, a time limit and its step`);
+  const all = steps(job);
+  if (all.length !== 1) found.push(`${key} has ${all.length} steps, not one`);
+  for (const s of all) {
+    const extra = Object.keys(s).filter((k) => !["name", "env", "run"].includes(k));
+    if (extra.length > 0 || typeof s.run !== "string") found.push(`${stepKey(file, id, s)} is more than a name, variables and a script: ${extra.join(", ")}`);
+    const read = new Set();
+    for (const [name, value] of Object.entries(isPlain(s.env) ? s.env : {})) {
+      const m = AGGREGATE_ENV.exec(String(value));
+      if (!m || (m[2] !== undefined && !needs.includes(m[2]))) found.push(`${key} reads ${name}: ${value}, neither the event nor the result or an output of a job it needs`);
+      else if (m[3] === "result") read.add(m[2]);
+      else if (m[3]?.startsWith("outputs.")) found.push(...outputProblems(`${file}#${m[2]}`, doc.jobs?.[m[2]], m[3].slice("outputs.".length)));
+    }
+    for (const need of needs) if (!read.has(need)) found.push(`${key} does not read the result of ${need}, which it needs`);
+  }
+  return found;
+}
+
 check("every required check is one job that runs on every pull request and in the merge queue", () => {
   const jobs = allJobs();
+  let aggregates = 0;
   for (const name of requiredChecks()) {
     const producers = jobs.filter((j) => j.names.includes(name));
     assert.equal(producers.length, 1, `"${name}" of ${REQUIRED_FILE} is the name of ${producers.length} jobs, not one`);
@@ -358,9 +438,61 @@ check("every required check is one job that runs on every pull request and in th
     if (types) {
       for (const t of ["opened", "synchronize", "reopened"]) assert.ok(types.includes(t), `${where}: its pull_request trigger leaves out ${t}`);
     }
-    assert.ok(!("needs" in job), `${where}: a required job with needs: is skipped, and so passes, when a job it needs fails`);
     assert.ok(!("continue-on-error" in job), `${where}: a required job may not continue on error`);
-    if ("if" in job) assert.equal(normalize(job.if), REQUIRED_JOB_IF, `${where}: a job-level if: could skip it`);
+    // A required job with needs: is skipped, and so passes, when a job it needs fails, unless it is
+    // an aggregate of its workflow.
+    if ("needs" in job) {
+      assert.deepEqual(aggregateProblems(`${file}#${id}`, doc, job), [], `${where}: a required job with needs: is no aggregate`);
+      aggregates++;
+    } else if ("if" in job) assert.equal(normalize(job.if), REQUIRED_JOB_IF, `${where}: a job-level if: could skip it`);
+  }
+  assert.ok(aggregates > 0, "the policy reads no aggregate, though Mutants in the diff is one");
+  // Every job an aggregate needs: no continue-on-error, and its condition the one the policy holds.
+  const named = new Set(jobs.filter((j) => j.names.some((n) => requiredChecks().includes(n))).map((j) => `${j.file}#${j.id}`));
+  for (const { file, id, job } of requiredJobs().filter((j) => !named.has(`${j.file}#${j.id}`))) assert.deepEqual(partProblems(`${file}#${id}`, job), []);
+  // Planted, against the class "a required check that can pass unseen": the aggregate of Mutants
+  // with !cancelled(), with no condition, missing a need, with a checkout, as an action, with a
+  // matrix, reading a value from elsewhere, and leaving a need's result unread.
+  const mutants = workflows().find((w) => w.file === "mutants.yml").doc;
+  const aggregate = mutants.jobs.aggregate;
+  const step = steps(aggregate)[0];
+  assert.deepEqual(aggregateProblems("mutants.yml#aggregate", mutants, aggregate), []);
+  for (const [what, job] of [
+    ["!cancelled()", { ...aggregate, if: "${{ !cancelled() }}" }],
+    ["no condition", Object.fromEntries(Object.entries(aggregate).filter(([k]) => k !== "if"))],
+    ["a need left out", { ...aggregate, needs: ["shard"] }],
+    ["a checkout", { ...aggregate, steps: [{ uses: "actions/checkout@x" }, step] }],
+    ["an action as its step", { ...aggregate, steps: [{ ...step, uses: "actions/github-script@x" }] }],
+    ["a matrix", { ...aggregate, strategy: { matrix: { k: [0] } } }],
+    ["a value from elsewhere", { ...aggregate, steps: [{ ...step, env: { ...step.env, PLAN: "${{ vars.PLAN }}" } }] }],
+    ["a need's result unread", { ...aggregate, steps: [{ ...step, env: Object.fromEntries(Object.entries(step.env).filter(([, v]) => v !== "${{ needs.shard.result }}")) }] }],
+  ]) {
+    assert.ok(aggregateProblems("mutants.yml#aggregate", mutants, job).length > 0, `an aggregate with ${what} passes`);
+  }
+  // The review of 560ccd9's plants: the plan's outputs written into the workflow, or bound to a
+  // step it does not hold or to another key; the shards continuing on error, or under another
+  // condition or none.
+  const plan = mutants.jobs.plan;
+  for (const [what, outputs] of [
+    ["its reason and count written in", { ...plan.outputs, reason: "no-mutants", count: "0" }],
+    ["its watch's decision written in", { ...plan.outputs, run: "false" }],
+    ["an output of a step it does not hold", { ...plan.outputs, count: "${{ steps.gone.outputs.count }}" }],
+    ["an output of another key", { ...plan.outputs, count: "${{ steps.plan.outputs.needed }}" }],
+  ]) {
+    const planted = { ...mutants, jobs: { ...mutants.jobs, plan: { ...plan, outputs } } };
+    assert.ok(aggregateProblems("mutants.yml#aggregate", planted, aggregate).length > 0, `a plan with ${what} passes`);
+  }
+  const shard = mutants.jobs.shard;
+  assert.deepEqual(partProblems("mutants.yml#shard", shard), []);
+  assert.deepEqual(partProblems("mutants.yml#plan", plan), []);
+  for (const [what, key, job] of [
+    ["continue-on-error", "mutants.yml#shard", { ...shard, "continue-on-error": true }],
+    ["continue-on-error on the plan", "mutants.yml#plan", { ...plan, "continue-on-error": true }],
+    ["another condition", "mutants.yml#shard", { ...shard, if: "needs.plan.outputs.run == 'true'" }],
+    ["no condition", "mutants.yml#shard", Object.fromEntries(Object.entries(shard).filter(([k]) => k !== "if"))],
+    ["a condition where none is held", "mutants.yml#plan", { ...plan, if: "false" }],
+  ]) {
+    assert.ok(partProblems(key, job).length > 0, `a job an aggregate needs with ${what} passes`);
   }
 });
 
@@ -436,7 +568,7 @@ export const INSTRUMENT_CHECKS = [
   ["Three execution paths", [...RUST, ...GENERATED, "Execution paths (x86-64 Linux)", "Execution paths (x86-64 Windows)", "Execution paths (AArch64 Linux)"]],
   ["A generator of well-typed programs", [...GENERATED, "Fuzz"]],
   ["Soundness by execution", [...GENERATED, "Tier 1 against Z3"]],
-  ["Mutation testing at two levels", [...[0, 1, 2, 3].map((s) => `Mutants in the diff (shard ${s} of 4)`), "MIR mutation gate with the agent programs", ...RUST]],
+  ["Mutation testing at two levels", ["Mutants in the diff", "MIR mutation gate with the agent programs", ...RUST]],
   ["A CI matrix", RUST],
   ["Latency, performance and hardware-counter benchmarks", ["Projection benchmark", "Tier-1 latency", "Tight-loop kernels (x86-64 Linux)", "Tight-loop kernels (AArch64 Linux)"]],
   ["The agent benchmark", ["Documentation", "Fixtures in Rust and Odin"]],

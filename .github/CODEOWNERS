@@ -89,6 +89,7 @@
 /tools/quick.test.mjs @Dancraft3746
 /tools/push.mjs @Dancraft3746
 /tools/push-guard.mjs @Dancraft3746
+/tools/pr-body-guard.mjs @Dancraft3746
 /tools/push.test.mjs @Dancraft3746
 /tools/git-hooks/ @Dancraft3746
 

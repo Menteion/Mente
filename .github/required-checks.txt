@@ -14,11 +14,9 @@ Documentation
 # Commit and pull request text (commits.yml).
 Commits
 
-# cargo-mutants on the lines a pull request changes (mutants.yml).
-Mutants in the diff (shard 0 of 4)
-Mutants in the diff (shard 1 of 4)
-Mutants in the diff (shard 2 of 4)
-Mutants in the diff (shard 3 of 4)
+# cargo-mutants on the lines a pull request changes (mutants.yml): the aggregate of its plan and
+# of as many shards as the plan makes.
+Mutants in the diff
 
 # Generated and conformance programs on the three execution paths (generated.yml).
 Generated programs (x86-64 Linux)

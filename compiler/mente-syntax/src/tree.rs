@@ -39,6 +39,23 @@ pub struct Counts {
     pub types: usize,
 }
 
+/// A node of a tree, by its index: an expression, a statement, a block or a type.
+#[derive(Clone, Copy)]
+enum Node {
+    E(u32),
+    S(u32),
+    B(u32),
+    T(u32),
+}
+
+/// The nodes of a subtree ([`Tree::subtree`]), each kind in an order of its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Subtree {
+    pub exprs: Vec<ExprId>,
+    pub stmts: Vec<StmtId>,
+    pub blocks: Vec<BlockId>,
+}
+
 impl Tree {
     /// How many nodes of each table it holds.
     pub fn counts(&self) -> Counts {
@@ -525,18 +542,123 @@ impl Tree {
         &self.types[id.0 as usize]
     }
 
+    /// The nodes `n` holds directly, written into `out`: the one place the shape of the tree is
+    /// read node by node, for [`Tree::too_deep`] and [`Tree::subtree`].
+    fn children(&self, n: Node, out: &mut Vec<Node>) {
+        out.clear();
+        match n {
+            Node::E(i) => match &self.exprs[i as usize].kind {
+                ExprKind::Unary { operand, .. } => out.push(Node::E(operand.0)),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    out.extend([Node::E(lhs.0), Node::E(rhs.0)]);
+                }
+                ExprKind::Index { base, index } => {
+                    out.extend([Node::E(base.0), Node::E(index.0)]);
+                }
+                ExprKind::Field { base, .. } => out.push(Node::E(base.0)),
+                ExprKind::Call { args, .. } => {
+                    out.extend(args.iter().map(|a| Node::E(a.value.0)));
+                }
+                ExprKind::Construct { fields, .. } => {
+                    out.extend(fields.iter().map(|f| Node::E(f.value.0)));
+                }
+                ExprKind::Variant { payload, .. } => match payload {
+                    Payload::None => {}
+                    Payload::Named(fields) => {
+                        out.extend(fields.iter().map(|f| Node::E(f.value.0)));
+                    }
+                    Payload::Positional(args) => {
+                        out.extend(args.iter().map(|a| Node::E(a.value.0)));
+                    }
+                },
+                ExprKind::Match { scrutinee, arms } => {
+                    out.push(Node::E(scrutinee.0));
+                    out.extend(arms.iter().map(|a| match a.body {
+                        ArmBody::Expr(e) => Node::E(e.0),
+                        ArmBody::Block(b) => Node::B(b.0),
+                    }));
+                }
+                ExprKind::Array(items) => out.extend(items.iter().map(|e| Node::E(e.0))),
+                ExprKind::Repeat { value, .. } => out.push(Node::E(value.0)),
+                ExprKind::If {
+                    cond,
+                    then,
+                    otherwise,
+                } => {
+                    out.extend([Node::E(cond.0), Node::B(then.0)]);
+                    match otherwise {
+                        Some(Else::Block(b)) => out.push(Node::B(b.0)),
+                        Some(Else::If(e)) => out.push(Node::E(e.0)),
+                        None => {}
+                    }
+                }
+                ExprKind::Int { .. }
+                | ExprKind::Bool(_)
+                | ExprKind::Name(_)
+                | ExprKind::Todo(_)
+                | ExprKind::Unreachable(_)
+                | ExprKind::Error => {}
+            },
+            Node::S(i) => match &self.stmts[i as usize].kind {
+                StmtKind::Binding { ty, init, .. } => {
+                    out.extend(ty.map(|t| Node::T(t.0)));
+                    out.push(Node::E(init.0));
+                }
+                StmtKind::Assign { place, value, .. } => {
+                    out.extend([Node::E(place.0), Node::E(value.0)]);
+                }
+                StmtKind::While {
+                    cond,
+                    invariants,
+                    decreases,
+                    body,
+                } => {
+                    out.push(Node::E(cond.0));
+                    out.extend(invariants.iter().chain(decreases).map(|e| Node::E(e.0)));
+                    out.push(Node::B(body.0));
+                }
+                StmtKind::Guard { cond, otherwise } => {
+                    out.extend([Node::E(cond.0), Node::B(otherwise.0)]);
+                }
+                StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
+                    out.push(Node::E(e.0));
+                }
+                _ => {}
+            },
+            Node::B(i) => out.extend(self.blocks[i as usize].stmts.iter().map(|s| Node::S(s.0))),
+            Node::T(i) => {
+                if let TypeKind::Array { elem, .. } = &self.types[i as usize].kind {
+                    out.push(Node::T(elem.0));
+                }
+            }
+        }
+    }
+
+    /// The expressions, statements and blocks of the subtree `root` heads, `root` included: all
+    /// that an evaluation of `root` can reach. Computed without recursion, as
+    /// [`Tree::too_deep`] is.
+    pub fn subtree(&self, root: ExprId) -> Subtree {
+        let mut out = Subtree::default();
+        let mut stack = vec![Node::E(root.0)];
+        let mut kids = Vec::new();
+        while let Some(n) = stack.pop() {
+            match n {
+                Node::E(i) => out.exprs.push(ExprId(i)),
+                Node::S(i) => out.stmts.push(StmtId(i)),
+                Node::B(i) => out.blocks.push(BlockId(i)),
+                Node::T(_) => {}
+            }
+            self.children(n, &mut kids);
+            stack.extend(kids.iter().copied());
+        }
+        out
+    }
+
     /// The node of the greatest height, an expression, a block or a type counting one level
     /// each, and its height, when the tree is higher than `limit`: the node at exactly
     /// `limit + 1`, the innermost that goes too deep. Computed without recursion, since it
     /// guards every phase that recurses over the tree.
     pub fn too_deep(&self, limit: u32) -> Option<Span> {
-        #[derive(Clone, Copy)]
-        enum Node {
-            E(u32),
-            S(u32),
-            B(u32),
-            T(u32),
-        }
         let mut heights: [Vec<Option<u32>>; 4] = [
             vec![None; self.exprs.len()],
             vec![None; self.stmts.len()],
@@ -548,97 +670,6 @@ impl Tree {
             Node::S(i) => (1, i as usize),
             Node::B(i) => (2, i as usize),
             Node::T(i) => (3, i as usize),
-        };
-        let children = |n: Node, out: &mut Vec<Node>| {
-            out.clear();
-            match n {
-                Node::E(i) => match &self.exprs[i as usize].kind {
-                    ExprKind::Unary { operand, .. } => out.push(Node::E(operand.0)),
-                    ExprKind::Binary { lhs, rhs, .. } => {
-                        out.extend([Node::E(lhs.0), Node::E(rhs.0)]);
-                    }
-                    ExprKind::Index { base, index } => {
-                        out.extend([Node::E(base.0), Node::E(index.0)]);
-                    }
-                    ExprKind::Field { base, .. } => out.push(Node::E(base.0)),
-                    ExprKind::Call { args, .. } => {
-                        out.extend(args.iter().map(|a| Node::E(a.value.0)));
-                    }
-                    ExprKind::Construct { fields, .. } => {
-                        out.extend(fields.iter().map(|f| Node::E(f.value.0)));
-                    }
-                    ExprKind::Variant { payload, .. } => match payload {
-                        Payload::None => {}
-                        Payload::Named(fields) => {
-                            out.extend(fields.iter().map(|f| Node::E(f.value.0)));
-                        }
-                        Payload::Positional(args) => {
-                            out.extend(args.iter().map(|a| Node::E(a.value.0)));
-                        }
-                    },
-                    ExprKind::Match { scrutinee, arms } => {
-                        out.push(Node::E(scrutinee.0));
-                        out.extend(arms.iter().map(|a| match a.body {
-                            ArmBody::Expr(e) => Node::E(e.0),
-                            ArmBody::Block(b) => Node::B(b.0),
-                        }));
-                    }
-                    ExprKind::Array(items) => out.extend(items.iter().map(|e| Node::E(e.0))),
-                    ExprKind::Repeat { value, .. } => out.push(Node::E(value.0)),
-                    ExprKind::If {
-                        cond,
-                        then,
-                        otherwise,
-                    } => {
-                        out.extend([Node::E(cond.0), Node::B(then.0)]);
-                        match otherwise {
-                            Some(Else::Block(b)) => out.push(Node::B(b.0)),
-                            Some(Else::If(e)) => out.push(Node::E(e.0)),
-                            None => {}
-                        }
-                    }
-                    ExprKind::Int { .. }
-                    | ExprKind::Bool(_)
-                    | ExprKind::Name(_)
-                    | ExprKind::Todo(_)
-                    | ExprKind::Unreachable(_)
-                    | ExprKind::Error => {}
-                },
-                Node::S(i) => match &self.stmts[i as usize].kind {
-                    StmtKind::Binding { ty, init, .. } => {
-                        out.extend(ty.map(|t| Node::T(t.0)));
-                        out.push(Node::E(init.0));
-                    }
-                    StmtKind::Assign { place, value, .. } => {
-                        out.extend([Node::E(place.0), Node::E(value.0)]);
-                    }
-                    StmtKind::While {
-                        cond,
-                        invariants,
-                        decreases,
-                        body,
-                    } => {
-                        out.push(Node::E(cond.0));
-                        out.extend(invariants.iter().chain(decreases).map(|e| Node::E(e.0)));
-                        out.push(Node::B(body.0));
-                    }
-                    StmtKind::Guard { cond, otherwise } => {
-                        out.extend([Node::E(cond.0), Node::B(otherwise.0)]);
-                    }
-                    StmtKind::Return(Some(e)) | StmtKind::Discard(e) | StmtKind::Expr(e) => {
-                        out.push(Node::E(e.0));
-                    }
-                    _ => {}
-                },
-                Node::B(i) => {
-                    out.extend(self.blocks[i as usize].stmts.iter().map(|s| Node::S(s.0)))
-                }
-                Node::T(i) => {
-                    if let TypeKind::Array { elem, .. } = &self.types[i as usize].kind {
-                        out.push(Node::T(elem.0));
-                    }
-                }
-            }
         };
         let span = |n: Node| match n {
             Node::E(i) => self.exprs[i as usize].span,
@@ -665,7 +696,7 @@ impl Tree {
                 if heights[k][i].is_some() {
                     continue;
                 }
-                children(n, &mut kids);
+                self.children(n, &mut kids);
                 if expanded {
                     let below = kids
                         .iter()
@@ -1110,6 +1141,52 @@ mod tests {
     fn height(body: &str) -> u32 {
         let (_, f) = parsed(body);
         (0..).find(|&l| f.tree.too_deep(l).is_none()).unwrap()
+    }
+
+    /// A subtree holds every expression, statement and block under its root, through each kind
+    /// of node that holds others, and nothing beside it: the nodes whose spans lie within the
+    /// root's, since spans nest as the tree does.
+    #[test]
+    fn test_a_subtree_holds_every_node_under_its_root_and_none_beside_it() {
+        let body = "{\n  val a: i32 = x + 1\n  val b: i32 = if a > 0 {\n    val c: i32 = -a\n    c\n  } else if a < -5 {\n    [a; 2][0]\n  } else {\n    match a {\n      0 => f(a, P(q: a))\n      _ => {\n        a\n      }\n    }\n  }\n  b\n}";
+        let (src, f) = parsed(body);
+        let tree = &f.tree;
+        let root = (0..tree.exprs.len() as u32)
+            .map(super::ExprId)
+            .find(|&e| src[tree.expr(e).span.start..].starts_with("if a > 0"))
+            .unwrap();
+        let outer = tree.expr(root).span;
+        let inside = |sp: crate::Span| outer.start <= sp.start && sp.end <= outer.end;
+        let sub = tree.subtree(root);
+        let mut exprs: Vec<u32> = sub.exprs.iter().map(|e| e.0).collect();
+        exprs.sort();
+        let want: Vec<u32> = (0..tree.exprs.len() as u32)
+            .filter(|&e| inside(tree.exprs[e as usize].span))
+            .collect();
+        assert_eq!(exprs, want);
+        let mut stmts: Vec<u32> = sub.stmts.iter().map(|s| s.0).collect();
+        stmts.sort();
+        let want: Vec<u32> = (0..tree.stmts.len() as u32)
+            .filter(|&s| inside(tree.stmts[s as usize].span))
+            .collect();
+        assert_eq!(stmts, want);
+        let mut blocks: Vec<u32> = sub.blocks.iter().map(|b| b.0).collect();
+        blocks.sort();
+        let want: Vec<u32> = (0..tree.blocks.len() as u32)
+            .filter(|&b| inside(tree.blocks[b as usize].span))
+            .collect();
+        assert_eq!(blocks, want);
+        // The `if`'s two blocks, the last `else`'s and the arm's, with the statements in them:
+        // `val c`, `c`, the index, the `match` and the arm's `a`; and nothing of `val a`.
+        assert_eq!((sub.blocks.len(), sub.stmts.len()), (4, 5));
+        assert!(sub
+            .exprs
+            .iter()
+            .all(|&e| !src[tree.expr(e).span.start..].starts_with("x + 1")));
+        assert!(sub
+            .exprs
+            .iter()
+            .any(|&e| src[tree.expr(e).span.start..].starts_with("P(q: a)")));
     }
 
     /// Each kind of node counts what it holds, an expression, a block or a type one level and a

@@ -19,7 +19,15 @@ use std::sync::Arc;
 
 use crate::host::{self, Host};
 use crate::kinds::{kinds, Kind};
-use crate::{Int, Limits, Observer, Shown, Stop, Trap, TrapKind, Value};
+use crate::{Event, Int, Limits, Observer, Shown, Stop, Tracer, Trap, TrapKind, Value};
+
+/// A point of a function's walk that a traced run shows ([`Event`]).
+#[derive(Clone, Copy, Debug)]
+enum Point {
+    Before(StmtId),
+    End(BlockId),
+    Head(StmtId),
+}
 
 /// How control leaves a statement other than by its end.
 enum Exit {
@@ -232,6 +240,8 @@ pub(crate) struct Machine<'m> {
     host: Result<Host, &'static str>,
     /// What is shown each integer an expression gives, when a run is observed.
     seen: Option<Observer<'m>>,
+    /// What is shown each point of the run Tier 1 also analyses, when a run is traced.
+    trace: Option<Tracer<'m>>,
     /// The kinds of each function's expressions, derived at its first call.
     kinds: Vec<Option<Arc<[Kind]>>>,
 }
@@ -249,8 +259,42 @@ impl<'m> Machine<'m> {
             stack: 0,
             host: Host::start(0),
             seen,
+            trace: None,
             kinds: vec![None; module.functions.len()],
         }
+    }
+
+    /// The machine, showing `trace` each [`Event`] of its run.
+    pub(crate) fn traced(mut self, trace: Tracer<'m>) -> Machine<'m> {
+        self.trace = Some(trace);
+        self
+    }
+
+    /// Shows the tracer, when the run is traced, the point `at` of `frame`'s function, with
+    /// its bindings' values. Apart from the walk, so that a step's host frame holds none of it.
+    #[inline(never)]
+    fn point(&mut self, frame: &Frame<'m>, at: Point) {
+        let Some(trace) = self.trace.as_mut() else {
+            return;
+        };
+        let (function, slots) = (frame.index, frame.slots.as_slice());
+        trace(match at {
+            Point::Before(stmt) => Event::Before {
+                function,
+                stmt,
+                slots,
+            },
+            Point::End(block) => Event::End {
+                function,
+                block,
+                slots,
+            },
+            Point::Head(stmt) => Event::Head {
+                function,
+                stmt,
+                slots,
+            },
+        });
     }
 
     /// Calls the function `name` from outside the program.
@@ -609,12 +653,19 @@ impl<'m> Machine<'m> {
     /// [`Machine::block`], on this segment.
     fn block_here(&mut self, frame: &mut Frame<'m>, b: BlockId, ctx: Kind) -> Flow<Value> {
         match frame.f.syntax.tree.block(b).stmts.split_last() {
-            None => Ok(Value::Unit),
+            None => {
+                self.point(frame, Point::End(b));
+                Ok(Value::Unit)
+            }
             Some((&last, before)) => {
                 for &s in before {
+                    self.point(frame, Point::Before(s));
                     self.stmt(frame, s, Kind::Literal)?;
                 }
-                self.stmt(frame, last, ctx)
+                self.point(frame, Point::Before(last));
+                let v = self.stmt(frame, last, ctx)?;
+                self.point(frame, Point::End(b));
+                Ok(v)
             }
         }
     }
@@ -654,7 +705,7 @@ impl<'m> Machine<'m> {
                 invariants,
                 decreases,
                 body,
-            } => unit(self.while_loop(frame, *cond, invariants, decreases, *body)),
+            } => unit(self.while_loop(frame, (s, *cond), invariants, decreases, *body)),
             StmtKind::Guard { cond, otherwise } => unit(self.guard(frame, *cond, *otherwise)),
             StmtKind::Return(value) => self.leave(frame, s, *value),
             StmtKind::Break => Err(Box::new(Exit::Break)),
@@ -713,7 +764,7 @@ impl<'m> Machine<'m> {
     fn while_loop(
         &mut self,
         frame: &mut Frame<'m>,
-        cond: ExprId,
+        (s, cond): (StmtId, ExprId),
         invariants: &[ExprId],
         decreases: &[ExprId],
         body: BlockId,
@@ -727,6 +778,7 @@ impl<'m> Machine<'m> {
                     return trap(TrapKind::Invariant(tree.render_expr(i)), tree.expr(i).span);
                 }
             }
+            self.point(frame, Point::Head(s));
             if !self.cond(frame, cond)? {
                 return Ok(());
             }
@@ -1100,7 +1152,7 @@ impl<'m> Machine<'m> {
         member: bool,
     ) -> Flow<Value> {
         let v = self.value(frame, e, ctx, member);
-        if self.seen.is_some() {
+        if self.seen.is_some() || self.trace.is_some() {
             if let Ok(v) = &v {
                 self.observe(v, frame, e);
             }
@@ -1108,7 +1160,8 @@ impl<'m> Machine<'m> {
         v
     }
 
-    /// Shows an observer of the run each integer `v`, the value of `e`, holds.
+    /// Shows an observer of the run each integer `v`, the value of `e`, holds, and a tracer `v`
+    /// itself.
     #[inline(never)]
     fn observe(&mut self, v: &Value, frame: &Frame<'m>, e: ExprId) {
         if let Some(seen) = self.seen.as_mut() {
@@ -1118,6 +1171,13 @@ impl<'m> Machine<'m> {
                 Shown::Given,
                 &mut **seen,
             );
+        }
+        if let Some(trace) = self.trace.as_mut() {
+            trace(Event::Given {
+                function: frame.index,
+                expr: e,
+                value: v,
+            });
         }
     }
 

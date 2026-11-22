@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "../lib/commits.mjs";
 import { CARGO_HARMLESS, decide as rawBuildDecide, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../../tools/raw-build.mjs";
+import { blockString, bodyRefusal, decide as bodyDecide, graphqlTexts, requestPath } from "../../../tools/pr-body-guard.mjs";
 import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "../../../tools/store-apps.mjs";
 import { holds, jsImports, jsTokens } from "./js.mjs";
 import { GATE_FILES, QUICK_MAP, owns } from "./pins.mjs";
@@ -15,7 +16,7 @@ import { read, strings, tracked } from "./repo.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 4;
+const FLOOR = 6;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -443,4 +444,208 @@ check("tools/quick.mjs runs the program generator's own tests for a change to it
   assert.equal(generatorQuickProblems({ ...map, checks: map.checks.filter((c) => c !== generator) }, files, main).length, 1, "a map without the generator's check passed");
   assert.equal(generatorQuickProblems(map, files, main.replace(/^mod mir_run;$/m, "")).length, 1, "mir_run outside mn's binary passed");
   assert.deepEqual(generatorQuickProblems(withRun([...GENERATOR_RUN, "mir_run::"]), files, main), [], "one filter that every module's tests contain was refused");
+});
+
+check("the session's hook refuses to send a pull request's text that fails the Commits check's rules, or one it cannot read", () => {
+  // tools/pr-body-guard.mjs, which tools/push-guard.mjs runs before each shell command: a session
+  // sends a pull request's text with the App's client, from a JSON file, and the hook reads that file
+  // with requestProblems, as the Commits check reads the text on GitHub (the review of 5264a01: a
+  // body sent unchecked met the rules only in the required check).
+  const han = String.fromCodePoint(0x4e2d, 0x6587);
+  const files = new Map([
+    ["C:/s/good.json", JSON.stringify({ title: "T", body: "Not a fix: a brief." })],
+    ["C:/s/bare.json", JSON.stringify({ title: "T", body: "No declaration." })],
+    ["C:/s/title.json", JSON.stringify({ title: "Retitled" })],
+    ["C:/s/cjk.json", JSON.stringify({ title: `T ${han}` })],
+    ["C:/s/bom.json", `\uFEFF${JSON.stringify({ body: "Not a fix: a brief." })}`],
+    ["C:/s/broken.json", "{"],
+    ["/tmp/s/bare.json", JSON.stringify({ body: "No declaration." })],
+    // GraphQL's mutations of a pull request: the text in its variables, inline as a string or a block
+    // string, or in a variable the query names.
+    ["C:/s/gql-vars.json", JSON.stringify({ query: "mutation($input: UpdatePullRequestInput!) { updatePullRequest(input: $input) { pullRequest { id } } }", variables: { input: { pullRequestId: "PR_1", body: "No declaration." } } })],
+    ["C:/s/gql-inline.json", JSON.stringify({ query: 'mutation { updatePullRequest(input: {pullRequestId: "PR_1", body: "No declaration."}) { clientMutationId } }' })],
+    ["C:/s/gql-block.json", JSON.stringify({ query: 'mutation { updatePullRequest(input: {pullRequestId: "PR_1", body: """No declaration."""}) { clientMutationId } }' })],
+    ["C:/s/gql-named.json", JSON.stringify({ query: 'mutation($text: String!) { updatePullRequest(input: {pullRequestId: "PR_1", body: $text}) { clientMutationId } }', variables: { text: "No declaration." } })],
+    ["C:/s/gql-create.json", JSON.stringify({ query: 'mutation { createPullRequest(input: {repositoryId: "R_1", baseRefName: "main", headRefName: "x", title: "T"}) { clientMutationId } }' })],
+    ["C:/s/gql-cjk.json", JSON.stringify({ query: "mutation($input: UpdatePullRequestInput!) { updatePullRequest(input: $input) { clientMutationId } }", variables: { input: { pullRequestId: "PR_1", title: `T ${han}` } } })],
+    ["C:/s/gql-unread.json", JSON.stringify({ query: 'mutation { updatePullRequest(input: {pullRequestId: "PR_1", body: SOME_ENUM}) { clientMutationId } }' })],
+    ["C:/s/gql-good.json", JSON.stringify({ query: 'mutation($body: String!) { updatePullRequest(input: {pullRequestId: "PR_1", body: $body}) { pullRequest { body title } } }', variables: { body: "Not a fix: a brief." } })],
+    ["C:/s/gql-title.json", JSON.stringify({ query: 'mutation { updatePullRequest(input: {pullRequestId: "PR_1", title: "Retitled"}) { clientMutationId } }' })],
+    ["C:/s/gql-query.json", JSON.stringify({ query: "query { viewer { login } }", variables: { body: "No declaration." } })],
+    // The review of e95f0ad: variables sent as a JSON-encoded string, and an indented block string.
+    ["C:/s/gql-strvars.json", JSON.stringify({ query: 'mutation($b: String!) { updatePullRequest(input: {pullRequestId: "PR_1", body: $b}) { clientMutationId } }', variables: JSON.stringify({ b: "No declaration." }) })],
+    ["C:/s/gql-indented.json", JSON.stringify({ query: 'mutation {\n  updatePullRequest(input: {pullRequestId: "PR_1", body: """\n      Not a fix: a brief.\n\n      More of it.\n    """}) { clientMutationId }\n}' })],
+    ["C:/s/gql-indented-bare.json", JSON.stringify({ query: 'mutation {\n  updatePullRequest(input: {pullRequestId: "PR_1", body: """\n      No declaration.\n    """}) { clientMutationId }\n}' })],
+  ]);
+  const readFile = (f) => {
+    if (!files.has(f)) throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+    return files.get(f);
+  };
+  const on = (platform) => (command) => bodyRefusal(command, { readFile, platform });
+  const win = on("win32");
+  const client = "node C:/Users/x/tools/github-app/gh-app.mjs api";
+  // Each case: the command, and what the refusal must say, or null to let it through.
+  const cases = [
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/good.json`, null],
+    [`${client} POST repos/Menteion/Mente/pulls --data-file C:/s/good.json --out C:/s/created.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/bare.json`, /fails the Commits check's rules[\s\S]*- the pull request's body: it declares neither/],
+    [`${client} patch /repos/menteion/MENTE/pulls/214/ --data-file C:/s/bare.json`, /declares neither/],
+    [`cd C:/s && MSYS_NO_PATHCONV=1 node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file /c/s/bare.json`, /not a drive's: name it as C:\/\.\.\./],
+    [`bash -c "node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json"`, /declares neither/],
+    [`pwsh -Command node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, /declares neither/],
+    // An edit of the title alone is no edit of the body; a request that creates one is read whole.
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/title.json`, null],
+    [`${client} POST repos/Menteion/Mente/pulls --data-file C:/s/title.json`, /declares neither/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/cjk.json`, /title: CJK text/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/bom.json`, null],
+    // A file it cannot name, read or parse refuses.
+    [`S=C:/s; ${client} PATCH repos/Menteion/Mente/pulls/214 --data-file $S/bare.json`, /through the shell/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file ~/bare.json`, /through the shell/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file bare.json`, /not a drive.s/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:\\s\\bare.json`, /with a backslash/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/missing.json`, /cannot read \(ENOENT\)/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/broken.json`, /holds no JSON/],
+    [`node build.mjs > C:/s/good.json && ${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/good.json`, /elsewhere on the same command line/],
+    // The route as the client builds its URL and the API reads it (the review of 3fc8633).
+    [`${client} PATCH https://api.github.com/repos/Menteion/Mente/pulls/214 --data-file C:/s/bare.json`, /declares neither/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214?x=1 --data-file C:/s/bare.json`, /declares neither/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214#frag --data-file C:/s/bare.json`, /declares neither/],
+    [`${client} PATCH repos/Menteion/Mente/./pulls/214 --data-file C:/s/bare.json`, /declares neither/],
+    [`${client} PATCH repos/Menteion/x/../Mente/pulls/214 --data-file C:/s/bare.json`, /declares neither/],
+    [`${client} PATCH repositories/1234/pulls/214 --data-file C:/s/bare.json`, /declares neither/],
+    [`${client} POST repositories/1234/pulls --data-file C:/s/title.json`, /declares neither/],
+    [`${client} PATCH https://api.github.com.example.com/repos/Menteion/Mente/pulls/214 --data-file C:/s/bare.json`, null],
+    [`${client} PATCH C:/Program Files/Git/repos/Menteion/Mente/pulls/214 --data-file C:/s/bare.json`, null],
+    // A word the shell may change, in a call that could send text, refuses.
+    [`${client} PATCH $R --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api "$@" --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api $M repos/Menteion/Mente/pulls/1 --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api PATCH @route --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    ["node gh-app.mjs api PA`TCH repos/Menteion/Mente/pulls/1 --data-file C:/s/good.json", /names a word of its call through the shell/],
+    [`node gh-app.mjs --% api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 $D`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/%R% --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/good.json --out $S/out.json`, null],
+    [`${client} GET repos/Menteion/Mente/pulls/$N --out $S/out.json`, null],
+    // node's options, with a value or without, before the client or loading it.
+    [`node --import ./x.mjs C:/Users/x/tools/github-app/gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, /declares neither/],
+    [`node -r x gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, /declares neither/],
+    [`node --no-warnings gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, /declares neither/],
+    [`node --import ./gh-app.mjs main.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, /declares neither/],
+    // GraphQL's mutations of a pull request, read for every title and body they send.
+    [`${client} POST graphql --data-file C:/s/gql-vars.json`, /body: it declares neither/],
+    [`${client} POST https://api.github.com/graphql --data-file C:/s/gql-inline.json`, /body: it declares neither/],
+    [`${client} POST graphql --data-file C:/s/gql-block.json`, /body: it declares neither/],
+    [`${client} POST graphql --data-file C:/s/gql-named.json`, /body: it declares neither/],
+    [`${client} POST graphql --data-file C:/s/gql-create.json`, /body: it declares neither/],
+    [`${client} POST graphql --data-file C:/s/gql-cjk.json`, /title: CJK text/],
+    [`${client} POST graphql --data-file C:/s/gql-unread.json`, /names a pull request's body in a form this rule cannot read/],
+    [`${client} POST graphql --data-file C:/s/gql-good.json`, null],
+    [`${client} POST graphql --data-file C:/s/gql-title.json`, null],
+    [`${client} POST graphql --data-file C:/s/gql-query.json`, null],
+    [`${client} POST graphql --data-file C:/s/gql-strvars.json`, /sends its variables as no JSON object/],
+    [`${client} POST graphql --data-file C:/s/gql-indented.json`, null],
+    [`${client} POST graphql --data-file C:/s/gql-indented-bare.json`, /body: it declares neither/],
+    // xargs, a PowerShell subexpression and bash's brace expansion give the client words from
+    // elsewhere (the review of e95f0ad).
+    [`xargs node gh-app.mjs < C:/s/args.txt`, /through xargs/],
+    [`xargs -a C:/s/args.txt node C:/Users/x/tools/github-app/gh-app.mjs`, /through xargs/],
+    [`cat C:/s/args.txt | xargs -n 9 node gh-app.mjs api GET repos/Menteion/Mente/pulls/1`, /through xargs/],
+    [`git ls-files | xargs grep -l gh-app`, null],
+    [`ls | xargs -a C:/s/args.txt node other.mjs`, null],
+    [`node gh-app.mjs api PATCH (Get-Content C:/s/route.txt) --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs (Get-Content C:/s/args.txt)`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api PATCH repos/Menteion/Mente/{pulls,x}/1 --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`node gh-app.mjs api PATCH "repos/Menteion/Mente/pulls/(1)" --data-file C:/s/good.json`, /names a word of its call through the shell/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/good.json && (echo sent)`, null],
+    [`${client} GET repos/Menteion/Mente/pulls/214 --out C:/s/out.json; { echo read; }`, null],
+    // What sends no text of a pull request of this repository passes.
+    [`${client} GET repos/Menteion/Mente/pulls/214 --out C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214`, null],
+    [`${client} POST repos/Menteion/Mente/pulls/214/reviews --data-file C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/pulls --data-file C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Menteion/pulls/3 --data-file C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/issues/214 --data-file C:/s/bare.json`, null],
+    [`echo node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, null],
+    [`echo gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, null],
+    ["git status", null],
+  ];
+  for (const [command, says] of cases) {
+    const why = win(command);
+    if (says === null) assert.equal(why, null, `${command} was refused: ${why}`);
+    else assert.match(why ?? "", says, `${command}: ${why}`);
+  }
+  // The path the client requests, as the API reads it.
+  assert.equal(requestPath("repos/Menteion/Mente/pulls/214"), "/repos/menteion/mente/pulls/214");
+  assert.equal(requestPath("/repos/Menteion/Mente/pulls/214/"), "/repos/menteion/mente/pulls/214/");
+  assert.equal(requestPath("https://api.github.com/repos/Menteion/Mente/pulls/214?x=1#y"), "/repos/menteion/mente/pulls/214");
+  assert.equal(requestPath("repos/Menteion/Mente/pull%73/214"), "/repos/menteion/mente/pulls/214", "an escape in the route was read as written");
+  assert.equal(requestPath("repos/Menteion/Mente/pull%2573/214"), "/repos/menteion/mente/pulls/214", "an escape of an escape was read as written");
+  assert.equal(requestPath("repos/Menteion/x/%2e%2e/Mente//pulls/214"), "/repos/menteion/mente/pulls/214");
+  assert.equal(requestPath("repos/Menteion/x%2F..%2FMente/pulls/214"), "/repos/menteion/mente/pulls/214", "a slash escaped in a segment was read as written");
+  assert.equal(requestPath("%2F%2Frepos/Menteion/Mente/pulls/214"), "/repos/menteion/mente/pulls/214", "escaped slashes before the path were read as a host");
+  assert.equal(requestPath("https://api.github.com.example.com/repos/Menteion/Mente/pulls/214"), null);
+  assert.equal(requestPath("http://api.github.com/repos/Menteion/Mente/pulls/214"), "/http:/api.github.com/repos/menteion/mente/pulls/214");
+  assert.equal(requestPath("C:/Program Files/Git/repos"), null);
+  // GraphQL: nothing of a request that names no mutation of a pull request.
+  assert.deepEqual(graphqlTexts({ query: "query { viewer { login } }", variables: { body: "x" } }), { found: [] });
+  assert.deepEqual(graphqlTexts({ query: 'mutation { updatePullRequest(input: {body: null, title: "a\\"b"}) { id } }' }), { creates: false, found: [["body", null], ["title", 'a"b']] });
+  assert.deepEqual(graphqlTexts({ query: "mutation { updatePullRequest(input: {body: $missing}) { id } }" }), { creates: false, found: [] });
+  assert.match(graphqlTexts({ query: "mutation($b: X) { updatePullRequest(input: {body: $b}) { id } }", variables: { b: { nested: "x" } } }).why ?? "", /cannot read/);
+  assert.match(graphqlTexts({ query: 'mutation { updatePullRequest(input: {body: """unclosed}) { id } }' }).why ?? "", /cannot read/);
+  assert.match(graphqlTexts({ query: 'mutation { updatePullRequest(input: {body: "unclosed}) { id } }' }).why ?? "", /cannot read/);
+  for (const variables of ["{}", [], 7, true]) assert.match(graphqlTexts({ query: "mutation { updatePullRequest(input: {}) { id } }", variables }).why ?? "", /variables as no JSON object/, JSON.stringify(variables));
+  assert.deepEqual(graphqlTexts({ query: "mutation { updatePullRequest(input: {}) { id } }", variables: null }), { creates: false, found: [] });
+  // A block string's value, as GraphQL gives it: the common indent of its lines after the first
+  // removed, its leading and trailing blank lines dropped, `\"""` unescaped.
+  assert.equal(blockString("\n    Not a fix: a brief.\n\n      Indented more.\n    "), "Not a fix: a brief.\n\n  Indented more.");
+  assert.equal(blockString("First line\n    second\n  third"), "First line\n  second\nthird");
+  assert.equal(blockString('  \r\n\tA \\""" quote.\r\n\t'), 'A """ quote.');
+  assert.equal(blockString("   "), "");
+  // On Linux, an absolute path is read as written, and a relative one refuses.
+  assert.match(on("linux")(`${client} PATCH repos/Menteion/Mente/pulls/1 --data-file /tmp/s/bare.json`) ?? "", /declares neither/);
+  assert.match(on("linux")(`${client} PATCH repos/Menteion/Mente/pulls/1 --data-file s/bare.json`) ?? "", /relative path/);
+  // The hook's answer: status 2 with the words, 0 to let it run; an event it cannot read refuses.
+  const event = (command) => JSON.stringify({ tool_input: { command } });
+  assert.equal(bodyDecide(event(cases[2][0]), { readFile, platform: "win32" }).status, 2);
+  assert.match(bodyDecide(event(cases[2][0]), { readFile, platform: "win32" }).words, /^the pull request body guard refused it: /);
+  assert.deepEqual(bodyDecide(event("git status"), { readFile, platform: "win32" }), { status: 0, words: "" });
+  assert.equal(bodyDecide("{", { readFile }).status, 2);
+  assert.equal(bodyDecide(JSON.stringify({ tool_input: {} }), { readFile }).status, 2);
+  assert.equal(bodyDecide(JSON.stringify({ tool_input: { ws: "wss://x" } }), { readFile }).status, 0);
+  // No text of the body reaches the words: only the rules' messages, which echo none.
+  assert.doesNotMatch(win(`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/bare.json`), /No declaration\./);
+});
+
+/// What makes two checks of the quick map (`map`, as parsed) one: the same name, or the same
+/// command. A merge that kept both sides of a check, as two pull requests that each add the same
+/// one leave it to, would run its command twice, or show two lines under one name, and nothing
+/// else would say so.
+export function duplicateQuickProblems(map) {
+  const problems = [];
+  const seen = new Map();
+  for (const c of map.checks ?? []) {
+    for (const [what, key] of [
+      ["name", `name ${JSON.stringify(c.name)}`],
+      ["command", `command ${JSON.stringify(Array.isArray(c.run) ? c.run.join(" ") : c.run)}`],
+    ]) {
+      if (seen.has(key)) problems.push(`${QUICK_MAP} has two checks of the ${what} ${key.slice(what.length + 1)}`);
+      else seen.set(key, true);
+    }
+  }
+  return problems;
+}
+
+check("no two quick checks share a name or a command", () => {
+  // Pull requests 214 and 215 each added the check "records", byte for byte, so that whichever
+  // merged second would resolve to one entry; a resolution that kept both would have run the
+  // records' tests twice before every push, unnoticed.
+  const map = JSON.parse(read(QUICK_MAP));
+  assert.deepEqual(duplicateQuickProblems(map), []);
+  // Planted: a check kept twice, one renamed beside its twin, and two of one name and other
+  // commands.
+  const first = map.checks[0];
+  assert.equal(duplicateQuickProblems({ ...map, checks: [...map.checks, first] }).length, 2, "a check kept twice passed");
+  assert.equal(duplicateQuickProblems({ ...map, checks: [...map.checks, { ...first, name: `${first.name} again` }] }).length, 1, "one command under two names passed");
+  assert.equal(duplicateQuickProblems({ ...map, checks: [...map.checks, { ...first, run: ["true"] }] }).length, 1, "one name over two commands passed");
 });
