@@ -90,7 +90,7 @@ const refused = (r, words) => {
 const sent = (r) => assert.equal(r.status, 0, r.words);
 
 test("a push sends only commits whose tree quick last passed in the checkout", () => {
-  withRemote(({ work, git, tree, pass, push, commit, remoteHas }) => {
+  withRemote(({ work, run, git, tree, pass, push, commit, remoteHas }) => {
     commit(work, "b.md", "b\n");
     refused(push(work, "origin", "main"), new RegExp(`no tree has passed the quick checks.*run ${QUICK}`));
     assert.notEqual(remoteHas("main"), git(work, "rev-parse", "HEAD"), "nothing reached the remote");
@@ -100,6 +100,10 @@ test("a push sends only commits whose tree quick last passed in the checkout", (
     // A commit after the pass makes the record stale.
     commit(work, "c.md", "c\n");
     refused(push(work, "origin", "main"), /not the tree the quick checks last passed/);
+    // A push by --git-dir from a directory with no hooks is held by the same hook and record.
+    fs.mkdirSync(path.join(work, "sub"));
+    const elsewhere = run(path.join(work, "sub"), ["--git-dir=../.git", "push", "-q", "origin", "main"]);
+    refused({ status: elsewhere.status, words: elsewhere.stderr }, /not the tree the quick checks last passed/);
     // A record that holds no tree refuses.
     fs.writeFileSync(path.resolve(work, git(work, "rev-parse", "--git-path", PASSED)), "not a tree\n");
     refused(push(work, "origin", "main"), /holds no tree id/);
@@ -197,6 +201,23 @@ test("the settings refuse the ways around the hook, and only those", () => {
     "GIT_DIR=elsewhere git push",
     "env GIT_CONFIG_COUNT=1 git push",
     "$env:GIT_DIR='x'; git push",
+    "Set-Item env:GIT_CONFIG_COUNT 1; git push",
+    // The third review's: a valued option's own value, writes of core.hooksPath, included
+    // configuration, an alias that pushes, plumbing, and a quoted program name.
+    "git --work-tree . push --no-verify",
+    "git --namespace x push --no-verify",
+    "git --git-dir .git -c core.hooksPath=/x push",
+    "git config core.hooksPath /x",
+    "git config --unset core.hooksPath",
+    "git config --file .git/config core.hooksPath /x",
+    "git config set core.hooksPath /x",
+    "git config unset core.hooksPath",
+    'git -c alias.p="push --force" p',
+    "git -c include.path=/x push",
+    "git -c includeIf.gitdir:x.path=/y status",
+    "git send-pack origin",
+    "g''it push --no-verify",
+    "git commit --no-verify -m x",
   ]) {
     for (const tool of ["Bash", "PowerShell", "Monitor", "mcp__terminal__run_in_terminal"]) {
       const r = guard(command, tool);
@@ -204,7 +225,7 @@ test("the settings refuse the ways around the hook, and only those", () => {
       assert.match(r.words, /^the push guard refused it: /);
     }
   }
-  for (const command of ["git push", "git push -u origin main", "git push -n origin main", 'git commit -m "--no-verify later"', "git status", "echo push", "git -c user.name=x push"]) {
+  for (const command of ["git push", "git push -u origin main", "git push -n origin main", "git status", "echo push", "git -c user.name=x push", "git config --get core.hooksPath", "git config get core.hooksPath", "git config user.name x", "git -c alias.st=status st", "git --git-dir .git status"]) {
     assert.deepEqual(guard(command), { status: 0, words: "" }, command);
   }
   const ws = spawnSync(process.execPath, [GUARD], { input: JSON.stringify({ tool_name: "Monitor", tool_input: { ws: { url: "wss://example.invalid" } } }), encoding: "utf8" });

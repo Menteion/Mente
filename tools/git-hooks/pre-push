@@ -1,5 +1,6 @@
 #!/bin/sh
-# git's pre-push hook of this repository, which core.hooksPath names (tools/local-limits.mjs,
-# HOOKS_PATH): it refuses a push of any commit whose tree tools/quick.mjs has not passed in this
-# checkout (tools/push.mjs decides).
+# git's pre-push hook of this repository, which core.hooksPath names as the main checkout's
+# tools/git-hooks, so that every checkout runs this one (tools/local-limits.mjs, hooksDir): it refuses
+# a push of any commit whose tree tools/quick.mjs has not passed in the checkout that pushes
+# (tools/push.mjs decides).
 exec node "$(dirname "$0")/pre-push.mjs" "$@"

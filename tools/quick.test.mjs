@@ -84,7 +84,11 @@ function withRepository(body) {
     fs.mkdirSync(work);
     const git = (...args) => execFileSync("git", args, { cwd: work, env, encoding: "utf8" }).trim();
     git("init", "-q", "-b", "main");
-    git("config", "core.hooksPath", "tools/git-hooks");
+    // The main checkout's hooks, by their absolute path, as quick.mjs requires.
+    const hooks = path.join(work, "tools", "git-hooks").replace(/\\/g, "/");
+    fs.mkdirSync(hooks, { recursive: true });
+    fs.writeFileSync(path.join(hooks, "pre-push"), "#!/bin/sh\nexit 0\n");
+    git("config", "core.hooksPath", hooks);
     fs.writeFileSync(path.join(work, "a.md"), "a\n");
     fs.writeFileSync(path.join(work, ".gitignore"), "out/\n");
     fs.mkdirSync(path.join(work, "sub"));
@@ -102,7 +106,7 @@ function withRepository(body) {
       const file = path.join(work, git("rev-parse", "--git-path", "quick-passed"));
       return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim() : null;
     };
-    body({ work, git, quick, passed });
+    body({ dir, work, git, quick, passed, hooks });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -220,19 +224,50 @@ test("a new file staged executable is recorded as a commit takes it, so the reco
   });
 });
 
-test("a run refuses to start until core.hooksPath names the repository's hooks, and says the command to run", (t) => {
+test("a run refuses to start until core.hooksPath names the main checkout's hooks by their absolute path, holding the hook, and says what to do", (t) => {
   withRepository((r) => {
-    r.git("config", "--unset", "core.hooksPath");
-    const run = r.quick();
-    if (noRunner(run)) return t.skip("cargo's runner is not the capped one here, so quick.mjs runs no check");
-    assert.equal(run.status, 2, `${run.stdout}\n${run.stderr}`);
-    assert.match(run.stderr, /core\.hooksPath is not set/);
-    assert.match(run.stderr, /git config core\.hooksPath tools\/git-hooks/);
-    assert.doesNotMatch(run.stdout, /\n== /, "no check ran");
-    r.git("config", "core.hooksPath", "elsewhere");
-    const other = r.quick();
-    assert.equal(other.status, 2);
-    assert.match(other.stderr, /core\.hooksPath is "elsewhere"/);
+    const first = r.quick();
+    if (noRunner(first)) return t.skip("cargo's runner is not the capped one here, so quick.mjs runs no check");
+    assert.equal(first.status, 0, `${first.stdout}\n${first.stderr}`);
+    // A worktree runs the main checkout's hooks, by the main checkout's path, not its own.
+    const other = path.join(r.dir, "other");
+    r.git("worktree", "add", "-q", other, "-b", "other");
+    const inOther = r.quick([], "pass", other);
+    assert.equal(inOther.status, 0, `a worktree runs the main checkout's hooks: ${inOther.stdout}
+${inOther.stderr}`);
+    for (const [value, words] of [
+      [null, /core\.hooksPath is not set/],
+      ["tools/git-hooks", /core\.hooksPath is "tools\/git-hooks", not the main checkout's hooks/],
+      [path.join(other, "tools", "git-hooks").replace(/\\/g, "/"), /not the main checkout's hooks/],
+    ]) {
+      if (value === null) r.git("config", "--unset", "core.hooksPath");
+      else r.git("config", "core.hooksPath", value);
+      const run = r.quick();
+      assert.equal(run.status, 2, `${value}: ${run.stdout}\n${run.stderr}`);
+      assert.match(run.stderr, words);
+      assert.ok(run.stderr.includes(`git config core.hooksPath ${r.hooks}`), run.stderr);
+      assert.doesNotMatch(run.stdout, /\n== /, "no check ran");
+    }
+    r.git("config", "core.hooksPath", r.hooks);
+    fs.rmSync(path.join(r.hooks, "pre-push"));
+    const empty = r.quick();
+    assert.equal(empty.status, 2);
+    assert.match(empty.stderr, /holds no pre-push hook/);
+  });
+});
+
+test("a file git does not compare is held to the tree whatever its name, one beyond ASCII among them", () => {
+  withRepository((r) => {
+    fs.writeFileSync(path.join(r.work, "caf\u00e9.md"), "c\n");
+    r.git("add", "caf\u00e9.md");
+    r.git("commit", "-q", "-m", "a name beyond ASCII");
+    r.git("update-index", "--assume-unchanged", "caf\u00e9.md");
+    fs.writeFileSync(path.join(r.work, "caf\u00e9.md"), "c, changed\n");
+    const listing = r.quick(["--list"]);
+    assert.equal(listing.status, 0, listing.stderr);
+    const lines = report(listing.stdout);
+    assert.match(lines[0], /^quick: the working tree differs from HEAD, in 0 entries/);
+    assert.ok(lines.includes("  h caf\u00e9.md"), lines.join("\n"));
   });
 });
 

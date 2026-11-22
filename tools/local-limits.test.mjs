@@ -13,7 +13,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -209,11 +209,30 @@ test("when a parent that is not node ends, the wrapper ends the command too", { 
   assert.ok(gone, "the command outlived the PowerShell that started its wrapper by 10 s");
 });
 
+/**
+ * A repository of its own for a tool's run, its core.hooksPath naming its own hooks, which hold a
+ * pre-push hook, as the tools require (local-limits.mjs, requireHooks): a proof of cargo's runner
+ * then does not depend on the hooks of this checkout's main one. It stands under this checkout's target
+ * directory, as the proof stood in the checkout itself: under the temporary directory, within the
+ * user's home, cargo would read the home's own configuration, its runner among it.
+ */
+function hooked() {
+  fs.mkdirSync(path.join(ROOT, "target"), { recursive: true });
+  const dir = fs.mkdtempSync(path.join(ROOT, "target", "hooked-"));
+  execFileSync("git", ["init", "-q", dir]);
+  const hooks = path.join(dir, "tools", "git-hooks");
+  fs.mkdirSync(hooks, { recursive: true });
+  fs.writeFileSync(path.join(hooks, "pre-push"), "#!/bin/sh\nexit 0\n");
+  execFileSync("git", ["-C", dir, "config", "core.hooksPath", hooks.replace(/\\/g, "/")]);
+  return dir;
+}
+
 test("the tools refuse to run until cargo's runner is the capped one, and name the lines to add", { skip }, () => {
   // The review of round 4: CLAUDE.md called cargo's runner the wall, which nothing set or checked.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cargo-home-"));
+  const cwd = hooked();
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER"));
-  const cargo = () => spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home }, encoding: "utf8", timeout: 60000 });
+  const cargo = () => spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd, env: { ...env, CARGO_HOME: home }, encoding: "utf8", timeout: 60000 });
   const none = cargo();
   assert.equal(none.status, 2, `${none.stdout}${none.stderr}`);
   assert.match(none.stderr, /\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*\/tools\/capped\.mjs", "--mente-only", "--"\]/);
@@ -237,7 +256,7 @@ test("the tools refuse to run until cargo's runner is the capped one, and name t
   // runner by it is refused whatever the file says, as cargo would run that one.
   const variable = (value, config) => {
     fs.writeFileSync(path.join(home, "config.toml"), config);
-    return spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home, CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: value }, encoding: "utf8", timeout: 60000 });
+    return spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd, env: { ...env, CARGO_HOME: home, CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: value }, encoding: "utf8", timeout: 60000 });
   };
   const capped = `node ${path.join(HERE, "capped.mjs").replace(/\\/g, "/")} --mente-only --`;
   assert.equal(variable(capped, "").status, 0, "the capped runner set by CARGO_TARGET_..._RUNNER was refused");

@@ -36,26 +36,50 @@ export const BUILD = Object.freeze({ processGB: 8, jobGB: 16, minutes: 30 });
 /// the last passing run of tools/quick.mjs read, which the push guard (tools/push.mjs) compares
 /// with the tree of each commit a push would send.
 export const PASSED = "quick-passed";
-/// The directory core.hooksPath names in this repository, relative to each checkout's root: git's
-/// own hooks of the repository, the pre-push hook among them (tools/git-hooks/pre-push), which
-/// refuses a push of a tree the quick checks have not passed.
-export const HOOKS_PATH = "tools/git-hooks";
+/**
+ * The directory core.hooksPath is to name for the repository of `cwd`: the main checkout's
+ * tools/git-hooks, as an absolute path. A relative one is read against the work tree a push runs
+ * in, so a worktree of a branch from before the hook, or a push by --git-dir, ran none (the third
+ * review of #203); every checkout runs the main checkout's hook, whatever branch it holds, as
+ * cargo's runner is the main checkout's tools/capped.mjs (runnerLine).
+ */
+export function hooksDir(cwd = process.cwd()) {
+  const top = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  return path.join(mainCheckout(top), "tools", "git-hooks");
+}
 
 /**
- * Whether the repository of `cwd` runs its own git hooks: core.hooksPath is HOOKS_PATH. If not,
- * says the one command to run, as requireRunner does for cargo's runner (Norman, 2026-11-22), and
- * returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run nothing until it is.
+ * Whether the repository of `cwd` runs its own git hooks: core.hooksPath names hooksDir, which
+ * holds the pre-push hook (tools/git-hooks/pre-push), refusing a push of a tree the quick checks
+ * have not passed. If not, says what to do, as requireRunner does for cargo's runner (Norman,
+ * 2026-11-22), and returns false, so that tools/quick.mjs, cargo.mjs and mn.mjs run nothing until it
+ * does. The settings' guard refuses a session's write of core.hooksPath (tools/push.mjs), so the
+ * command is Norman's to run.
  */
 export function requireHooks({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
+  let want;
+  try {
+    want = hooksDir(cwd);
+  } catch (e) {
+    say(`local-limits: git could not name the repository of ${cwd}, so whether its pre-push hook runs is unknown, and nothing here runs: ${String(e.stderr || e.message).trim()}`);
+    return false;
+  }
   let value = "";
   try {
     value = execFileSync("git", ["config", "--get", "core.hooksPath"], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
     value = "";
   }
-  if (value === HOOKS_PATH) return true;
-  say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, so git's pre-push hook of this repository (${HOOKS_PATH}/pre-push), which refuses a push of a tree the quick checks have not passed, does not run, and nothing here runs until it does. Run this once:\n\ngit config core.hooksPath ${HOOKS_PATH}\n`);
-  return false;
+  const fold = (p) => (WINDOWS ? path.resolve(p).toLowerCase() : path.resolve(p));
+  if (value === "" || !path.isAbsolute(value) || fold(value) !== fold(want)) {
+    say(`local-limits: core.hooksPath is ${value ? JSON.stringify(value) : "not set"}, not the main checkout's hooks, so git's pre-push hook, which refuses a push of a tree the quick checks have not passed, does not run for every checkout, and nothing here runs until it does. Norman runs, once, in his own terminal:\n\ngit config core.hooksPath ${want.replace(/\\/g, "/")}\n`);
+    return false;
+  }
+  if (!fs.existsSync(path.join(want, "pre-push"))) {
+    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook: the main checkout is on a commit from before the hook (#203). Bring it up to main; nothing here runs until then.`);
+    return false;
+  }
+  return true;
 }
 export const PROBE = Object.freeze({ processGB: 4, jobGB: 8, minutes: 5 });
 /// libuv's UV_FS_O_EXLOCK: Windows opens the file sharing it with no other handle.

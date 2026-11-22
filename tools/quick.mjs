@@ -34,9 +34,19 @@ import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "n
 import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";
 import { PASSED, requireHooks } from "./local-limits.mjs";
 
-/** git's output, line by line, with `env` added to its environment. */
-function git(args, env = {}) {
-  return execFileSync("git", args, { encoding: "utf8", env: { ...process.env, ...env } }).split(/\r?\n/).filter(Boolean);
+/**
+ * git's output, line by line, with `env` added to its environment and `input` on its standard
+ * input; or, with `nul`, its entries ended by NUL, as `-z` writes them, names beyond ASCII as they
+ * are and never quoted.
+ */
+function git(args, env = {}, { input, nul = false } = {}) {
+  const out = execFileSync("git", args, { encoding: "utf8", env: { ...process.env, ...env }, input });
+  return out.split(nul ? "\0" : /\r?\n/).filter(Boolean);
+}
+
+/** The files the index of `env` marks assume-unchanged (a small letter) or skip-worktree (S): `ls-files -v`'s entries. */
+function marked(env = {}) {
+  return git(["ls-files", "-v", "-z"], env, { nul: true }).filter((entry) => /^([a-z]|S) /.test(entry));
 }
 
 /**
@@ -53,8 +63,11 @@ function workingTree() {
   try {
     if (existsSync(own)) copyFileSync(own, index);
     else git(["read-tree", "HEAD"], { GIT_INDEX_FILE: index });
-    const marked = git(["ls-files", "-v"], { GIT_INDEX_FILE: index }).filter((line) => /^([a-z]|S) /.test(line)).map((line) => line.slice(2));
-    if (marked.length) git(["update-index", "--no-assume-unchanged", "--no-skip-worktree", "--", ...marked], { GIT_INDEX_FILE: index });
+    // Read and written NUL-ended: a name beyond ASCII, which `ls-files -v` alone quotes, would
+    // reach update-index quoted and keep its mark (the third review of #203); and no command line
+    // grows with the names.
+    const names = marked({ GIT_INDEX_FILE: index }).map((entry) => entry.slice(2));
+    if (names.length) git(["update-index", "--no-assume-unchanged", "--no-skip-worktree", "-z", "--stdin"], { GIT_INDEX_FILE: index }, { input: `${names.join("\0")}\0` });
     git(["add", "--all"], { GIT_INDEX_FILE: index });
     return git(["write-tree"], { GIT_INDEX_FILE: index })[0];
   } finally {
@@ -84,7 +97,7 @@ function reportTree(before, listing = false) {
     return true;
   }
   const status = git(["status", "--porcelain", "--untracked-files=all"]);
-  const hidden = git(["ls-files", "-v"]).filter((line) => /^([a-z]|S) /.test(line));
+  const hidden = marked();
   if (!still) {
     console.log("\nquick: the working tree changed while the checks ran, or HEAD moved, so this run passed no one tree; run it again on the tree to push. What differs from HEAD now, as git's short status writes it:");
   } else {

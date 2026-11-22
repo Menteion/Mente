@@ -82,8 +82,16 @@ const DEPTH = 4;
 const KEYWORDS = new Set(["then", "do", "else", "elif", "if", "while", "until", "!", "time"]);
 const PREFIXES = new Set(["command", "exec", "nohup", "sudo", "xargs"]);
 const programOf = (value) => path.win32.basename(value).toLowerCase().replace(/\.exe$/, "");
-/** A git option's value that sets core.hooksPath, the key in any case. */
+/** A configuration key, in any case, whose setting turns the pre-push hook off or away. */
 const HOOKS_KEY = /^core\.hookspath(=|$)/i;
+/** A key whose setting brings in configuration from elsewhere, which may set the hooks' path. */
+const INCLUDE_KEY = /^include(if\.[^=]*)?\.path(=|$)/i;
+/** A key that defines an alias. */
+const ALIAS_KEY = /^alias\./i;
+/** git's options before its command that take the next word as their value. */
+const GIT_VALUED = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source", "--list-cmds", "--exec-path"]);
+/** `git config`'s words that only read. */
+const CONFIG_READS = new Set(["--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "get", "list"]);
 
 /** Each git command of `text`: its words from the program on, recursing into shells it starts. */
 function gitCommands(text, depth = 0) {
@@ -128,20 +136,36 @@ function gitCommands(text, depth = 0) {
   return found;
 }
 
-/** Why the rule refuses `command`, a way around the pre-push hook, or null. */
+/**
+ * Why the rule refuses `command`, a way around the pre-push hook, or null. It reads the command's
+ * words as the shell would (raw-build.mjs, simpleCommands), and is a deterrent, not the guard: the
+ * hook, at the main checkout's absolute path, guards the slip, and CI gates whatever is pushed. Its
+ * known limits: git's plumbing but send-pack, a libgit2 client, the GitHub API, a script or alias
+ * defined elsewhere, and a GIT_ variable set by an earlier command of the session's shell.
+ */
 export function bypass(command) {
+  const hook = "git's pre-push hook (tools/git-hooks/pre-push)";
   for (const { found, words, before } of gitCommands(command)) {
+    const verify = words.find((w) => /^--no-ve/.test(w));
+    if (verify) return `"${found}" passes ${verify}, which skips ${hook}`;
     let j = 1;
     while (j < words.length && words[j].startsWith("-")) {
       const a = words[j];
-      const value = a === "-c" || a === "--config-env" ? words[j + 1] ?? "" : a.startsWith("--config-env=") ? a.slice("--config-env=".length) : a.startsWith("-c") && a.length > 2 ? a.slice(2) : null;
-      if (value !== null && HOOKS_KEY.test(value)) return `"${found}" sets core.hooksPath for itself, which turns git's pre-push hook off (tools/git-hooks/pre-push)`;
-      j += a === "-c" || a === "--config-env" || a === "-C" ? 2 : 1;
+      const value = a === "-c" || a === "--config-env" ? words[j + 1] ?? "" : a.startsWith("--config-env=") ? a.slice("--config-env=".length) : /^-c./.test(a) ? a.slice(2) : null;
+      if (value !== null) {
+        if (HOOKS_KEY.test(value)) return `"${found}" sets core.hooksPath for itself, which turns ${hook} off`;
+        if (INCLUDE_KEY.test(value)) return `"${found}" brings in configuration from elsewhere with -c, which may move ${hook} away`;
+        if (ALIAS_KEY.test(value) && /push/i.test(value)) return `"${found}" defines an alias that pushes, out of sight of this rule`;
+      }
+      j += GIT_VALUED.has(a) ? 2 : 1;
     }
-    if (words[j] !== "push") continue;
-    const verify = words.slice(j + 1).find((w) => /^--no-ve/.test(w));
-    if (verify) return `"${found}" passes ${verify}, which skips git's pre-push hook (tools/git-hooks/pre-push)`;
-    if (before.some((w) => /^GIT_[A-Za-z0-9_]*=/i.test(w)) || /\bGIT_[A-Za-z0-9_]*=|\$env:GIT_/i.test(command)) return `"${found}" runs on a line that sets a GIT_ variable, which can move git, and its hooks, elsewhere; push on a line of its own`;
+    const sub = words[j];
+    if (sub === "send-pack") return `"${found}" pushes through git's plumbing, which runs no pre-push hook`;
+    if (sub === "config" && words.slice(j + 1).some((w) => HOOKS_KEY.test(w)) && !words.slice(j + 1).some((w) => CONFIG_READS.has(w))) {
+      return `"${found}" writes core.hooksPath, which names ${hook}; that is Norman's to set, in his own terminal (tools/local-limits.mjs, requireHooks)`;
+    }
+    if (sub !== "push") continue;
+    if (before.some((w) => /^GIT_[A-Za-z0-9_]*=/i.test(w)) || /\bGIT_[A-Za-z0-9_]*=|(^|[^A-Za-z0-9_])env:GIT_/i.test(command)) return `"${found}" runs on a line that sets a GIT_ variable, which can move git, and its hooks, elsewhere; push on a line of its own`;
   }
   return null;
 }
@@ -161,7 +185,6 @@ export function decide(input) {
   const command = event?.tool_input?.command;
   if (command === undefined && event?.tool_input?.ws !== undefined) return { status: 0, words: "" };
   if (typeof command !== "string") return { status: 2, words: "the push guard found no command in its event, so the command did not run" };
-  if (!/git/i.test(command)) return { status: 0, words: "" };
   const why = bypass(command);
   return why ? { status: 2, words: `the push guard refused it: ${why}.` } : { status: 0, words: "" };
 }
