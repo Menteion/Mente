@@ -1359,6 +1359,8 @@ struct Dominators {
     /// The places, in the order a walk of the tree enters the blocks, of each block and of the
     /// blocks it dominates; none for a block no path reaches.
     span: Vec<Option<Range<usize>>>,
+    /// The blocks each block's terminator may go to, in its order.
+    next: Vec<Vec<usize>>,
 }
 
 impl Dominators {
@@ -1452,7 +1454,7 @@ impl Dominators {
                 }
             }
         }
-        Dominators { span }
+        Dominators { span, next }
     }
 
     /// Whether a path from the entry reaches block `b`.
@@ -1478,7 +1480,8 @@ impl Dominators {
 /// dominates its block, and an operand of a terminator likewise. So nothing reads a value before
 /// an instruction gives it, and the order of a call's count is held by its values: a count
 /// stands after the arguments it takes, and before the narrowings, checks and call that take it
-/// ([`Op::Enter`]). A block no path reaches is not checked.
+/// ([`Op::Enter`]). Every cycle has a head that dominates it, and no address passes that head
+/// into the next round. A block no path reaches is not checked.
 fn verify_order(f: &Function) -> Result<(), String> {
     // Where each value is defined: its block, and its place there, 0 for a parameter.
     let mut defined: Vec<Option<(usize, usize)>> = vec![None; f.ops.len()];
@@ -1528,6 +1531,32 @@ fn verify_order(f: &Function) -> Result<(), String> {
                 "block {}: its terminator's operand v{} is not defined before it on every path",
                 b, a.0
             ));
+        }
+    }
+    // Every cycle has a head that dominates it, the block every round passes: in a walk from the
+    // entry, each jump to a block the walk is still inside, which closes a cycle, goes to a block
+    // that dominates the jump's own. A cycle none of whose blocks dominates the rest has no such
+    // head, so no back-edge, and the rule below would not see it as a loop.
+    let mut inside = vec![false; f.blocks.len()];
+    let mut seen = vec![false; f.blocks.len()];
+    let mut walk: Vec<(usize, usize)> = vec![(0, 0)];
+    (inside[0], seen[0]) = (true, true);
+    while let Some((b, k)) = walk.pop() {
+        let Some(&t) = dom.next[b].get(k) else {
+            inside[b] = false;
+            continue;
+        };
+        walk.push((b, k + 1));
+        if inside[t] && !dom.dominates(t, b) {
+            return Err(format!(
+                "block {}: the jump from block {} closes a cycle with no head that dominates it, \
+                 none of its blocks dominating the rest",
+                t, b
+            ));
+        }
+        if !seen[t] {
+            (inside[t], seen[t]) = (true, true);
+            walk.push((t, 0));
         }
     }
     // No address crosses a loop's back-edge: a block a jump reaches from a block it dominates
@@ -4402,6 +4431,96 @@ mod tests {
         let s = f.inst(Op::Slot { bytes: 1 }, BYTE, &[]);
         f.inst(Op::Load, u8t, &[s]);
         f.branch(c, (head, vec![]), (out, vec![]));
+        f.switch(out);
+        f.ret(None);
+        assert_eq!(check(f.finish()), Ok(()));
+    }
+
+    /// Every cycle has a head that dominates it: a cycle none of whose blocks dominates the rest
+    /// is refused, closed by either target of a branch, so that every loop has a head through
+    /// which every round passes. The rule that no address crosses a back-edge finds a loop by that head, a block a
+    /// jump reaches from a block it dominates; a cycle with no such head has no back-edge, and
+    /// carried an address around it past that rule (the final review of pull request 183). The
+    /// lowering makes loops only of `while`s and the element loops of arrays, each entered at its
+    /// head, so it never makes one. A loop entered at its head, with a join of two branches inside
+    /// it, a loop inside it and a block that jumps to itself, verifies.
+    #[test]
+    fn test_every_cycle_has_a_head_that_dominates_it() {
+        let check = |f: Function| {
+            verify(&Module {
+                functions: vec![f],
+                budget: BUDGET,
+                mems: mems(),
+            })
+        };
+        let u8t = Ty::Int(U8);
+        // `a` and `b` jump to each other, and the entry jumps to either: a cycle entered at both,
+        // carrying a slot's address from round to round.
+        let irreducible = |carried: bool| {
+            let params: &[Ty] = if carried { &[BYTE] } else { &[] };
+            let mut f = Builder::new("two_entries", &[Ty::Bool], None);
+            let c = f.params(BlockId(0))[0];
+            let s = f.inst(Op::Slot { bytes: 1 }, BYTE, &[]);
+            let given = |s| if carried { vec![s] } else { vec![] };
+            let (a, b, out) = (f.block(params), f.block(params), f.block(&[]));
+            f.branch(c, (a, given(s)), (b, given(s)));
+            f.switch(a);
+            let p = if carried { f.params(a)[0] } else { s };
+            f.inst(Op::Load, u8t, &[p]);
+            f.branch(c, (b, given(p)), (out, vec![]));
+            f.switch(b);
+            let q = if carried { f.params(b)[0] } else { s };
+            f.jump(a, given(q));
+            f.switch(out);
+            f.ret(None);
+            f.finish()
+        };
+        for carried in [false, true] {
+            let refused = check(irreducible(carried)).unwrap_err();
+            assert!(refused.contains("no head that dominates it"), "{refused}");
+        }
+        // A cycle of three entered at its second block too, from a branch past the first, closed
+        // by the first target of its last branch and by the second.
+        for second in [false, true] {
+            let mut f = Builder::new("late_entry", &[Ty::Bool], None);
+            let c = f.params(BlockId(0))[0];
+            let (a, b, d, out) = (f.block(&[]), f.block(&[]), f.block(&[]), f.block(&[]));
+            f.branch(c, (a, vec![]), (b, vec![]));
+            f.switch(a);
+            f.jump(b, vec![]);
+            f.switch(b);
+            f.jump(d, vec![]);
+            f.switch(d);
+            if second {
+                f.branch(c, (out, vec![]), (a, vec![]));
+            } else {
+                f.branch(c, (a, vec![]), (out, vec![]));
+            }
+            f.switch(out);
+            f.ret(None);
+            let refused = check(f.finish()).unwrap_err();
+            assert!(refused.contains("no head that dominates it"), "{refused}");
+        }
+        // A loop entered at its head, with a join of two branches inside it, a loop inside it and
+        // a block that jumps to itself. The walk reaches the join from the first branch and has
+        // left it when the second jumps there, which closes no cycle.
+        let mut f = Builder::new("nested", &[Ty::Bool], None);
+        let c = f.params(BlockId(0))[0];
+        let (outer, inner, spin, out) = (f.block(&[]), f.block(&[]), f.block(&[]), f.block(&[]));
+        let (then, otherwise, join) = (f.block(&[]), f.block(&[]), f.block(&[]));
+        f.jump(outer, vec![]);
+        f.switch(outer);
+        f.branch(c, (then, vec![]), (otherwise, vec![]));
+        f.switch(then);
+        f.jump(join, vec![]);
+        f.switch(otherwise);
+        f.jump(join, vec![]);
+        f.switch(join);
+        f.branch(c, (inner, vec![]), (out, vec![]));
+        f.switch(inner);
+        f.branch(c, (inner, vec![]), (spin, vec![]));
+        f.switch(spin);
+        f.branch(c, (spin, vec![]), (outer, vec![]));
         f.switch(out);
         f.ret(None);
         assert_eq!(check(f.finish()), Ok(()));

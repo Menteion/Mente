@@ -27,6 +27,7 @@ mod nesting;
 use std::fmt;
 
 use mente_sema::CheckedModule;
+use mente_syntax::tree::{BlockId, ExprId, StmtId};
 use mente_syntax::Span;
 
 pub use host::{host_bound, host_bound_at, host_figures};
@@ -315,6 +316,46 @@ pub fn call_observed<'m>(
     run(module, name, args, limits, Some(seen))
 }
 
+/// What a traced run shows its tracer ([`Tracer`]): the points of each call's function that
+/// Tier 1 also analyses, keyed as Tier 1 keys them, by the function's index in the module and the
+/// statement, block or expression of its tree, so that the containment oracle compares the two at
+/// the same place (`mente-cli`, `mir_run::containment`;
+/// [`tier1-containment`](../../docs/design-review.md#tier1-containment)). `slots` holds the value
+/// of each of the function's bindings, indexed by `BindingId`, `None` for one not bound yet; a
+/// binding of a block that has ended keeps its last value.
+#[derive(Clone, Copy, Debug)]
+pub enum Event<'v> {
+    /// Statement `stmt` is about to run.
+    Before {
+        function: usize,
+        stmt: StmtId,
+        slots: &'v [Option<Value>],
+    },
+    /// Block `block` ran to its end, without leaving it by `return`, `break` or `continue`.
+    End {
+        function: usize,
+        block: BlockId,
+        slots: &'v [Option<Value>],
+    },
+    /// A round of the `while` loop `stmt` begins: its invariants held, and its condition is about
+    /// to be evaluated.
+    Head {
+        function: usize,
+        stmt: StmtId,
+        slots: &'v [Option<Value>],
+    },
+    /// Expression `expr` gave `value`, exact, before it is narrowed anywhere.
+    Given {
+        function: usize,
+        expr: ExprId,
+        value: &'v Value,
+    },
+}
+
+/// What a traced run shows each [`Event`] to, in the order of the run and up to the trap that
+/// ends it.
+pub type Tracer<'a> = &'a mut (dyn FnMut(Event<'_>) + Send);
+
 /// Calls of one module that share one thread: [`with_calls`] hands them to a closure that runs
 /// on a thread of the interpreter's, and each call runs there, with the segments it needs,
 /// without a thread of its own. A thread costs more than a short call, on Windows many times
@@ -336,6 +377,22 @@ impl<'m> Calls<'m> {
         'm: 's,
     {
         eval::Machine::new(self.module, self.limits, Some(seen)).enter(name, args)
+    }
+
+    /// Calls `name` on this thread like [`Calls::observed`], showing `trace` each [`Event`] of
+    /// the run instead.
+    pub fn traced<'s>(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        trace: Tracer<'s>,
+    ) -> Result<(Value, Vec<Value>), Stop>
+    where
+        'm: 's,
+    {
+        eval::Machine::new(self.module, self.limits, None)
+            .traced(trace)
+            .enter(name, args)
     }
 }
 
