@@ -27,7 +27,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 16;
+const FLOOR = 18;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -538,15 +538,16 @@ check("the watch CLI decides on a real history, through any path, and fails rath
 
 check("the Commits check fails on every event while a base change is newer than the head's push", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-commits-"));
-  // A stand-in for the GitHub API at GITHUB_API_URL, as the runner sets it: the pull request, its
-  // issue events and timeline, and its head commits' workflow runs.
-  const api = { events: [], timeline: [], runs: new Map(), head: null };
+  // A stand-in for the GitHub API at GITHUB_API_URL, as the runner sets it: the pull request, with
+  // its text, author and commits, its issue events and timeline, and its head commits' workflow runs.
+  const api = { events: [], timeline: [], runs: new Map(), head: null, body: "", author: "someone", commits: [] };
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
     let body;
     if (url.pathname === "/repos/o/r/issues/7/events") body = api.events;
     else if (url.pathname === "/repos/o/r/issues/7/timeline") body = api.timeline;
-    else if (url.pathname === "/repos/o/r/pulls/7") body = { number: 7, head: { sha: api.head } };
+    else if (url.pathname === "/repos/o/r/pulls/7") body = { number: 7, head: { sha: api.head }, title: "Title", body: api.body, user: { login: api.author } };
+    else if (url.pathname === "/repos/o/r/pulls/7/commits") body = api.commits;
     else if (url.pathname === "/repos/o/r/actions/runs") body = { workflow_runs: api.runs.get(url.searchParams.get("head_sha")) ?? [] };
     res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
     res.end(JSON.stringify(body ?? {}));
@@ -565,8 +566,11 @@ check("the Commits check fails on every event while a base change is newer than 
       return sh("rev-parse", "HEAD");
     };
     const env = Object.fromEntries(Object.entries(GIT_TEST_ENV).filter(([k]) => !k.startsWith("GITHUB_")));
-    const spawnWith = (eventName, payload) =>
+    // Every pull request's body declares what it is (root-cause-first).
+    const DECLARED = "Not a fix: a fixture of the Commits check's run test.";
+    const spawnWith = (eventName, payload, body = DECLARED) =>
       new Promise((done) => {
+        api.body = body;
         const event = path.join(dir, "event.json");
         fs.writeFileSync(event, JSON.stringify(payload));
         const child = spawn(process.execPath, [path.join(HERE, "commits.mjs")], {
@@ -578,8 +582,6 @@ check("the Commits check fails on every event while a base change is newer than 
             GITHUB_REPOSITORY: "o/r",
             GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`,
             GITHUB_TOKEN: "t",
-            PR_TITLE: "Title",
-            PR_BODY: "Body",
           },
         });
         let stdout = "";
@@ -590,6 +592,24 @@ check("the Commits check fails on every event while a base change is newer than 
       spawnWith("pull_request", { action, changes, pull_request: { number: 7, base: { sha: base }, head: { sha: head } } });
     const change = (at) => ({ event: "base_ref_changed", created_at: at });
     const first = push("b\n");
+    // A body with no declaration fails, read from the API as it stands, not from the event's copy,
+    // which a re-run of an old run would hold (the review of 5264a01).
+    api.runs.set(first, [{ created_at: "2026-11-12T10:00:00Z" }]);
+    const edited = { action: "edited", pull_request: { number: 7, base: { sha: base }, head: { sha: first }, title: "Title", body: DECLARED, user: { login: "someone" } } };
+    const undeclared = await spawnWith("pull_request", edited, "Body");
+    assert.equal(undeclared.status, 1, "the event's copy of the body was read, not the body as it stands");
+    assert.match(undeclared.stdout, /::error::the pull request's body: it declares neither/);
+    // Dependabot's declares itself by its author, the API's, while every commit is its own.
+    api.author = "dependabot[bot]";
+    api.commits = [{ sha: "a".repeat(40), author: { login: "dependabot[bot]" } }];
+    assert.equal((await spawnWith("pull_request", edited, "Body")).status, 0, "Dependabot's body fails");
+    api.commits.push({ sha: "b".repeat(40), author: { login: "someone" } });
+    const pushedOnto = await spawnWith("pull_request", edited, "Body");
+    assert.equal(pushedOnto.status, 1, "Dependabot's pull request declared itself with another's commit on it");
+    assert.match(pushedOnto.stdout, /::error::the pull request's author, dependabot\[bot\], declares it only while every commit is its own, and bbbbbbb is another's/);
+    assert.match(pushedOnto.stdout, /::error::the pull request's body: it declares neither/);
+    api.author = "someone";
+    api.commits = [];
     api.runs.set(first, [{ created_at: "2026-11-12T10:00:00Z" }, { created_at: "2026-11-12T12:00:00Z" }]);
     assert.equal((await run(first, "synchronize")).status, 0);
     api.events = [change("2026-11-12T09:00:00Z")];
@@ -615,6 +635,11 @@ check("the Commits check fails on every event while a base change is newer than 
     api.head = second;
     const group = (sha) => ({ merge_group: { base_sha: base, head_sha: second, head_ref: `refs/heads/gh-readonly-queue/main/pr-7-${sha}` } });
     assert.equal((await spawnWith("merge_group", group(base))).status, 0);
+    // The queue's run checks the body too, from the API, so that no pull request reaches main with
+    // none declared.
+    const queued = await spawnWith("merge_group", group(base), "Body");
+    assert.equal(queued.status, 1, "the merge queue's run passed a body that declares nothing");
+    assert.match(queued.stdout, /::error::the pull request's body: it declares neither/);
     api.head = first;
     assert.equal((await spawnWith("merge_group", group(base))).status, 1, "the queued head's push is older than the base change");
     // Without the head's runs it fails rather than pass unseen.
@@ -1071,3 +1096,125 @@ check("the fuzz summary stays under GitHub's limit for a step's summary, reads b
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+check("the body CLI gives the verdict the Commits check gives, on the same pull request's text", async () => {
+  // A session runs .github/scripts/commits-body.mjs on a pull request's text before it sends it
+  // (the escape pull-request-body-unchecked-locally: #213's body quoted Norman's words in Chinese,
+  // which only the required check on GitHub found). It must refuse exactly what the Commits job
+  // refuses, line for line: both read the text through bodyProblems in lib/commits.mjs. The CLI
+  // reads it as a Markdown draft with its title, or as the JSON request a session sends (the review
+  // of 5264a01), and the job from the API, as the pull request stands.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-commits-body-"));
+  const current = { title: "", body: "" };
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    const body =
+      url.pathname === "/repos/o/r/actions/runs"
+        ? { workflow_runs: [{ created_at: "2026-11-22T10:00:00Z" }] }
+        : url.pathname === "/repos/o/r/pulls/7"
+          ? { number: 7, title: current.title, body: current.body, user: { login: "menteion-agent[bot]" } }
+          : url.pathname.startsWith("/repos/o/r/issues/7/")
+            ? []
+            : null;
+    res.writeHead(body ? 200 : 404, { "content-type": "application/json" });
+    res.end(JSON.stringify(body ?? {}));
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  try {
+    const sh = testGit(dir);
+    sh("init", "-q", "-b", "main");
+    fs.writeFileSync(path.join(dir, "a"), "a\n");
+    sh("add", "-A");
+    sh("commit", "-q", "-m", "Base");
+    const base = sh("rev-parse", "HEAD");
+    fs.writeFileSync(path.join(dir, "a"), "b\n");
+    sh("commit", "-q", "-am", "Change a");
+    const head = sh("rev-parse", "HEAD");
+    const env = Object.fromEntries(Object.entries(GIT_TEST_ENV).filter(([k]) => !k.startsWith("GITHUB_")));
+    const event = path.join(dir, "event.json");
+    fs.writeFileSync(event, JSON.stringify({ action: "edited", pull_request: { number: 7, base: { sha: base }, head: { sha: head }, user: { login: "menteion-agent[bot]" } } }));
+    const job = (title, body) =>
+      new Promise((done) => {
+        Object.assign(current, { title, body });
+        const child = spawn(process.execPath, [path.join(HERE, "commits.mjs")], {
+          cwd: dir,
+          env: { ...env, GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: event, GITHUB_REPOSITORY: "o/r", GITHUB_API_URL: `http://127.0.0.1:${server.address().port}`, GITHUB_TOKEN: "t" },
+        });
+        let stdout = "";
+        child.stdout.on("data", (d) => (stdout += d));
+        child.on("close", (status) => done({ status, said: stdout.split("\n").filter((l) => l.startsWith("::error::the pull request's")).map((l) => l.slice("::error::".length)) }));
+      });
+    const local = (title, body) => {
+      const file = path.join(dir, "body.md");
+      fs.writeFileSync(file, body);
+      const r = spawnSync(process.execPath, [path.join(HERE, "commits-body.mjs"), file, "--title", title], { encoding: "utf8", timeout: 30000 });
+      return { status: r.status, said: r.stdout.split("\n").filter((l) => l.startsWith("the pull request's")) };
+    };
+    const request = (title, body) => {
+      const file = path.join(dir, "request.json");
+      fs.writeFileSync(file, `\uFEFF${JSON.stringify({ title, body, head: "h", base: "main" })}`);
+      const r = spawnSync(process.execPath, [path.join(HERE, "commits-body.mjs"), file], { encoding: "utf8", timeout: 30000 });
+      return { status: r.status, said: r.stdout.split("\n").filter((l) => l.startsWith("the pull request's")) };
+    };
+    const han = String.fromCodePoint(0x4e2d, 0x6587);
+    const cases = [
+      ["T", "Root cause: x.\nRemoved at the root: y."],
+      ["T", "Root cause: x.\nNot removable at the root: y.\nGuard: policy check \"z\""],
+      ["T", "Not a fix: a brief."],
+      ["T", "A summary, and no declaration."],
+      ["T", "Root cause: x\nRemoved at the root: y\nNot a fix: z"],
+      ["T", "Root cause:\nRemoved at the root: y"],
+      ["T", "**Root cause:** x\nRemoved at the root: y"],
+      ["T", `Not a fix: a brief.\nNorman: ${han}`],
+      [`A title ${han}`, "Not a fix: a brief."],
+      ["T", "```\nNot a fix: quoted\n```"],
+      ["T", ""],
+    ];
+    let refused = 0;
+    for (const [title, body] of cases) {
+      const [onGitHub, here, sent] = [await job(title, body), local(title, body), request(title, body)];
+      assert.equal(here.status, onGitHub.status, `the verdicts differ on ${JSON.stringify([title, body])}: here ${here.status}, on GitHub ${onGitHub.status}`);
+      assert.deepEqual(here.said, onGitHub.said, `the messages differ on ${JSON.stringify([title, body])}`);
+      assert.equal(sent.status, onGitHub.status, `the verdicts differ on the request of ${JSON.stringify([title, body])}: here ${sent.status}, on GitHub ${onGitHub.status}`);
+      assert.deepEqual(sent.said, onGitHub.said, `the messages differ on the request of ${JSON.stringify([title, body])}`);
+      if (onGitHub.status === 1) refused++;
+    }
+    assert.equal(refused, cases.length - 3, "the cases refused are not those that break a rule");
+    // A call the CLI cannot read is no verdict.
+    assert.equal(spawnSync(process.execPath, [path.join(HERE, "commits-body.mjs")], { encoding: "utf8" }).status, 2);
+    assert.equal(spawnSync(process.execPath, [path.join(HERE, "commits-body.mjs"), "a", "b"], { encoding: "utf8" }).status, 2);
+  } finally {
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("the session's hook refuses a request whose pull request text fails the Commits check's rules, read from the file the client sends", () => {
+  // .claude/settings.json runs tools/push-guard.mjs before each shell command, with the event on
+  // standard input; it refuses, status 2 and the reason on standard error, a request that would send
+  // a pull request's text the Commits check refuses (tools/pr-body-guard.mjs; the review of 5264a01:
+  // nothing made a session run the body CLI, so a body could still be sent unchecked).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-body-guard-"));
+  try {
+    const at = (name, request) => {
+      const file = path.join(dir, name).replace(/\\/g, "/");
+      fs.writeFileSync(file, JSON.stringify(request));
+      return file;
+    };
+    const good = at("good.json", { title: "T", body: "Not a fix: a brief." });
+    const bare = at("bare.json", { title: "T", body: "No declaration." });
+    const hook = (command) => spawnSync(process.execPath, [path.join(ROOT, "tools", "push-guard.mjs")], { input: JSON.stringify({ tool_input: { command }, cwd: dir }), encoding: "utf8", timeout: 30000 });
+    const client = "node C:/Users/x/tools/github-app/gh-app.mjs api PATCH repos/Menteion/Mente/pulls/214 --data-file";
+    const refused = hook(`${client} ${bare}`);
+    assert.equal(refused.status, 2, `a body with no declaration was let through: ${refused.stderr}`);
+    assert.match(refused.stderr, /the pull request body guard refused it: .* sends a pull request's text that fails the Commits check's rules[\s\S]*- the pull request's body: it declares neither/);
+    assert.doesNotMatch(refused.stderr, /No declaration\./, "the body's text reached the hook's words");
+    const passed = hook(`${client} ${good}`);
+    assert.equal(passed.status, 0, `a declared body was refused: ${passed.stderr}`);
+    assert.equal(hook(`${client} ${path.join(dir, "missing.json").replace(/\\/g, "/")}`).status, 2, "a request file the hook cannot read was let through");
+    assert.equal(hook("git status").status, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
