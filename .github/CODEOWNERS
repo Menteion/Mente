@@ -1,8 +1,8 @@
-# The gate files: what decides whether a change may merge into `main`, which a pull request could
-# otherwise weaken unseen (docs/design-review.md, guard-per-problem). A change to any of them needs
-# its owner's review once the ruleset requires review from Code Owners. The workflow policy test
-# (.github/scripts/policy/pins.mjs, GATE_FILES) keeps this list equal to its own and checks that
-# every gate input it reads has an owner.
+# The gate files: what decides whether a change may merge into `main`, and the rules and philosophy
+# it enforces, which a pull request could otherwise weaken unseen (docs/design-review.md,
+# guard-per-problem). A change to any of them needs its owner's review once the ruleset requires
+# review from Code Owners. The workflow policy test (.github/scripts/policy/pins.mjs, GATE_FILES)
+# keeps this list equal to its own and checks that every gate input it reads has an owner.
 
 # The workflows, the required checks, the instruments' path lists, the scripts that decide, and
 # this file.
@@ -20,6 +20,11 @@
 
 # The lints.
 /clippy.toml @Dancraft3746
+
+# The project's rulebook and its philosophy, which change only with Norman's review (Norman,
+# 2026-11-17).
+/CLAUDE.md @Dancraft3746
+/spec/philosophy.md @Dancraft3746
 
 # The pinned documentation tools and their configuration.
 /package.json @Dancraft3746
