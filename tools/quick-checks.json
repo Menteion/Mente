@@ -10,7 +10,8 @@
     "harness": "^benchmark/harness/",
     "mir": "^compiler/mente-mir/|^compiler/mente-codegen/|^compiler/mente-cli/src/mir_mutants\\.rs$|^compiler/mente-cli/tests/mutants/",
     "local limits": "^tools/(local-limits(\\.test)?\\.mjs|capped\\.(ps1|mjs)|cargo\\.mjs|mn\\.mjs|raw-build(-guard)?\\.mjs|store-apps\\.mjs)$|^\\.github/scripts/(job-limits\\.ps1|lib/job-object\\.cs)$",
-    "generator": "^compiler/mente-cli/src/mir_run/"
+    "generator": "^compiler/mente-cli/src/mir_run/",
+    "quick": "^tools/quick(\\.test)?\\.mjs$|^tools/quick-checks\\.json$"
   },
   "checks": [
     { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
@@ -57,6 +58,12 @@
       "when": "local limits",
       "run": ["node", "--test", "tools/local-limits.test.mjs"],
       "why": "The local limits proved on this machine: a process past its memory dies alone, a command past its time ends with its children, a third build waits for a slot, a killed holder frees its slot, and -MenteOnly leaves other projects untouched. They run on Windows alone, so CI does not run them. The policy's check \"the quick checks run every command in one of the machine's build slots, under the local limits\" holds this."
+    },
+    {
+      "name": "quick's own report",
+      "when": "quick",
+      "run": ["node", "--test", "tools/quick.test.mjs"],
+      "why": "tools/quick.mjs says, at the end of a listing and of a run, whether its checks read HEAD or a working tree that differs from it, and each file that differs (#174's merge c94b58e left two resolved files unstaged, and these checks passed on the working tree). Its test runs the real script in a repository it makes; CI does not run this local tool's test."
     }
   ]
 }

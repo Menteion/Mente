@@ -18,6 +18,11 @@
 //                                              without the fix and passing with it
 //
 // Which files call for which checks is written once, in tools/quick-checks.json.
+//
+// The checks read the working tree, and a push sends HEAD, so a run ends by saying which of the two
+// it read: every file that differs from HEAD, staged or not, and every new one. On 2026-11-22 a
+// merge of the evidence stack (#174, c94b58e) left two resolved files unstaged; these checks passed
+// on the working tree, and CI then ran HEAD without them.
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -33,6 +38,20 @@ function changedFiles() {
     ...git("diff", "--name-only", "HEAD"),
     ...git("ls-files", "--others", "--exclude-standard"),
   ]);
+}
+
+/**
+ * Says whether the checks read what a push sends: HEAD, or a working tree that differs from it, and
+ * then each file that differs, as git's short status writes it.
+ */
+function reportUncommitted() {
+  const pending = git("status", "--porcelain", "--untracked-files=all");
+  if (pending.length === 0) {
+    console.log("\nquick: the working tree is HEAD, so these checks read what a push sends.");
+    return;
+  }
+  console.log(`\nquick: the working tree differs from HEAD in ${pending.length} file(s), which these checks read and a push does not send; this is no pass of HEAD until they are committed:`);
+  for (const line of pending) console.log(`  ${line}`);
 }
 
 /**
@@ -60,6 +79,7 @@ if (due.length === 0) {
 console.log(`quick: ${changed.size} changed file(s); ${due.length} check(s)\n`);
 if (process.argv.includes("--list")) {
   for (const check of due) console.log(`  ${check.name}: ${check.run.join(" ")}`);
+  reportUncommitted();
   process.exit(0);
 }
 if (!requireRunner()) process.exit(2);
@@ -74,4 +94,5 @@ console.log("\nquick:");
 for (const [name, ok] of results) console.log(`  ${ok ? "pass" : "FAIL"}  ${name}`);
 const failed = results.filter(([, ok]) => !ok).length;
 if (!ownTests.length) console.log("\nAlso run the tests the change adds or changes: node tools/quick.mjs -- -p <crate> <filter>");
+reportUncommitted();
 process.exit(failed ? 1 : 0);
