@@ -23,6 +23,16 @@
 // diff matches no mutant, which counts as 0. A list it cannot read fails, so that a change in
 // cargo-mutants' output never reads as "no mutant".
 //
+//   node .github/scripts/mutants-floor.mjs plan <diff.json> <deleted.json> <seconds> <dir>
+//   node .github/scripts/mutants-floor.mjs assigned <shard.json> <list.json | mutants.out>
+//
+// `plan` deals the run's mutants, those of <diff.json> and those of <deleted.json> it does not
+// hold, to as many shards as <seconds>, the time the tests took once without a mutant, needs
+// (planShards); it writes each shard's names and exact regexes into <dir>, and prints the plan's
+// outputs for the workflow. `assigned` prints each name a shard was dealt that a list cargo-mutants
+// made for it, or its run's outcomes, hold other than as often, and each they hold that it was
+// not dealt.
+//
 //   node .github/scripts/mutants-floor.mjs evidence <mutants.out>...
 //
 // `evidence` prints each mutant whose outcome its log does not show: caught without nextest's exit
@@ -196,6 +206,91 @@ export function readList(text) {
   if (!Array.isArray(list)) throw new Error("the mutants list is not a JSON array");
   list.forEach(checkMutant);
   return list;
+}
+
+// ------------------------------------------------------------------------- the plan of the shards
+
+/// The most shards a run takes (the Manager, 2026-11-17): beyond sixteen, PR 158's slowest shard
+/// gained at most six minutes, and each shard costs about seven runner-minutes of setup out of the
+/// organisation's twenty concurrent jobs.
+export const MAX_SHARDS = 16;
+/// The time the plan gives one shard's mutants, in minutes: half the six hours GitHub allows a job,
+/// so that a shard's setup and the estimate's error stay well inside the limit (the Manager,
+/// 2026-11-22: a shard of PR 191, one of four, was cancelled at six hours with 184 mutants tested).
+export const SHARD_MINUTES = 180;
+/// The time a mutant's own build may take, beside its tests, in seconds: PR 191's 795 mutants built
+/// in 2 s at the median and 7 s at the most, each rebuilding only what its change reaches.
+export const BUILD_SECONDS = 30;
+/// The reasons a plan gives: shards made, nothing to mutate, or more time than MAX_SHARDS shards of
+/// SHARD_MINUTES hold, which fails "Mutants in the diff" with that reason rather than a shard at
+/// GitHub's limit.
+export const PLAN_REASONS = ["sharded", "no-mutants", "too-large"];
+
+/// The run's mutants: cargo-mutants' list for the diff, then each mutant around a deleted line
+/// that list does not hold, in cargo-mutants' order.
+export function runList(inDiff, deleted) {
+  const listed = new Set(inDiff.map((m) => m.name));
+  return [...inDiff, ...deleted.filter((m) => !listed.has(m.name))];
+}
+
+/// How two lists of names differ, each name counted as often as it stands, since cargo-mutants does
+/// not promise its names unique: one message a name, none when they hold the same.
+export function nameProblems(assigned, ran) {
+  const count = new Map();
+  for (const n of assigned) count.set(n, (count.get(n) ?? 0) + 1);
+  for (const n of ran) count.set(n, (count.get(n) ?? 0) - 1);
+  return [...count]
+    .filter(([, c]) => c !== 0)
+    .map(([n, c]) => (c > 0 ? `${n}: dealt ${c} more time(s) than it ran` : `${n}: ran ${-c} more time(s) than it was dealt`))
+    .sort();
+}
+
+/// The shards of a run, sized from the baseline. `seconds`, the time every test took once without a
+/// mutant, built beforehand, with BUILD_SECONDS for its build, stands for each mutant: the time of
+/// one that no test catches, which runs every test, as the baseline did, and fails the run; one a
+/// test catches stops at that test, and an unviable one at its build. The run takes as many shards
+/// as that estimate needs at SHARD_MINUTES each, and none above MAX_SHARDS, nor more than it has
+/// names: the plan then refuses it, since one name's mutants alone would outlast a shard's time
+/// and a shard would stand empty (the review of 560ccd9). The mutants are dealt round-robin in the list's order, all
+/// of one name to one shard, since a shard runs its share by an exact regex of each name: a slice
+/// of a list ordered by file put the slowest files in one shard (PR 158's run 43865236938: 226
+/// minutes against 40; PR 191's run 44959802577: 353 against 162).
+export function planShards(mutants, seconds) {
+  if (!Number.isInteger(seconds) || seconds <= 0) throw new Error(`the baseline's time is no whole number of seconds above 0: ${seconds}`);
+  if (mutants.length === 0) return { reason: "no-mutants", needed: 0, shards: [] };
+  const needed = Math.ceil((mutants.length * (seconds + BUILD_SECONDS)) / (SHARD_MINUTES * 60));
+  if (needed > MAX_SHARDS) return { reason: "too-large", needed, shards: [] };
+  const byName = new Map();
+  for (const m of mutants) byName.set(m.name, [...(byName.get(m.name) ?? []), m]);
+  if (needed > byName.size) return { reason: "too-large", needed, shards: [] };
+  const shards = Array.from({ length: needed }, () => []);
+  [...byName.values()].forEach((group, k) => shards[k % needed].push(...group));
+  // Every mutant of the run lies in exactly one shard.
+  const problems = nameProblems(
+    mutants.map((m) => m.name),
+    shards.flat().map((m) => m.name),
+  );
+  if (problems.length > 0) throw new Error(`the shards do not hold the run's mutants, each once: ${problems.join("; ")}`);
+  return { reason: "sharded", needed, shards };
+}
+
+/// The names of the mutants a cargo-mutants run tested, from its outcomes.
+function testedNames(outcomes) {
+  if (!Array.isArray(outcomes?.outcomes)) throw new Error("the outcomes hold no list of outcomes");
+  return outcomes.outcomes
+    .filter((o) => o.scenario !== "Baseline")
+    .map((o) => {
+      const name = o.scenario?.Mutant?.name;
+      if (typeof name !== "string") throw new Error(`an outcome names no mutant: ${JSON.stringify(o.scenario).slice(0, 200)}`);
+      return name;
+    });
+}
+
+/// The names a shard was dealt, from its file: a JSON array of strings.
+function dealtNames(text) {
+  const names = JSON.parse(text);
+  if (!Array.isArray(names) || names.some((n) => typeof n !== "string")) throw new Error("a shard's file is no JSON array of names");
+  return names;
 }
 
 /// The CLI: returns what it prints.
@@ -414,5 +509,49 @@ export function main(args) {
     return missing(base, read(files[0]), readList(read(files[2])), readList(read(files[3]))).join("\n");
   }
   if (command === "count" && files.length === 1) return String(readList(read(files[0])).length);
-  throw new Error("usage: mutants-floor.mjs evidence <mutants.out>... | expected <pr.diff> <base-all.json> | deleted <pr.diff> <all.json> <diff.json> | missing <pr.diff> <base-all.json> <diff.json> <deleted.json> | count <list.json>");
+  if (command === "plan" && files.length === 4) {
+    const [diffList, deletedList, seconds, dir] = files;
+    if (!/^[1-9][0-9]*$/.test(seconds)) throw new Error(`the baseline's time is no whole number of seconds above 0: '${seconds}'`);
+    const run = runList(readList(read(diffList)), readList(read(deletedList)));
+    const plan = planShards(run, Number(seconds));
+    fs.mkdirSync(dir, { recursive: true });
+    for (const [k, shard] of plan.shards.entries()) {
+      const names = shard.map((m) => m.name);
+      fs.writeFileSync(`${dir}/shard-${k}.json`, `${JSON.stringify(names)}\n`);
+      fs.writeFileSync(`${dir}/shard-${k}.re`, `${[...new Set(names)].map(exactRegex).join("\n")}\n`);
+    }
+    // The partition as the shards will read it: the directory holds the shards' files and nothing
+    // else, which a shard could read as its own; each shard's names, read once more, hold every
+    // mutant of the run in exactly one; and each shard's regexes are those of its names.
+    const onDisk = fs.readdirSync(dir).sort();
+    const want = plan.shards.flatMap((_, k) => [`shard-${k}.json`, `shard-${k}.re`]).sort();
+    if (onDisk.join("\n") !== want.join("\n")) throw new Error(`${dir} holds ${onDisk.join(", ")}, not the files of ${plan.shards.length} shards`);
+    const dealt = plan.shards.map((_, k) => dealtNames(read(`${dir}/shard-${k}.json`)));
+    const written = nameProblems(
+      plan.reason === "sharded" ? run.map((m) => m.name) : [],
+      dealt.flat(),
+    );
+    if (written.length > 0) throw new Error(`the shards written do not hold the run's mutants, each once: ${written.join("; ")}`);
+    for (const [k, names] of dealt.entries()) {
+      if (names.length === 0) throw new Error(`shard ${k} was dealt no mutant`);
+      const regexes = read(`${dir}/shard-${k}.re`).split("\n").filter((l) => l !== "");
+      if (regexes.join("\n") !== [...new Set(names)].map(exactRegex).join("\n")) throw new Error(`shard ${k}'s regexes are not those of its names`);
+    }
+    const count = plan.reason === "sharded" ? plan.needed : 0;
+    const said = {
+      sharded: `${run.length} mutants at ${seconds} s of tests and ${BUILD_SECONDS} s of build each need ${count} shard(s) of ${SHARD_MINUTES} minutes at most`,
+      "no-mutants": "the diff changes no line where a mutant lies",
+      "too-large": `${run.length} mutants at ${seconds} s of tests and ${BUILD_SECONDS} s of build each need ${plan.needed} shards of ${SHARD_MINUTES} minutes, ${plan.needed > MAX_SHARDS ? `more than the ${MAX_SHARDS} a run takes` : "more than the run has names, so one name's mutants alone outlast a shard's time"}: split the pull request`,
+    }[plan.reason];
+    fs.writeFileSync(`${dir}/summary.md`, `Mutants plan: ${said}.\n`);
+    return [`reason=${plan.reason}`, `count=${count}`, `shards=${JSON.stringify(plan.shards.map((_, k) => k))}`, `needed=${plan.needed}`].join("\n");
+  }
+  if (command === "assigned" && files.length === 2) {
+    // Against a list cargo-mutants made for the shard, or against the outcomes of its run.
+    const ran = fs.statSync(files[1]).isDirectory() ? testedNames(JSON.parse(read(`${files[1]}/outcomes.json`))) : readList(read(files[1])).map((m) => m.name);
+    return nameProblems(dealtNames(read(files[0])), ran).join("\n");
+  }
+  throw new Error(
+    "usage: mutants-floor.mjs evidence <mutants.out>... | expected <pr.diff> <base-all.json> | deleted <pr.diff> <all.json> <diff.json> | missing <pr.diff> <base-all.json> <diff.json> <deleted.json> | count <list.json> | plan <diff.json> <deleted.json> <seconds> <dir> | assigned <shard.json> <list.json | mutants.out>",
+  );
 }
