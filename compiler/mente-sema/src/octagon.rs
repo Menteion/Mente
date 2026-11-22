@@ -311,11 +311,18 @@ impl Octagon {
     /// [`Octagon::add_exact`] to a term's variable, the term read as [`Octagon::add_lin`]
     /// reads it.
     pub fn add_exact_of(&mut self, t: Term, lower: Option<Exact>, upper: Option<Exact>) {
-        self.read(&[t]);
-        if t.at != 0 && self.stamp_of(t.var) == 0 {
+        self.narrowed_by(&[t]);
+        self.add_exact(t.var, lower, upper);
+    }
+
+    /// Reads `terms` where they narrow the state ([`Octagon::read`]): each variable then holds
+    /// the evaluation its term names, which the read leaves as it was or, where the state held
+    /// none, gives it, so that a later term of another evaluation is refused there.
+    fn narrowed_by(&mut self, terms: &[Term]) {
+        self.read(terms);
+        for t in terms {
             self.stamp(t.var, t.at);
         }
-        self.add_exact(t.var, lower, upper);
     }
 
     /// The bounds of `var`, exactly, from the matrix and beyond it; `None` for none.
@@ -481,12 +488,7 @@ impl Octagon {
     /// ([`Octagon::read`]), and a term that narrows a variable no evaluation holds stamps it
     /// with its own, so that a later term of another evaluation is refused there.
     pub fn add_lin(&mut self, terms: &[Term], c: i128) {
-        self.read(terms);
-        for t in terms.iter().filter(|t| t.at != 0) {
-            if self.stamp_of(t.var) == 0 {
-                self.stamp(t.var, t.at);
-            }
-        }
+        self.narrowed_by(terms);
         self.add_lin_of(terms, c);
     }
 
@@ -678,14 +680,39 @@ impl Octagon {
         self.stamps.as_ref().map_or(0, |s| s[var])
     }
 
-    /// Stamps `var` with evaluation `at`, once that evaluation has given it its value.
+    /// Stamps `var` with evaluation `at`, once that evaluation has given it its value. A write
+    /// forgets its variable first, so the state holds no evaluation of it, or already this one;
+    /// a variable that holds another, or two joined, stops the compile, in every build, with an
+    /// internal error that names it: its bounds would be the earlier evaluation's under the new
+    /// stamp, the stale fact the stamps exist to refuse.
     pub fn stamp(&mut self, var: usize, at: u32) {
+        let held = self.stamp_of(var);
+        if held != 0 && held != at {
+            panic!(
+                "internal error: {} is given a new evaluation where the state holds an earlier one, which its write did not forget (ghost-contracts-and-totality.md, item 2, no-site-value-from-another-evaluation)",
+                self.name_of(var)
+            );
+        }
+        self.set_stamp(var, at);
+    }
+
+    /// Sets `var`'s stamp to `at`, whatever it held: a replay's rebasing alone, and
+    /// [`Octagon::stamp`] once it has checked.
+    fn set_stamp(&mut self, var: usize, at: u32) {
         if at == 0 && self.stamps.is_none() {
             return;
         }
         let n = self.n;
         self.stamps
             .get_or_insert_with(|| vec![0; n].into_boxed_slice())[var] = at;
+    }
+
+    /// What `var` is, as the internal errors of the stamps name it.
+    fn name_of(&self, var: usize) -> String {
+        self.names
+            .as_ref()
+            .and_then(|n| n.get(var).cloned())
+            .unwrap_or_else(|| format!("variable {}", var))
     }
 
     /// For a state computed from entry `from` and replayed at entry `to`, which hold the same
@@ -695,7 +722,7 @@ impl Octagon {
         for v in 0..self.n {
             let held = self.stamp_of(v);
             if held != MIXED && held == from.stamp_of(v) {
-                self.stamp(v, to.stamp_of(v));
+                self.set_stamp(v, to.stamp_of(v));
             }
         }
     }
@@ -720,14 +747,10 @@ impl Octagon {
                 (_, MIXED) => "is read as one evaluation, where the state holds two joined",
                 (_, _) => "is read as one evaluation, where the state holds another",
             };
-            let name = self
-                .names
-                .as_ref()
-                .and_then(|n| n.get(t.var).cloned())
-                .unwrap_or_else(|| format!("variable {}", t.var));
             panic!(
                 "internal error: {} {} (ghost-contracts-and-totality.md, item 2, no-site-value-from-another-evaluation)",
-                name, what
+                self.name_of(t.var),
+                what
             );
         }
     }
@@ -1435,14 +1458,39 @@ mod tests {
             n.far_bounds_of(Term::of(1, 2)),
             (None, Some(Exact::from_i128(BIG + 1)))
         );
-        // A replay at another entry: the evaluation carried through is the new entry's.
-        let mut exit = joined.clone();
+        // A replay at another entry: the evaluation carried through is the new entry's, none
+        // where that entry holds none, and what the loop gave or joined stays.
+        let mut exit = a.clone();
         exit.stamp(2, 8);
         let mut to = Octagon::new(3);
         to.stamp(0, 11);
+        exit.restamp(&a, &to);
+        assert_eq!(stamps(&exit), (11, 0, 8));
+        let mut mixed = joined.clone();
         to.stamp(1, 12);
-        exit.restamp(&joined, &to);
-        assert_eq!(stamps(&exit), (11, MIXED, 8));
+        mixed.restamp(&joined, &to);
+        assert_eq!(stamps(&mixed), (11, MIXED, 0));
+        // A write that forgets first stamps anew; one that stamps the evaluation held again is
+        // no write.
+        let mut write = a.clone();
+        write.forget(1);
+        write.stamp(1, 13);
+        write.stamp(1, 13);
+        assert_eq!(write.stamp_of(1), 13);
+    }
+
+    /// A write that stamps a variable still holding an earlier evaluation stops the compile:
+    /// the writer that skips its forget, planted.
+    #[test]
+    #[should_panic(
+        expected = "internal error: the value of `x % 4` is given a new evaluation where the state holds an earlier one, which its write did not forget"
+    )]
+    fn test_a_write_that_keeps_an_earlier_evaluation_stops_the_compile() {
+        let mut o = Octagon::new(1);
+        o.name(Arc::from(vec!["the value of `x % 4`".to_string()]));
+        o.stamp(0, 4);
+        o.add_lin(&[Term::of(0, 4)], 3);
+        o.stamp(0, 5);
     }
 
     /// A term read as an evaluation the state does not hold stops the compile, naming the

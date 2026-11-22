@@ -8355,6 +8355,15 @@ mod tests {
         });
     }
 
+    /// Where the left operand of `and` decided that the right one does not run, only the right
+    /// operand's values are forgotten (`Fx::sites_of_operands`): `x % 4`, evaluated before the
+    /// condition and read after it, keeps its facts, and the sum fits the result's refinement.
+    #[test]
+    fn test_a_right_operand_forgets_only_its_own_values() {
+        let src = "pub fn f(x: u8, w: u8, y: u8) -> u8[0..5] = x % 4 + (if w > 0 and y > 1 { 1 } else { 0 })";
+        assert_eq!(codes(src), NONE);
+    }
+
     /// A loop replayed from the memo restores the state its analysis left, computed from an entry
     /// that held other evaluations of the values the loop leaves alone. The replay rebases them
     /// on the entry it is replayed at (`LoopOutcome::restamped`), so that a value read before the
