@@ -152,7 +152,7 @@ pub fn tier1_queries(src: &str) -> Vec<(String, tier1::Report, Vec<tier1::smt::Q
         Ok(module) => {
             let ask = tier1::Ask {
                 queries: true,
-                replays: false,
+                ..tier1::Ask::default()
             };
             let b = bodies_with(src, &module, true, ask);
             b.reports
@@ -174,8 +174,8 @@ pub fn tier1_loop_replays(src: &str) -> Vec<(String, usize, Vec<Span>)> {
     match parse_module(src) {
         Ok(module) => {
             let ask = tier1::Ask {
-                queries: false,
                 replays: true,
+                ..tier1::Ask::default()
             };
             let b = bodies_with(src, &module, true, ask);
             b.reports
@@ -184,6 +184,28 @@ pub fn tier1_loop_replays(src: &str) -> Vec<(String, usize, Vec<Span>)> {
                 .map(|((name, _), extras)| {
                     (name, extras.replays_compared, extras.replays_differing)
                 })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// For each function whose names and types check, in source order, its name and what Tier 1's
+/// recording pass claimed: the state at each point it analysed and each integer expression's
+/// value, for the containment oracle, which checks them against the reference interpreter's runs
+/// (`tier1::states`).
+pub fn tier1_states(src: &str) -> Vec<(String, tier1::states::States)> {
+    match parse_module(src) {
+        Ok(module) => {
+            let ask = tier1::Ask {
+                states: true,
+                ..tier1::Ask::default()
+            };
+            let b = bodies_with(src, &module, true, ask);
+            b.reports
+                .into_iter()
+                .zip(b.extras)
+                .map(|((name, _), extras)| (name, extras.states.unwrap_or_default()))
                 .collect()
         }
         Err(_) => Vec::new(),

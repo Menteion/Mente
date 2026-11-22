@@ -36,6 +36,7 @@ use crate::octagon::{Exact, Octagon, Term, BIG, INF, RELATIONAL_LIMIT};
 use crate::types::{Int, IntTy, Ty, I64, INT_TYPES, USIZE};
 
 pub mod smt;
+pub mod states;
 
 use smt::{Goal, Path};
 
@@ -643,6 +644,16 @@ fn summary_of(st: &Octagon, v: &Val) -> Val {
         Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) => {
             let (lo, hi) = interval(st, v);
             Val::Itv(lo, hi)
+        }
+    }
+}
+
+/// The value each element of an array has, at every depth, or `v` itself.
+fn element_of(mut v: &Val) -> &Val {
+    loop {
+        match v {
+            Val::Arr(inner) => v = inner,
+            Val::Lin(..) | Val::Quot { .. } | Val::Itv(..) | Val::Other => return v,
         }
     }
 }
@@ -2221,6 +2232,9 @@ struct Fx<'a> {
     loop_memo: Vec<Memo>,
     /// When the replay test asks for it, its state ([`Ask::replays`]).
     replays: Option<Replays>,
+    /// When the containment oracle asks for them, the states and values the recording pass
+    /// claimed so far ([`Ask::states`]).
+    states: Option<states::States>,
     /// The passes over a loop's body, for the test that keeps them linear in nesting.
     passes: usize,
     /// The `match` arm written as an expression being checked, before which a `guard` goes
@@ -2266,6 +2280,9 @@ pub struct Ask {
     /// Each loop met again outside the recording pass, analysed again beside the outcome its
     /// memo replays ([`LoopOutcome`]), for the test that the two agree.
     pub replays: bool,
+    /// The state at each point of the recording pass and each integer expression's value there,
+    /// for the containment oracle ([`states`]).
+    pub states: bool,
 }
 
 /// What a run of Tier 1 wrote besides its report, as [`Ask`] asked.
@@ -2277,6 +2294,8 @@ pub struct Extras {
     /// The span of each loop whose outcome, analysed again, differed from the one its memo
     /// replayed.
     pub replays_differing: Vec<Span>,
+    /// What the recording pass claimed at each point, when asked.
+    pub states: Option<states::States>,
 }
 
 /// [`check`], with what `ask` asks for besides the report.
@@ -2315,6 +2334,13 @@ fn run(
     if ask.replays {
         fx.replays = Some(Replays::default());
     }
+    if ask.states {
+        fx.states = Some(states::States {
+            tracked: fx.tracked(),
+            unwalked: fx.unwalked(),
+            ..states::States::default()
+        });
+    }
     fx.route();
     let mut st = fx.start();
     fx.entry(&mut st);
@@ -2328,6 +2354,7 @@ fn run(
         queries: fx.queries.unwrap_or_default(),
         replays_compared,
         replays_differing,
+        states: fx.states.take(),
     };
     (fx.report, fx.retries, extras)
 }
@@ -2598,6 +2625,7 @@ impl<'a> Fx<'a> {
             operand_sites: Vec::new(),
             loop_memo: Vec::new(),
             replays: None,
+            states: None,
             passes: 0,
             arm: None,
             unfollowed: false,
@@ -4389,7 +4417,7 @@ impl<'a> Fx<'a> {
         let name = self.syntax.name.clone();
         let syntax = self.syntax;
         for c in &syntax.contracts {
-            if c.kind != ContractKind::Ensures || self.outside(c.expr).is_some() {
+            if !self.proves_at_returns(c) {
                 continue;
             }
             let mut s = out.clone();
@@ -4453,6 +4481,88 @@ impl<'a> Fx<'a> {
             );
             let (guard, message) = Fx::usable_guard(here, followed, at, message);
             self.emit("E0505", span, message, guard, anchor);
+        }
+    }
+
+    // -- the containment oracle's records ([`states`]) ----------------------------------------
+
+    /// Whether `c` is an `ensures` Tier 1 proves, and so walks, at each return: one in the Tier-1
+    /// fragment. One outside it is routed, checked at run time by `@checked` or trusted by
+    /// `@prove`, and walked nowhere.
+    fn proves_at_returns(&self, c: &mente_syntax::tree::Contract) -> bool {
+        c.kind == ContractKind::Ensures && self.outside(c.expr).is_none()
+    }
+
+    /// The clauses the walk never enters, though a run evaluates them: each routed `ensures`
+    /// ([`Self::proves_at_returns`]). The oracle makes no claim inside them.
+    fn unwalked(&self) -> Vec<ExprId> {
+        self.syntax
+            .contracts
+            .iter()
+            .filter(|c| c.kind == ContractKind::Ensures && !self.proves_at_returns(c))
+            .map(|c| c.expr)
+            .collect()
+    }
+
+    /// Each variable Tier 1 follows of a binding: the binding's own, and its field paths'.
+    fn tracked(&self) -> Vec<states::Tracked> {
+        let mut out = Vec::new();
+        for (b, var) in self.vars.iter().enumerate() {
+            if let Some(var) = *var {
+                out.push(states::Tracked {
+                    var,
+                    binding: b,
+                    path: Vec::new(),
+                });
+            }
+            for p in &self.paths[b] {
+                out.push(states::Tracked {
+                    var: p.var,
+                    binding: b,
+                    path: p.names.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// Records `st` at `at`, cut down to the variables of the bindings in scope, when the
+    /// oracle asks and this is the recording pass.
+    fn note_point(&mut self, st: &Octagon, at: states::Point) {
+        if !self.recording || self.states.is_none() {
+            return;
+        }
+        let mut vars = Vec::new();
+        for &b in &self.scope {
+            vars.extend(self.vars[b]);
+            vars.extend(self.paths[b].iter().map(|p| p.var));
+        }
+        let facts = states::facts(st, &vars);
+        if let Some(s) = &mut self.states {
+            s.points.push((at, facts));
+        }
+    }
+
+    /// Records the value `v` of `e` in `st`, an array's by its elements', when the oracle asks
+    /// and this is the recording pass.
+    fn note_value(&mut self, st: &Octagon, e: ExprId, v: &Val) {
+        if !self.recording || self.states.is_none() {
+            return;
+        }
+        let each = element_of(v);
+        let (empty, lo, hi) = if st.is_empty() {
+            (true, None, None)
+        } else {
+            let (lo, hi) = interval(st, each);
+            (false, states::bound(lo), states::bound(hi))
+        };
+        if let Some(s) = &mut self.states {
+            s.values.push(states::Value {
+                expr: e,
+                empty,
+                lo,
+                hi,
+            });
         }
     }
 
@@ -4546,9 +4656,11 @@ impl<'a> Fx<'a> {
             if st.is_empty() {
                 break;
             }
+            self.note_point(st, states::Point::Before(s));
             self.stmt = Some(s);
             last = self.stmt_eval(st, s, tail.filter(|_| i + 1 == stmts.len()));
         }
+        self.note_point(st, states::Point::End(b));
         self.stmt = saved;
         self.scope.truncate(mark);
         last
@@ -4839,7 +4951,17 @@ impl<'a> Fx<'a> {
         Val::Other
     }
 
+    /// The value of `e`, evaluated in `st`, which its evaluation changes.
     fn eval(&mut self, st: &mut Octagon, e: ExprId) -> Val {
+        let v = self.eval_kind(st, e);
+        self.note_value(st, e, &v);
+        v
+    }
+
+    /// [`Self::eval`], by the kind of `e`: inlined into it, so that a nested expression takes
+    /// one frame of the walk, as before the containment oracle recorded values.
+    #[inline(always)]
+    fn eval_kind(&mut self, st: &mut Octagon, e: ExprId) -> Val {
         let (tree, typing) = (self.tree, self.typing);
         match &tree.expr(e).kind {
             ExprKind::Int { value, .. } => self.int_val(st, e, *value),
@@ -5400,6 +5522,13 @@ impl<'a> Fx<'a> {
                 }
             }
             let v = if a.is_empty() {
+                // An arm no path reaches, which a run that reaches it breaks (`states`): an
+                // expression's value is one of an empty state, and a block's statements and end
+                // have no state at all.
+                match arm.body {
+                    ArmBody::Expr(x) => self.note_value(&a, x, &Val::Other),
+                    ArmBody::Block(_) => {}
+                }
                 Val::Other
             } else {
                 match arm.body {
@@ -6501,6 +6630,7 @@ impl<'a> Fx<'a> {
         entry: &Octagon,
     ) -> (Octagon, Octagon) {
         self.passes += 1;
+        self.note_point(head, states::Point::Head(s));
         let header = self.head_of.replace(s);
         let mut at = head.clone();
         let c = self.decide(&mut at, cond);
@@ -6645,6 +6775,7 @@ impl<'a> Fx<'a> {
             if st.is_empty() {
                 break;
             }
+            self.note_point(&st, states::Point::Before(s));
             self.stmt = Some(s);
             match &tree.stmt(s).kind {
                 StmtKind::Expr(e) if i + 1 == stmts.len() => {
@@ -6663,11 +6794,14 @@ impl<'a> Fx<'a> {
                 }
             }
         }
-        self.stmt = saved;
-        self.scope.truncate(mark);
         if ends.is_empty() {
             ends.push(st);
         }
+        for end in &ends {
+            self.note_point(end, states::Point::End(body));
+        }
+        self.stmt = saved;
+        self.scope.truncate(mark);
         ends
     }
 
