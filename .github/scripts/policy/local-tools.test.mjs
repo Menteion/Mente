@@ -6,6 +6,7 @@ import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { CJK_RANGES, badSubject, baseChangedSincePush, cjkLines, problems, pullRequestOf } from "../lib/commits.mjs";
 import { CARGO_HARMLESS, decide as rawBuildDecide, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../../tools/raw-build.mjs";
+import { bodyRefusal, decide as bodyDecide } from "../../../tools/pr-body-guard.mjs";
 import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "../../../tools/store-apps.mjs";
 import { holds, jsImports, jsTokens } from "./js.mjs";
 import { GATE_FILES, QUICK_MAP, owns } from "./pins.mjs";
@@ -15,7 +16,7 @@ import { read, strings, tracked } from "./repo.mjs";
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 4;
+const FLOOR = 5;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -429,4 +430,78 @@ check("tools/quick.mjs runs the program generator's own tests for a change to it
   assert.equal(generatorQuickProblems({ ...map, checks: map.checks.filter((c) => c !== generator) }, files, main).length, 1, "a map without the generator's check passed");
   assert.equal(generatorQuickProblems(map, files, main.replace(/^mod mir_run;$/m, "")).length, 1, "mir_run outside mn's binary passed");
   assert.deepEqual(generatorQuickProblems(withRun([...GENERATOR_RUN, "mir_run::"]), files, main), [], "one filter that every module's tests contain was refused");
+});
+
+check("the session's hook refuses to send a pull request's text that fails the Commits check's rules, or one it cannot read", () => {
+  // tools/pr-body-guard.mjs, which tools/push-guard.mjs runs before each shell command: a session
+  // sends a pull request's text with the App's client, from a JSON file, and the hook reads that file
+  // with requestProblems, as the Commits check reads the text on GitHub (the review of 5264a01: a
+  // body sent unchecked met the rules only in the required check).
+  const han = String.fromCodePoint(0x4e2d, 0x6587);
+  const files = new Map([
+    ["C:/s/good.json", JSON.stringify({ title: "T", body: "Not a fix: a brief." })],
+    ["C:/s/bare.json", JSON.stringify({ title: "T", body: "No declaration." })],
+    ["C:/s/title.json", JSON.stringify({ title: "Retitled" })],
+    ["C:/s/cjk.json", JSON.stringify({ title: `T ${han}` })],
+    ["C:/s/bom.json", `\uFEFF${JSON.stringify({ body: "Not a fix: a brief." })}`],
+    ["C:/s/broken.json", "{"],
+    ["/tmp/s/bare.json", JSON.stringify({ body: "No declaration." })],
+  ]);
+  const readFile = (f) => {
+    if (!files.has(f)) throw Object.assign(new Error("no such file"), { code: "ENOENT" });
+    return files.get(f);
+  };
+  const on = (platform) => (command) => bodyRefusal(command, { readFile, platform });
+  const win = on("win32");
+  const client = "node C:/Users/x/tools/github-app/gh-app.mjs api";
+  // Each case: the command, and what the refusal must say, or null to let it through.
+  const cases = [
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/good.json`, null],
+    [`${client} POST repos/Menteion/Mente/pulls --data-file C:/s/good.json --out C:/s/created.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/bare.json`, /fails the Commits check's rules[\s\S]*- the pull request's body: it declares neither/],
+    [`${client} patch /repos/menteion/MENTE/pulls/214/ --data-file C:/s/bare.json`, /declares neither/],
+    [`cd C:/s && MSYS_NO_PATHCONV=1 node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file /c/s/bare.json`, /declares neither/],
+    [`bash -c "node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json"`, /declares neither/],
+    [`pwsh -Command node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, /declares neither/],
+    // An edit of the title alone is no edit of the body; a request that creates one is read whole.
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/title.json`, null],
+    [`${client} POST repos/Menteion/Mente/pulls --data-file C:/s/title.json`, /declares neither/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/cjk.json`, /title: CJK text/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/bom.json`, null],
+    // A file it cannot name, read or parse refuses.
+    [`S=C:/s; ${client} PATCH repos/Menteion/Mente/pulls/214 --data-file $S/bare.json`, /through the shell/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file ~/bare.json`, /through the shell/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file bare.json`, /not absolute on Windows/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/missing.json`, /cannot read \(ENOENT\)/],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/broken.json`, /holds no JSON/],
+    [`node build.mjs > C:/s/good.json && ${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/good.json`, /elsewhere on the same command line/],
+    // What sends no text of a pull request of this repository passes.
+    [`${client} GET repos/Menteion/Mente/pulls/214 --out C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/pulls/214`, null],
+    [`${client} POST repos/Menteion/Mente/pulls/214/reviews --data-file C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/pulls --data-file C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Menteion/pulls/3 --data-file C:/s/bare.json`, null],
+    [`${client} PATCH repos/Menteion/Mente/issues/214 --data-file C:/s/bare.json`, null],
+    [`echo node gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, null],
+    [`echo gh-app.mjs api PATCH repos/Menteion/Mente/pulls/1 --data-file C:/s/bare.json`, null],
+    ["git status", null],
+  ];
+  for (const [command, says] of cases) {
+    const why = win(command);
+    if (says === null) assert.equal(why, null, `${command} was refused: ${why}`);
+    else assert.match(why ?? "", says, `${command}: ${why}`);
+  }
+  // On Linux, an absolute path is read as written, and a relative one refuses.
+  assert.match(on("linux")(`${client} PATCH repos/Menteion/Mente/pulls/1 --data-file /tmp/s/bare.json`) ?? "", /declares neither/);
+  assert.match(on("linux")(`${client} PATCH repos/Menteion/Mente/pulls/1 --data-file s/bare.json`) ?? "", /relative path/);
+  // The hook's answer: status 2 with the words, 0 to let it run; an event it cannot read refuses.
+  const event = (command) => JSON.stringify({ tool_input: { command } });
+  assert.equal(bodyDecide(event(cases[2][0]), { readFile, platform: "win32" }).status, 2);
+  assert.match(bodyDecide(event(cases[2][0]), { readFile, platform: "win32" }).words, /^the pull request body guard refused it: /);
+  assert.deepEqual(bodyDecide(event("git status"), { readFile, platform: "win32" }), { status: 0, words: "" });
+  assert.equal(bodyDecide("{", { readFile }).status, 2);
+  assert.equal(bodyDecide(JSON.stringify({ tool_input: {} }), { readFile }).status, 2);
+  assert.equal(bodyDecide(JSON.stringify({ tool_input: { ws: "wss://x" } }), { readFile }).status, 0);
+  // No text of the body reaches the words: only the rules' messages, which echo none.
+  assert.doesNotMatch(win(`${client} PATCH repos/Menteion/Mente/pulls/214 --data-file C:/s/bare.json`), /No declaration\./);
 });

@@ -5,8 +5,9 @@
 # whether the fix removes it, or that it is no fix (root-cause-first in docs/design-review.md), and
 # no base changed since the head was pushed, which would leave every
 # instrument's result for the old base. It runs again when the title, the body or the base is
-# edited, and fails on every event while a base change is unanswered by a new commit. A required
-# check of `main`.
+# edited, reads the text as it stands on every event, the merge queue's and a re-run's included, and
+# fails on every event while a base change is unanswered by a new commit. A required check of
+# `main`.
 # Every action is pinned to a full commit SHA; Dependabot proposes updates.
 name: Commits
 
@@ -17,8 +18,8 @@ on:
 
 permissions:
   contents: read
-  # The pull request's timeline, for its base changes, and its head's workflow runs, for when the
-  # head was pushed.
+  # The pull request's text, author and commits, its timeline, for its base changes, and its head's
+  # workflow runs, for when the head was pushed.
   pull-requests: read
   issues: read
   actions: read
@@ -39,8 +40,7 @@ jobs:
           persist-credentials: false
       - name: Check the subjects, the text and the base
         env:
-          # The pull request's text reaches the script only through the environment.
-          PR_TITLE: ${{ github.event.pull_request.title }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          # The script reads the pull request's text from the API, as it stands, on every event,
+          # the merge queue's included; none of it is written into the workflow.
           GITHUB_TOKEN: ${{ github.token }}
         run: node .github/scripts/commits.mjs

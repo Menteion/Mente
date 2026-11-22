@@ -36,7 +36,7 @@ export function jobDigest(doc, job) {
 export const PINNED_FILES = new Map([
   // The policy's list of its own files: a module dropped from it, or the total of checks lowered,
   // changes this digest too.
-  [".github/scripts/policy/modules.json", "86e134705dc41546d44b8583f47eab7caa3b538952ee4fe9e78ebbc8ddd2c63f"],
+  [".github/scripts/policy/modules.json", "253fb14e2c4d94bf2ad3709c007cce327bf27a320214845861616b955417d6cb"],
   [".github/scripts/limits.sh", "40747e4a7344895ce42dd902adb28dd669809d4dd6821d3c1e01921552669ed0"],
   [".github/scripts/memory-guard.sh", "c3c629010f58d39682fa06353305181cf7d1064d2b07abefd6885033045630d1"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
@@ -62,7 +62,7 @@ export const PINNED_FILES = new Map([
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "8594d53e73f3b014fff01ee9cc1014fa5575a9b3ee9b102fae33c03754b0f6af"],
-  [".github/scripts/policy-run.test.mjs", "8b8909fa72c34431a513d1ac2f12be6a55efc66285b2be92240ed4ef29c96a52"],
+  [".github/scripts/policy-run.test.mjs", "1b954d388e12ac9c1cd051da34d5fe095f4231d7cee6989d7490dee20e9964eb"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -81,8 +81,10 @@ export const PINNED_FILES = new Map([
   [".github/scripts/lib/action-pins.mjs", "f08a9cec14bea0adb5a077a2dc33a52b668868bcd6cc15de2691c57ad8e837dc"],
   [".github/scripts/yaml.test.mjs", "4dc4626a1c6ecb74f5c82f82d3994e6d477d30a7ac63b5e25b2b702665f9eab3"],
   [".github/scripts/lib/yaml.mjs", "4c06080bc480b996513b6410b0290e1bc74c569a5a898968af3e8b27cbd88e30"],
-  [".github/scripts/lib/commits.mjs", "b85486418b430cc9afbc85b48a7b5ede9e7f8d3539437ebda5557536d302e8a6"],
+  [".github/scripts/lib/commits.mjs", "4e367ec3f789b5aba74180a301fb171831193c5d66f16c5c10114dcdf4ddfe25"],
   [".github/scripts/commits.mjs", "33c4156781145f9c0a0e127fb99c304a85e1ed508e1321c4e56a3992ce6d4322"],
+  // The body CLI, which the run tests spawn (the review of 5264a01).
+  [".github/scripts/commits-body.mjs", "14b23c30b836a333ccc2664fbb4f7ac8063496722ff3f97b3f26f00f3c8bf497"],
   // Every file on the API key's path and on the lock's, which run beside the key or as root: a line
   // added anywhere in one, before the key's line or after it, is a change to a gate review sees
   // (the re-check of 4ab15da: `set -x`, or the key written to a file, passed every rule of
@@ -118,7 +120,7 @@ export const PINNED_JOBS = new Map([
   ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
   ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
   ["ci.yml#docs", "9795712883409606684a0f16d9234792a40a76376018d594dc5596673dcae5ed"],
-  ["commits.yml#commits", "c8ea2207fa147bb5092056a0bc68be27770da23fd666855dcce1b79bb432e1bd"],
+  ["commits.yml#commits", "c4e624153a4a97ce9e979f1d6bd3e8df4312ef3c2832b3c1ef64e7739ac98cd7"],
   ["benchmark.yml#bench", "5fe155416addc5eae5e51174842ae3bdf8e69ffdd1879ba691c482b60a03c971"],
   ["prelim.yml#prelim", "ac6eadf49ad0da4d645891fc15d16450c3dbd0905926e5c9c92b548ed7557bc7"],
   ["probe.yml#write", "0830c255940ceb132a7f00e0426efe6de5c4d1287edb351e8cffd93311c51b34"],
@@ -178,6 +180,7 @@ export const GATE_FILES = [
   "/tools/quick.test.mjs",
   "/tools/push.mjs",
   "/tools/push-guard.mjs",
+  "/tools/pr-body-guard.mjs",
   "/tools/push.test.mjs",
   "/tools/git-hooks/",
   "/tools/local-limits.mjs",

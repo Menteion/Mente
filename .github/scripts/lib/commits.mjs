@@ -9,7 +9,8 @@
 //   compiler/mente-cli/tests/gates.rs, and a test keeps the two equal.
 // - Every pull request's body declares, in one canonical form, the root cause of what it fixes and
 //   whether the fix removes it, or that it fixes nothing (root-cause-first in
-//   docs/design-review.md; declarationProblems). Dependabot's declare themselves by their author.
+//   docs/design-review.md; declarationProblems), on every event, the merge queue's included.
+//   Dependabot's declare themselves by their author, while every commit on the branch is its own.
 // - A pull request whose base changed after its head was pushed fails, on every event, until a new
 //   commit is pushed: retargeting fires only `pull_request: edited`, which no instrument runs on,
 //   so their results are for the old base, and a later edit of the title or a re-run of an earlier
@@ -19,10 +20,11 @@
 //   2026-11-13). The push is the first workflow run of the head commit. The API is read with the
 //   job's read-only token.
 //
-// The commits come from the event payload (GITHUB_EVENT_PATH); the title and body come from the
-// environment (PR_TITLE, PR_BODY), set from the payload by the workflow, so that no text of the
-// pull request is ever written into a script. Commit subjects are printed JSON-escaped, so that
-// none can form a workflow command.
+// The base and head come from the event payload (GITHUB_EVENT_PATH). The pull request's title, body
+// and author come from the API (`GET /pulls/<number>`) on every event, so that a re-run checks the
+// text as it stands, not the event's copy of it, and the merge queue's run checks it too; no text of
+// the pull request is ever written into a script. Commit subjects are printed JSON-escaped, and no
+// text of the body is printed, so that none can form a workflow command.
 
 import fs from "node:fs";
 
@@ -48,9 +50,10 @@ export function isCjk(c) {
   return CJK_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
 }
 
-/// The 1-based numbers of the lines of `text` that hold CJK text.
+/// The 1-based numbers of the lines of `text` that hold CJK text: a line ends at a line feed, a
+/// carriage return, or the two together, as GitHub renders a body.
 export function cjkLines(text) {
-  return text.split(/\r?\n/).flatMap((line, n) => ([...line].some(isCjk) ? [n + 1] : []));
+  return text.split(/\r\n?|\n/).flatMap((line, n) => ([...line].some(isCjk) ? [n + 1] : []));
 }
 
 const UNFINISHED = /^[\s[(]*(wip\b|draft\s*[:\]]|fixup\b|squash\s*[!:\]]|squash\s*$|amend!)/i;
@@ -79,35 +82,110 @@ export const NOT_A_FIX = "Not a fix:";
 const LABELS = [ROOT_CAUSE, REMOVED, NOT_REMOVABLE, GUARD, NOT_A_FIX];
 /// The authors whose pull requests the policy declares, by what every one of them is: Dependabot
 /// writes its own text, and every pull request it opens updates a dependency. The author is the
-/// event's, which GitHub writes, never a word of the body.
+/// API's, which GitHub writes, never a word of the body, and it declares only while every commit of
+/// the pull request is its own (declaringAuthor): a commit a session pushes onto its branch is a
+/// change Dependabot did not write.
 export const DECLARED_BY_AUTHOR = new Map([["dependabot[bot]", `${NOT_A_FIX} a dependency update`]]);
-/// A line that reads like a label in another case, spelling or decoration (`root cause:`,
-/// `**Root cause:**`, `## Root cause`, `- Not a Fix:`), which the one canonical form refuses
-/// rather than pass over.
-const NEAR_LABEL = /^[\s>#*_+-]*(?:\*\*|__)?\s*(root\s*[-_]?\s*cause|removed\s+at\s+the\s+root|not\s+removable\s+at\s+the\s+root|guard|not\s+a\s+fix)\s*(?:\*\*|__)?\s*(?::|$)/i;
+/// The words of the labels, in any case and spelling.
+const NEAR_WORDS = "(?:root\\s*[-_]?\\s*cause|removed\\s+at\\s+the\\s+root|not\\s+removable\\s+at\\s+the\\s+root|guard|not\\s+a\\s+fix)";
+/// A line that reads like a label in another case, spelling or decoration, which the one canonical
+/// form refuses rather than pass over: the words followed by a colon, however decorated
+/// (`root cause:`, `**Root cause:**`, `- Not a Fix:`, ` Guard:`), or the words alone on a line made a
+/// heading, bold, an item or a quote (`## Root cause`, `**Guard**`). The words alone on a plain line,
+/// as a hard-wrapped sentence leaves them, are prose.
+const NEAR_LABEL = [
+  new RegExp(`^[ \\t>#*_+-]*(?:\\*\\*|__)?[ \\t]*${NEAR_WORDS}[ \\t]*(?:\\*\\*|__)?[ \\t]*:`, "i"),
+  new RegExp(`^[ \\t]*(?:#{1,6}[ \\t]+|[-*+][ \\t]+|>[ \\t]*|\\*\\*|__)[ \\t>#*_+-]*${NEAR_WORDS}[ \\t]*(?:\\*\\*|__|#+)?[ \\t]*$`, "i"),
+];
+/// The HTML blocks whose lines GitHub does not show as prose, started and ended as CommonMark starts
+/// and ends them: a comment, which it does not show, and the raw text of `<pre>`, `<script>`,
+/// `<style>` and `<textarea>`. Each starts at the start of a line, after at most three spaces, and
+/// runs to the line that holds its end, that line included.
+const HTML_BLOCKS = [
+  { start: /^ {0,3}<!--/, end: /-->/ },
+  { start: /^ {0,3}<(?:pre|script|style|textarea)(?=[\s>]|$)/i, end: /<\/(?:pre|script|style|textarea)>/i },
+];
 
-/// The lines of a body that it shows as prose, each with its 1-based number: no line of a fenced
-/// code block, which may quote the labels, and no HTML comment, which GitHub does not show.
+/// The columns of `line`'s leading white space: a tab moves to the next multiple of four.
+function indentOf(line) {
+  let col = 0;
+  for (const c of line) {
+    if (c === " ") col++;
+    else if (c === "\t") col += 4 - (col % 4);
+    else break;
+  }
+  return col;
+}
+
+/// `line` with at most `most` block quote markers taken from its start, each `>` after at most three
+/// spaces and with the one space after it, and how many it took.
+function unquote(line, most = Infinity) {
+  let rest = line;
+  let count = 0;
+  for (let m; count < most && (m = /^ {0,3}> ?/.exec(rest)); count++) rest = rest.slice(m[0].length);
+  return { rest, count };
+}
+
+/// The lines of a body that it shows as prose, each with its 1-based number, as GitHub renders it.
+/// A line ends at a line feed, a carriage return, or the two together. Code blocks are read first:
+/// - a fenced block, three backticks or tildes or more, whose lines are code up to a closing fence
+///   of the same character, at least as long, and nothing else on its line; a line of backticks
+///   with more after them (```` ``` x ````) closes none, and an opening line of backticks with a
+///   backtick after them is inline code, not a fence. A block in a block quote ends with the quote,
+///   at the first line with fewer markers. A fence four columns in or more, a list item's, ends at
+///   the first line that stands left of its item, more than three columns left of the fence; one
+///   left unclosed hides the rest, as GitHub renders it;
+/// - a line four columns in or more, a code block's or a list item's, which no label starts;
+/// - an HTML block (HTML_BLOCKS), which starts only at the start of a line: an HTML comment opened
+///   inside a line, inside inline code or not, hides nothing after its line.
+/// Known limit: a list item's fence fewer than four columns in is read as a fence of the body, so a
+/// line at the left edge inside it, which GitHub shows as prose after the item, is read as code.
 export function proseLines(body) {
   const text = String(body ?? "").replace(/\r\n?/g, "\n");
-  // A comment's lines are blanked, not removed, so that each line keeps its number; an unclosed one
-  // hides the rest of the body, as GitHub renders it.
-  const shown = text.replace(/<!--[\s\S]*?(?:-->|$)/g, (c) => c.replace(/[^\n]/g, " "));
   const out = [];
-  let fence = null;
-  for (const [k, line] of shown.split("\n").entries()) {
-    const marker = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (fence) {
-      if (marker && marker[1][0] === fence[0] && marker[1].length >= fence.length && line.trim() === marker[1]) fence = null;
+  let block = null;
+  for (const [k, line] of text.split("\n").entries()) {
+    if (block) {
+      const { rest, count } = unquote(line, block.depth);
+      if (count === block.depth) {
+        if (block.end) {
+          if (block.end.test(rest)) block = null;
+          continue;
+        }
+        const { char, length, indent } = block.fence;
+        if (rest.trim() === "" || indentOf(rest) >= indent - 3) {
+          const close = /^[ \t]*(`{3,}|~{3,})[ \t]*$/.exec(rest);
+          if (close && close[1][0] === char && close[1].length >= length && indentOf(rest) <= (indent <= 3 ? 3 : indent + 3)) block = null;
+          continue;
+        }
+      }
+      // The quote or the list item that held the block has ended: the line is read as any other.
+      block = null;
+    }
+    const { rest, count: depth } = unquote(line);
+    const open = /^[ \t]*(`{3,}|~{3,})(.*)$/.exec(rest);
+    if (open && !(open[1][0] === "`" && open[2].includes("`"))) {
+      block = { depth, fence: { char: open[1][0], length: open[1].length, indent: indentOf(rest) } };
       continue;
     }
-    if (marker) {
-      fence = marker[1];
+    if (indentOf(rest) >= 4) continue;
+    const html = HTML_BLOCKS.find((h) => h.start.test(rest));
+    if (html) {
+      if (!html.end.test(rest)) block = { depth, end: html.end };
       continue;
     }
     out.push({ n: k + 1, line });
   }
   return out;
+}
+
+/// The author that declares a pull request, given its author and the authors of its commits, each
+/// { sha, login }: its own, while it is one DECLARED_BY_AUTHOR names and every commit is its own;
+/// otherwise none, with the commits that are another's.
+export function declaringAuthor(author, commits) {
+  if (!DECLARED_BY_AUTHOR.has(author)) return { author: "", others: [] };
+  const others = commits.filter((c) => c.login !== author).map((c) => c.sha);
+  return commits.length > 0 && others.length === 0 ? { author, others } : { author: "", others };
 }
 
 /// What keeps a pull request's body from declaring, in the one canonical form, either the root cause
@@ -123,8 +201,8 @@ export function declarationProblems(body, author) {
     if (label) {
       at.get(label).push(n);
       if (line.slice(label.length).trim() === "") found.push(`line ${n}: \`${label}\` holds no text after it`);
-    } else if (NEAR_LABEL.test(line)) {
-      found.push(`line ${n} reads like a label of the declaration in another case, spelling or form: write it at the start of the line exactly as one of ${LABELS.map((l) => `\`${l}\``).join(", ")}`);
+    } else if (NEAR_LABEL.some((near) => near.test(line))) {
+      found.push(`line ${n} reads like a label of the declaration in another case, spelling or form: write it at the start of the line exactly as one of ${LABELS.map((l) => `\`${l}\``).join(", ")}, with its text on the same line; a heading is not a label`);
     }
   }
   const [root, removed, notRemovable, guard, notAFix] = LABELS.map((l) => at.get(l));
@@ -150,20 +228,29 @@ export function declarationProblems(body, author) {
 }
 
 /// Every problem in a pull request's text, one line each: CJK text in its title or body, and a body
-/// that does not declare what the pull request is. The Commits check and .github/scripts/commits-body.mjs,
-/// which a session runs on a body before it sends it, both read a pull request's text here alone,
-/// so the two cannot disagree on one.
-export function bodyProblems(pullRequest) {
+/// that does not declare what the pull request is; of `fields`, the title, the body or both. The
+/// Commits check, .github/scripts/commits-body.mjs, which a session runs on a draft, and the
+/// session's hook on a request it sends (tools/pr-body-guard.mjs) all read a pull request's text here
+/// alone, so that none can disagree with another on one.
+export function bodyProblems(pullRequest, fields = ["title", "body"]) {
   const found = [];
-  for (const [what, text] of [
-    ["title", pullRequest.title],
-    ["body", pullRequest.body],
-  ]) {
-    const lines = cjkLines(text ?? "");
+  for (const what of fields) {
+    const lines = cjkLines(pullRequest[what] ?? "");
     if (lines.length > 0) found.push(`the pull request's ${what}: CJK text, line ${lines.join(", ")}`);
   }
-  for (const p of declarationProblems(pullRequest.body, pullRequest.author)) found.push(`the pull request's body: ${p}`);
+  if (fields.includes("body")) for (const p of declarationProblems(pullRequest.body, pullRequest.author)) found.push(`the pull request's body: ${p}`);
   return found;
+}
+
+/// Every problem in a request of GitHub's API that creates a pull request (`creates`) or edits one,
+/// as a session sends it, JSON: a request that creates one is read whole, a missing title or body as
+/// an empty one; one that edits is read for the fields it sends, so that an edit of the title alone
+/// is no edit of the body, and a body sent as null clears it. No author declares a session's text.
+export function requestProblems(request, { creates }) {
+  if (request === null || typeof request !== "object" || Array.isArray(request)) return ["the request is no JSON object"];
+  const fields = ["title", "body"].filter((what) => creates || Object.hasOwn(request, what));
+  for (const what of fields) if (request[what] != null && typeof request[what] !== "string") return [`the request's ${what} is no string`];
+  return bodyProblems({ title: request.title ?? "", body: request.body ?? "", author: "" }, fields);
 }
 
 /// Every problem in the commits, the pull request's text and its base, one line each.
@@ -182,21 +269,38 @@ export function problems(commits, pullRequest, baseChanged = false) {
 }
 
 /// The local check of a pull request's text, before a session creates or edits one:
-/// `node .github/scripts/commits-body.mjs <body file> [--title <title>]`. It reads the body from the
-/// file and runs bodyProblems on it, as the Commits check does on GitHub, with no author, so no
-/// author's exemption. Returns the lines to print and the exit code: 0 for none, 1 for problems, 2
-/// for a call it cannot read.
+/// `node .github/scripts/commits-body.mjs <body file> [--title <title>]`, or
+/// `node .github/scripts/commits-body.mjs <request>.json`, the JSON request the session sends with
+/// `gh-app.mjs api ... --data-file`, so that the text checked is the text sent. It runs bodyProblems
+/// on the text, as the Commits check does on GitHub, with no author, so no author's exemption; a
+/// request is read whole, as one that creates a pull request, so that whatever passes here passes the
+/// session's hook too. A byte order mark before the text is no part of it. Returns the lines to print
+/// and the exit code: 0 for none, 1 for problems, 2 for a call it cannot read.
 export function bodyMain(args, readFile) {
-  const usage = "usage: node .github/scripts/commits-body.mjs <body file> [--title <title>]";
+  const usage = "usage: node .github/scripts/commits-body.mjs <body file> [--title <title>] | <request>.json";
   const files = [];
-  let title = "";
+  let title = null;
   for (let k = 0; k < args.length; k++) {
     if (args[k] === "--title" && k + 1 < args.length) title = args[++k];
     else if (args[k].startsWith("-")) return { lines: [usage], code: 2 };
     else files.push(args[k]);
   }
   if (files.length !== 1) return { lines: [usage], code: 2 };
-  const found = bodyProblems({ title, body: readFile(files[0]), author: "" });
+  const text = readFile(files[0]).replace(/^\uFEFF/, "");
+  let found;
+  if (/\.json$/i.test(files[0])) {
+    // A request names its own title.
+    if (title !== null) return { lines: [usage], code: 2 };
+    let request;
+    try {
+      request = JSON.parse(text);
+    } catch (e) {
+      return { lines: [`${files[0]} holds no JSON: ${e.message}`], code: 2 };
+    }
+    found = requestProblems(request, { creates: true });
+  } else {
+    found = bodyProblems({ title: title ?? "", body: text, author: "" });
+  }
   if (found.length === 0) return { lines: ["The pull request's text passes the Commits check's rules: English, and a declaration of what it is."], code: 0 };
   return { lines: [...found, "Edit the text and run this again; the Commits check runs the same rules on GitHub."], code: 1 };
 }
@@ -275,12 +379,9 @@ export async function main(env, between) {
   const payload = JSON.parse(fs.readFileSync(env.GITHUB_EVENT_PATH, "utf8"));
   let base;
   let head;
-  let pullRequest = null;
   if (eventName === "pull_request") {
     base = payload.pull_request?.base?.sha;
     head = payload.pull_request?.head?.sha;
-    // The author is the event's, which GitHub writes, as the base and the head are.
-    pullRequest = { title: env.PR_TITLE ?? "", body: env.PR_BODY ?? "", author: payload.pull_request?.user?.login ?? "" };
   } else if (eventName === "merge_group") {
     base = payload.merge_group?.base_sha;
     head = payload.merge_group?.head_sha;
@@ -291,8 +392,13 @@ export async function main(env, between) {
   const pr = pullRequestOf(eventName, payload);
   if (!Number.isInteger(pr.number)) throw new Error(`the ${eventName} event names no pull request`);
   const repo = env.GITHUB_REPOSITORY;
-  if (!pr.head) pr.head = (await apiGet(env, `/repos/${repo}/pulls/${pr.number}`)).head?.sha;
+  // The pull request as it stands, on every event: its text, its author and, in the queue, its head.
+  const live = await apiGet(env, `/repos/${repo}/pulls/${pr.number}`);
+  if (!pr.head) pr.head = live.head?.sha;
   if (!pr.head) throw new Error(`pull request ${pr.number} names no head commit`);
+  const author = live.user?.login ?? "";
+  const declaring = DECLARED_BY_AUTHOR.has(author) ? declaringAuthor(author, (await apiList(env, `/repos/${repo}/pulls/${pr.number}/commits`)).map((c) => ({ sha: c.sha ?? "", login: c.author?.login ?? "" }))) : { author: "", others: [] };
+  const pullRequest = { title: live.title ?? "", body: live.body ?? "", author: declaring.author };
   // The retarget's own run knows from its event, whatever the API shows yet.
   const retargeted = eventName === "pull_request" && payload.action === "edited" && payload.changes?.base !== undefined;
   const events = await apiList(env, `/repos/${repo}/issues/${pr.number}/events`);
@@ -302,7 +408,9 @@ export async function main(env, between) {
   const commits = between(base, head);
   if (commits.length === 0) throw new Error(`no commits in ${base}..${head}`);
   const found = problems(commits, pullRequest, baseChanged);
-  console.log(`${commits.length} commits in ${base.slice(0, 7)}..${head.slice(0, 7)}${pullRequest ? ", and the pull request's title and body" : ""}.`);
+  // Why an author the policy declares does not declare this one, beside what the body then lacks.
+  if (declaring.others.length > 0) found.push(`the pull request's author, ${author}, declares it only while every commit is its own, and ${declaring.others.map((s) => s.slice(0, 7)).join(", ")} ${declaring.others.length === 1 ? "is" : "are"} another's: declare it in the body`);
+  console.log(`${commits.length} commits in ${base.slice(0, 7)}..${head.slice(0, 7)}, and the pull request's title and body.`);
   for (const p of found) console.log(`::error::${p}`);
   if (found.length > 0) {
     console.log("Reword the commits, edit the pull request's text, or push a commit, as each error says. An edit of the title or the body runs this check again.");
