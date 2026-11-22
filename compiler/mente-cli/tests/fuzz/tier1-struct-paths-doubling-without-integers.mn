@@ -1,0 +1,367 @@
+module m
+
+// Tier 1 lists the paths of `f`'s parameters, 2^41 and 2^31 of them through structs with no
+// integer field. `g` names nothing, so the module fails after Tier 1 has run on `f`, and the
+// lowering, which does not end on parameters of so many fields either, is not reached.
+
+struct E0 {
+  a: [0]u8
+}
+
+struct E1 {
+  l: E0
+  r: E0
+}
+
+struct E2 {
+  l: E1
+  r: E1
+}
+
+struct E3 {
+  l: E2
+  r: E2
+}
+
+struct E4 {
+  l: E3
+  r: E3
+}
+
+struct E5 {
+  l: E4
+  r: E4
+}
+
+struct E6 {
+  l: E5
+  r: E5
+}
+
+struct E7 {
+  l: E6
+  r: E6
+}
+
+struct E8 {
+  l: E7
+  r: E7
+}
+
+struct E9 {
+  l: E8
+  r: E8
+}
+
+struct E10 {
+  l: E9
+  r: E9
+}
+
+struct E11 {
+  l: E10
+  r: E10
+}
+
+struct E12 {
+  l: E11
+  r: E11
+}
+
+struct E13 {
+  l: E12
+  r: E12
+}
+
+struct E14 {
+  l: E13
+  r: E13
+}
+
+struct E15 {
+  l: E14
+  r: E14
+}
+
+struct E16 {
+  l: E15
+  r: E15
+}
+
+struct E17 {
+  l: E16
+  r: E16
+}
+
+struct E18 {
+  l: E17
+  r: E17
+}
+
+struct E19 {
+  l: E18
+  r: E18
+}
+
+struct E20 {
+  l: E19
+  r: E19
+}
+
+struct E21 {
+  l: E20
+  r: E20
+}
+
+struct E22 {
+  l: E21
+  r: E21
+}
+
+struct E23 {
+  l: E22
+  r: E22
+}
+
+struct E24 {
+  l: E23
+  r: E23
+}
+
+struct E25 {
+  l: E24
+  r: E24
+}
+
+struct E26 {
+  l: E25
+  r: E25
+}
+
+struct E27 {
+  l: E26
+  r: E26
+}
+
+struct E28 {
+  l: E27
+  r: E27
+}
+
+struct E29 {
+  l: E28
+  r: E28
+}
+
+struct E30 {
+  l: E29
+  r: E29
+}
+
+struct E31 {
+  l: E30
+  r: E30
+}
+
+struct E32 {
+  l: E31
+  r: E31
+}
+
+struct E33 {
+  l: E32
+  r: E32
+}
+
+struct E34 {
+  l: E33
+  r: E33
+}
+
+struct E35 {
+  l: E34
+  r: E34
+}
+
+struct E36 {
+  l: E35
+  r: E35
+}
+
+struct E37 {
+  l: E36
+  r: E36
+}
+
+struct E38 {
+  l: E37
+  r: E37
+}
+
+struct E39 {
+  l: E38
+  r: E38
+}
+
+struct E40 {
+  l: E39
+  r: E39
+}
+
+struct B0 {
+  a: bool
+}
+
+struct B1 {
+  l: B0
+  r: B0
+}
+
+struct B2 {
+  l: B1
+  r: B1
+}
+
+struct B3 {
+  l: B2
+  r: B2
+}
+
+struct B4 {
+  l: B3
+  r: B3
+}
+
+struct B5 {
+  l: B4
+  r: B4
+}
+
+struct B6 {
+  l: B5
+  r: B5
+}
+
+struct B7 {
+  l: B6
+  r: B6
+}
+
+struct B8 {
+  l: B7
+  r: B7
+}
+
+struct B9 {
+  l: B8
+  r: B8
+}
+
+struct B10 {
+  l: B9
+  r: B9
+}
+
+struct B11 {
+  l: B10
+  r: B10
+}
+
+struct B12 {
+  l: B11
+  r: B11
+}
+
+struct B13 {
+  l: B12
+  r: B12
+}
+
+struct B14 {
+  l: B13
+  r: B13
+}
+
+struct B15 {
+  l: B14
+  r: B14
+}
+
+struct B16 {
+  l: B15
+  r: B15
+}
+
+struct B17 {
+  l: B16
+  r: B16
+}
+
+struct B18 {
+  l: B17
+  r: B17
+}
+
+struct B19 {
+  l: B18
+  r: B18
+}
+
+struct B20 {
+  l: B19
+  r: B19
+}
+
+struct B21 {
+  l: B20
+  r: B20
+}
+
+struct B22 {
+  l: B21
+  r: B21
+}
+
+struct B23 {
+  l: B22
+  r: B22
+}
+
+struct B24 {
+  l: B23
+  r: B23
+}
+
+struct B25 {
+  l: B24
+  r: B24
+}
+
+struct B26 {
+  l: B25
+  r: B25
+}
+
+struct B27 {
+  l: B26
+  r: B26
+}
+
+struct B28 {
+  l: B27
+  r: B27
+}
+
+struct B29 {
+  l: B28
+  r: B28
+}
+
+struct B30 {
+  l: B29
+  r: B29
+}
+
+fn f(e: E40, b: B30) -> u8 = 0
+
+fn g() -> u8 = nothing

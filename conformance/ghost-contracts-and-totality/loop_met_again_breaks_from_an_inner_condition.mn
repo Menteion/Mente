@@ -1,0 +1,31 @@
+// expect: pass
+module conformance
+// A `break` in a loop's condition leaves the loop around it, as the reference interpreter runs
+// it. Tier 1 analyses the innermost loop once for each entry state and replays its outcome
+// when it meets the loop again; the outcome holds the state that `break` sends to the middle
+// loop, where `a` is 7 (spec item 2, "Facts at a loop head"). Replayed without it, the middle
+// loop's exit had only `a` = 0, the outer loop kept `a == 0` at its head, and `a + 255` was
+// proven to fit in `u8`. It is a run-time check, which traps in the outer loop's second round.
+fn take(x: u8) -> u8 = x
+
+pub fn f(n: u8) -> u8 {
+  var a: u8 = 0
+  var k: u8 = 0
+  while take(a + 255) > 0 and k < 2 and a == 0 {
+    var m: u8 = 0
+    while m < 1 {
+      a = 7
+      var c: u8 = 0
+      while (if a == 7 { break } else { c }) < 1 {
+        c += 1
+      }
+      a = 0
+      guard a == 0 else {
+        return 2
+      }
+      m += 1
+    }
+    k += 1
+  }
+  k
+}

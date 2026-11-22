@@ -270,6 +270,46 @@ const TRAPS: &[&str] = &[
     "shift by its type's width or more",
 ];
 
+/// A loop's candidate that can trap (`ghost-contracts-and-totality.md`, item 2, "Facts at a
+/// loop head"): a remainder whose divisor's static range holds 0, in a loop's condition or in a
+/// guard of its body. Tier 1 keeps it only where the divisor is proven not 0 without the facts of
+/// its own evaluation, which once proved it (the nightly's wrong proofs, 2026-11-16 to 11-21).
+/// And a conjunct or a guard that is no candidate by its syntax (`loop-candidates-by-syntax`),
+/// of each form the reviews of pull request 182 found Tier 1 holding at a loop's head: one that
+/// may leave, by `break`, `continue`, `return`, `todo` or `unreachable`, a call whose `ensures`
+/// bounds its argument, and a `break` in the condition of a loop inside a loop, which leaves the
+/// loop around it. The review's form that assigns is a condition that changes state, which
+/// [`CONDITIONS`] names.
+const CANDIDATES: &[&str] = &[
+    "remainder that can trap in a loop's condition",
+    "remainder that can trap in a guard of a loop's body",
+    "conjunct of a loop's condition that may leave",
+    "guard of a loop's body whose condition may leave",
+    "conjunct of a loop's condition that calls a function whose ensures bounds its argument",
+    "break in the condition of a loop inside a loop",
+];
+
+/// A condition that assigns or passes a place `mut`, anywhere inside it, which the checker
+/// refuses (`E0236`): the condition of a `while`, a `guard` or an `if`, a `bool` scrutinee, a
+/// contract clause or an operand of `and` or `or` changes nothing (`core-calculus.md`, item 10),
+/// so no generated program holds one ([`NOT_GENERATED`]).
+const CONDITIONS: &[&str] = &["condition that assigns or passes mut"];
+
+/// A nested array literal that narrows its integers by itself (`core-calculus.md`, item 4,
+/// Norman's decision of 2026-11-21): a row whose elements have one integer type, inside a literal
+/// whose rows have no one type together, which keeps the others exact. The nightly runs found MIR
+/// building such a row in the outer literal's type, where the reference interpreter narrowed it.
+/// And branches, or arms, that give arrays whose integers meet past 64 bits, in an `i128` or a
+/// `u128`, the edge E0222 holds them to (the review of PR 189 found lowering refusing arrays one
+/// bit past it, which the checker let through). And a branch or an arm of no type beside two that
+/// give values, through an `else if` too, which holds no integer of their hull (the final review
+/// of PR 189 found one dropping the whole hull, and MIR meeting the others in `i64`).
+const ROWS: &[&str] = &[
+    "row of one integer type beside rows of others",
+    "branches of arrays meeting in a 128-bit machine type",
+    "branch of no type beside two that give values",
+];
+
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
 /// (`core-calculus.md`, item 5), by what the checker's table says of it: beside an operand
 /// of a type, which gives it; and alone, an `i64`, either narrowed into a place, which gives
@@ -332,6 +372,10 @@ pub(super) const NOT_GENERATED: &[(&str, &str)] = &[
     (
         "suffixed literal pattern",
         "a pattern's literal takes the type of what the `match` reads, so it has no suffix (E0221)",
+    ),
+    (
+        "condition that assigns or passes mut",
+        "a condition changes nothing, and the checker refuses one that does (E0236)",
     ),
 ];
 
@@ -436,6 +480,7 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
         contracts,
         body,
         tree,
+        header: _,
     } = f;
     let Tree {
         exprs,
@@ -894,6 +939,304 @@ fn reached_traps(f: &CheckedFn, seen: &mut BTreeSet<String>) {
     }
 }
 
+/// The rows of [`CANDIDATES`] a checked function reaches: a remainder whose divisor's static
+/// range holds 0, or has none, written inside a loop's condition or inside the condition of a
+/// `guard` inside a loop's body, by their spans; and what leaves, assigns or calls there.
+fn reached_candidates(module: &CheckedModule, f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    let holds_zero = |e: ExprId| match ranges[e.0 as usize] {
+        Some(Interval { lo, hi }) => (lo.0 || lo.1 == 0) && (!hi.0 || hi.1 == 0),
+        None => true,
+    };
+    let remainders: Vec<(usize, usize)> = tree
+        .exprs
+        .iter()
+        .filter_map(|e| match &e.kind {
+            ExprKind::Binary {
+                op: BinaryOp::Rem,
+                rhs,
+                ..
+            } if holds_zero(*rhs) => Some((e.span.start, e.span.end)),
+            _ => None,
+        })
+        .collect();
+    let inside =
+        |s: mente_syntax::Span| remainders.iter().any(|&(a, b)| s.start <= a && b <= s.end);
+    let bodies: Vec<mente_syntax::Span> = tree
+        .stmts
+        .iter()
+        .filter_map(|s| match &s.kind {
+            StmtKind::While { cond, body, .. } => {
+                if inside(tree.expr(*cond).span) {
+                    seen.insert("remainder that can trap in a loop's condition".to_string());
+                }
+                Some(tree.block(*body).span)
+            }
+            _ => None,
+        })
+        .collect();
+    for s in &tree.stmts {
+        if let StmtKind::Guard { cond, .. } = &s.kind {
+            let c = tree.expr(*cond).span;
+            if inside(c) && bodies.iter().any(|b| b.start <= c.start && c.end <= b.end) {
+                seen.insert("remainder that can trap in a guard of a loop's body".to_string());
+            }
+        }
+    }
+    reached_no_candidates(module, f, &bodies, seen);
+}
+
+/// The rows of [`CANDIDATES`] for what is no candidate by its syntax, a checked function reaches
+/// inside a loop's condition or a guard's condition inside `bodies`, its loops' bodies; and the
+/// row of [`CONDITIONS`], which none reaches.
+fn reached_no_candidates(
+    module: &CheckedModule,
+    f: &CheckedFn,
+    bodies: &[mente_syntax::Span],
+    seen: &mut BTreeSet<String>,
+) {
+    let tree = &f.syntax.tree;
+    let within =
+        |s: mente_syntax::Span, c: mente_syntax::Span| c.start <= s.start && s.end <= c.end;
+    // What leaves, by a statement or at `todo` or `unreachable`, and what breaks.
+    let mut leaving: Vec<mente_syntax::Span> = Vec::new();
+    let mut breaking: Vec<mente_syntax::Span> = Vec::new();
+    for s in &tree.stmts {
+        match &s.kind {
+            StmtKind::Break => {
+                leaving.push(s.span);
+                breaking.push(s.span);
+            }
+            StmtKind::Continue | StmtKind::Return(_) => leaving.push(s.span),
+            _ => {}
+        }
+    }
+    // A call of a function whose `ensures` names one of its parameters.
+    let mut bounding: Vec<mente_syntax::Span> = Vec::new();
+    for (i, e) in tree.exprs.iter().enumerate() {
+        match &e.kind {
+            ExprKind::Todo(_) | ExprKind::Unreachable(_) => leaving.push(e.span),
+            ExprKind::Call { .. } => {
+                let callee = f.resolution.calls[i].and_then(|c| module.functions[c].as_ref());
+                if callee.is_some_and(|c| ensures_names_a_parameter(&c.syntax)) {
+                    bounding.push(e.span);
+                }
+            }
+            _ => {}
+        }
+    }
+    let any_in =
+        |found: &[mente_syntax::Span], c: mente_syntax::Span| found.iter().any(|&s| within(s, c));
+    for s in &tree.stmts {
+        match &s.kind {
+            StmtKind::While { cond, .. } => {
+                let c = tree.expr(*cond).span;
+                if any_in(&leaving, c) {
+                    seen.insert("conjunct of a loop's condition that may leave".to_string());
+                }
+                if any_in(&bounding, c) {
+                    seen.insert(
+                        "conjunct of a loop's condition that calls a function whose ensures bounds its argument"
+                            .to_string(),
+                    );
+                }
+                // Inside another loop's body, which its own body is not.
+                let nested = bodies.iter().any(|&b| within(s.span, b));
+                if nested && any_in(&breaking, c) {
+                    seen.insert("break in the condition of a loop inside a loop".to_string());
+                }
+            }
+            StmtKind::Guard { cond, .. } => {
+                let c = tree.expr(*cond).span;
+                if bodies.iter().any(|&b| within(c, b)) && any_in(&leaving, c) {
+                    seen.insert("guard of a loop's body whose condition may leave".to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    if a_condition_changes_state(&f.syntax) {
+        seen.insert("condition that assigns or passes mut".to_string());
+    }
+}
+
+/// Whether a condition of `f` holds an assignment or a `mut` argument, by their spans: the row of
+/// [`CONDITIONS`]. A condition is the condition of a `while`, a `guard` or an `if`, a contract
+/// clause, an `and` or an `or`, and the scrutinee of a `match` on a `bool`, which this tells by
+/// a `true` or `false` pattern among its arms.
+fn a_condition_changes_state(f: &FnSyntax) -> bool {
+    let tree = &f.tree;
+    let mut changing: Vec<mente_syntax::Span> = tree
+        .stmts
+        .iter()
+        .filter(|s| matches!(s.kind, StmtKind::Assign { .. }))
+        .map(|s| s.span)
+        .collect();
+    for e in &tree.exprs {
+        let args = match &e.kind {
+            ExprKind::Call { args, .. }
+            | ExprKind::Variant {
+                payload: Payload::Positional(args),
+                ..
+            } => args.as_slice(),
+            _ => &[],
+        };
+        changing.extend(
+            args.iter()
+                .filter(|a| a.is_mut)
+                .map(|a| tree.expr(a.value).span),
+        );
+    }
+    let mut conditions: Vec<ExprId> = f.contracts.iter().map(|c| c.expr).collect();
+    for s in &tree.stmts {
+        match &s.kind {
+            StmtKind::While {
+                cond,
+                invariants,
+                decreases,
+                ..
+            } => {
+                conditions.push(*cond);
+                conditions.extend(invariants.iter().chain(decreases));
+            }
+            StmtKind::Guard { cond, .. } => conditions.push(*cond),
+            _ => {}
+        }
+    }
+    for (i, e) in tree.exprs.iter().enumerate() {
+        match &e.kind {
+            ExprKind::If { cond, .. } => conditions.push(*cond),
+            ExprKind::Binary {
+                op: BinaryOp::And | BinaryOp::Or,
+                ..
+            } => conditions.push(ExprId(i as u32)),
+            ExprKind::Match { scrutinee, arms }
+                if arms
+                    .iter()
+                    .any(|a| matches!(a.pattern.kind, PatternKind::Bool(_))) =>
+            {
+                conditions.push(*scrutinee)
+            }
+            _ => {}
+        }
+    }
+    conditions.into_iter().any(|c| {
+        let at = tree.expr(c).span;
+        changing
+            .iter()
+            .any(|s| at.start <= s.start && s.end <= at.end)
+    })
+}
+
+/// The rows of [`ROWS`] a checked function reaches: an array literal whose elements are arrays
+/// of integers of no one type, one of them a literal of one integer type; and an `if` or a
+/// `match` that gives arrays whose integers, by the checker's hull of them, need more than 64
+/// bits together; and an `if` or a `match` with a branch or an arm of no type beside two that
+/// give values, an `else if` and a branch that is itself an `if` or a `match` counted as more
+/// branches of the one join.
+fn reached_rows(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let ty = |e: ExprId| &f.typing.exprs[e.0 as usize];
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    for (k, e) in tree.exprs.iter().enumerate() {
+        let join = matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. });
+        if !join || !matches!(ty(ExprId(k as u32)), Ty::Array(..)) {
+            continue;
+        }
+        let Some(Interval { lo, hi }) = ranges[k] else {
+            continue;
+        };
+        let above = |limit: u128| !hi.0 && hi.1 > limit;
+        if (lo.0 && above(i64::MAX as u128)) || above(u64::MAX as u128) {
+            seen.insert("branches of arrays meeting in a 128-bit machine type".to_string());
+        }
+    }
+    // The values the branches of the join `e` give, through the joins among them.
+    fn values(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
+        let tail = |b| match &tree.stmt(*tree.block(b).stmts.last()?).kind {
+            StmtKind::Expr(x) => Some(*x),
+            _ => None,
+        };
+        let tails: Vec<Option<ExprId>> = match &tree.expr(e).kind {
+            ExprKind::If {
+                then, otherwise, ..
+            } => vec![
+                tail(*then),
+                match otherwise {
+                    Some(Else::Block(b)) => tail(*b),
+                    Some(Else::If(i)) => Some(*i),
+                    None => None,
+                },
+            ],
+            ExprKind::Match { arms, .. } => arms
+                .iter()
+                .map(|a| match a.body {
+                    ArmBody::Expr(x) => Some(x),
+                    ArmBody::Block(b) => tail(b),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for t in tails.into_iter().flatten() {
+            match tree.expr(t).kind {
+                ExprKind::If { .. } | ExprKind::Match { .. } => values(tree, t, out),
+                _ => out.push(t),
+            }
+        }
+    }
+    for (k, e) in tree.exprs.iter().enumerate() {
+        if !matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. }) {
+            continue;
+        }
+        let mut given = Vec::new();
+        values(tree, ExprId(k as u32), &mut given);
+        let none = given.iter().filter(|v| ty(**v).has_no_value()).count();
+        if none > 0 && given.len() - none >= 2 {
+            seen.insert("branch of no type beside two that give values".to_string());
+        }
+    }
+    // The integer type an array of integers holds, at its innermost depth.
+    fn leaf(t: &Ty) -> Option<&Int> {
+        match t {
+            Ty::Array(_, e) => leaf(e),
+            Ty::Int(i) => Some(i),
+            _ => None,
+        }
+    }
+    for (k, e) in tree.exprs.iter().enumerate() {
+        let ExprKind::Array(items) = &e.kind else {
+            continue;
+        };
+        let outer = ty(ExprId(k as u32));
+        let mixed = matches!(outer, Ty::Array(_, inner) if matches!(**inner, Ty::Array(..)))
+            && matches!(leaf(outer), Some(Int::Mixed(None)));
+        let one = items.iter().any(|&i| {
+            tree.expr(i).kind.is_array_literal() && matches!(leaf(ty(i)), Some(Int::One(_)))
+        });
+        if mixed && one {
+            seen.insert("row of one integer type beside rows of others".to_string());
+        }
+    }
+}
+
+/// Whether a function's `ensures` names one of its parameters, which then bounds the argument a
+/// call passes it, where the call returns.
+fn ensures_names_a_parameter(f: &mente_syntax::tree::FnSyntax) -> bool {
+    let params: Vec<&str> = f.params.iter().map(|p| p.name.as_str()).collect();
+    f.contracts
+        .iter()
+        .filter(|c| c.kind == mente_syntax::tree::ContractKind::Ensures)
+        .any(|c| {
+            let at = f.tree.expr(c.expr).span;
+            f.tree.exprs.iter().any(|e| {
+                matches!(&e.kind, ExprKind::Name(n) if params.contains(&n.as_str()))
+                    && at.start <= e.span.start
+                    && e.span.end <= at.end
+            })
+        })
+}
+
 /// The rows of [`EDGES`] a checked function reaches. A value lies past the domain when its
 /// static range, as `E0222` computes it, lies wholly at or beyond the limit on one side of
 /// zero: no value of it is one Tier 1 holds exactly.
@@ -1252,6 +1595,9 @@ fn grammar() -> BTreeSet<String> {
         EDGES,
         RELATIONS,
         TRAPS,
+        CANDIDATES,
+        CONDITIONS,
+        ROWS,
         LITERALS,
         COMPARISONS,
         EXPRESSIONS,
@@ -1305,6 +1651,8 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
             for f in module.functions.iter().flatten() {
                 reached_edges(f, &mut seen);
                 reached_traps(f, &mut seen);
+                reached_candidates(module, f, &mut seen);
+                reached_rows(f, &mut seen);
                 reached_literals(f, &mut seen);
                 reached_comparisons(f, &mut seen);
                 reached_expressions(f, &mut seen);
@@ -1433,6 +1781,105 @@ fn test_each_row_is_asked_of_at_least_three_programs() {
     assert_eq!(too_few(&grammar, &seeds, 2), ["`while` in seeds []"]);
     assert_eq!(too_few(&grammar, &seeds, 0), [""; 0]);
     assert_eq!(too_few(&grammar, &seeds, 4).len(), 3);
+}
+
+/// The row of a condition that changes state, which no generated program holds since the
+/// checker refuses it, is seen where a parsed function holds one: an assignment in a block of an
+/// `if` inside a loop's condition, a `mut` argument in a `guard`'s or an `if`'s, in a loop's
+/// `invariant`, in an operand of `and`, in the scrutinee of a `match` on a `bool`, and in a
+/// function's `requires`; and not where the effect stands outside every condition.
+#[test]
+fn test_a_condition_that_changes_state_is_seen() {
+    let function = |header: &str, body: &str| {
+        let src = format!(
+            "module t\nfn next(mut i: u8) -> u8 {{\n  i = i / 2\n  i\n}}\n{} {{\n  var i = n\n{}\n  i\n}}\n",
+            header, body
+        );
+        let module = mente_syntax::parse_module(&src).unwrap();
+        let parsed = mente_syntax::parse_bodies(&src, &module);
+        parsed
+            .into_iter()
+            .filter_map(|p| p.syntax)
+            .next_back()
+            .unwrap()
+    };
+    let plain = "pub fn f(n: u8) -> u8";
+    for (header, body) in [
+        (
+            plain,
+            "  while (if n > 3 {\n    i = 0\n    0\n  } else {\n    0\n  }) == 0 {\n    i += 1\n  }",
+        ),
+        (plain, "  guard next(mut i) > 0 else {\n    return 0\n  }"),
+        (
+            plain,
+            "  val k: u8 = if next(mut i) > 0 { 1 } else { 0 }\n  i += k",
+        ),
+        (
+            plain,
+            "  while i > 0 invariant next(mut i) >= 0 {\n    i -= 1\n  }",
+        ),
+        (plain, "  val c = n > 0 and next(mut i) > 0\n  _ = c"),
+        (
+            plain,
+            "  val k: u8 = match next(mut i) > 0 {\n    true => 1\n    false => 0\n  }\n  i += k",
+        ),
+        (
+            "pub fn f(mut n: u8) -> u8\n  requires next(mut n) > 0",
+            "",
+        ),
+    ] {
+        assert!(
+            a_condition_changes_state(&function(header, body)),
+            "{}",
+            body
+        );
+    }
+    for body in [
+        "  val ok = next(mut i) > 0\n  if ok {\n    i = 0\n  }",
+        "  while i > 0 {\n    _ = next(mut i)\n  }",
+        "  val k = match next(mut i) {\n    0 => 1\n    _ => 0\n  }\n  i += k",
+    ] {
+        assert!(
+            !a_condition_changes_state(&function(plain, body)),
+            "{}",
+            body
+        );
+    }
+}
+
+/// A join counts as "branch of no type beside two that give values" only with a branch or an arm
+/// that gives none and two that give one, through an `else if` and a branch that is an `if`
+/// itself: one value beside an `unreachable`, as a guard's `if` has, or two values and no branch
+/// of no type, does not.
+#[test]
+fn test_a_branch_of_no_type_counts_beside_two_values_only() {
+    let row = "branch of no type beside two that give values";
+    let reaches = |body: &str| {
+        let source = format!("module m\npub fn f(c: bool, d: bool, k: u8, x: u8) -> u8 = {body}\n");
+        let module = mente_sema::check_program(&source).unwrap();
+        let mut seen = BTreeSet::new();
+        module
+            .functions
+            .iter()
+            .flatten()
+            .for_each(|f| reached_rows(f, &mut seen));
+        seen.contains(row)
+    };
+    for body in [
+        "if c { x } else if d { 3 } else { unreachable(\"u\") }",
+        "if c { unreachable(\"u\") } else if d { x } else { 3 }",
+        "if c { x } else {\n  if d { 3 } else { todo(\"t\") }\n}",
+        "match k {\n  0 => x\n  1 => 3\n  _ => unreachable(\"u\")\n}",
+    ] {
+        assert!(reaches(body), "{}", body);
+    }
+    for body in [
+        "if c { x } else { unreachable(\"u\") }",
+        "if c { x } else if d { 3 } else { 4 }",
+        "match k {\n  0 => x\n  _ => todo(\"t\")\n}",
+    ] {
+        assert!(!reaches(body), "{}", body);
+    }
 }
 
 /// The seeds the test reads: the first programs of each mode.

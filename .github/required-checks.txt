@@ -54,3 +54,7 @@ Tight-loop kernels (AArch64 Linux)
 
 # The agent-benchmark harness and its sandbox (harness.yml).
 Fixtures in Rust and Odin
+
+# The documentation site, its generator tested and every link of the built site checked
+# (pages.yml).
+Build the site

@@ -7,7 +7,7 @@
 //! integer types (`E0212`), a call with the wrong number of arguments (`E0213`) or the wrong
 //! `mut` marks (`E0214`), `.len` of a value that is not an array (`E0215`), and a bit
 //! operation on operands of different integer types (`E0216`), a value nobody uses, which
-//! `_ = e` discards on purpose (`E0217`), and a literal outside its suffix's type (`E0221`); `wide.rs` adds an intermediate that might need more than 128 bits (`E0222`). It checks the parameter modes
+//! `_ = e` discards on purpose (`E0217`), a literal outside its suffix's type (`E0221`), and a refinement bound below `i128` (`E0235`); `wide.rs` adds an intermediate that might need more than 128 bits (`E0222`). It checks the parameter modes
 //! too: only a `var` or a `mut` parameter is assigned (`E0205`) or passed as `mut` (`E0206`),
 //! and a `mut` argument's binding appears in no other argument of its call (`E0207`).
 
@@ -149,12 +149,15 @@ pub fn check(
     }
     c.arrays_in_one_piece();
     c.bounds_have_their_types();
+    c.bounds_within_128_bits();
     let table = literals::taken(f, &c.typing);
     c.typing.literals = table.literals;
     c.typing.arrays = table.arrays;
     c.compared_literals(f);
     c.literal_traps();
     c.unheld_literals();
+    let pure = crate::conditions::effects_in_conditions(f, resolution, &c.typing, src);
+    c.errors.extend(pure);
     (c.typing, c.errors)
 }
 
@@ -795,6 +798,17 @@ impl Checker<'_> {
                     self.errors
                         .push(too_many_elements(e.span, &t.spelling(), *count));
                 }
+            }
+        }
+    }
+
+    /// `E0235` for each refinement with a literal bound below `i128`
+    /// ([`crate::types::bound_beyond_128_bits`]).
+    fn bounds_within_128_bits(&mut self) {
+        for i in 0..self.tree.types.len() {
+            let t = TypeId(i as u32);
+            if let Some(d) = crate::types::bound_beyond_128_bits(self.tree, t) {
+                self.errors.push(d);
             }
         }
     }
@@ -5413,9 +5427,18 @@ pub fn f(mut p: Pair) {
             "cannot pass as `mut` `v`: it is a `val`, which never changes; declare it with `var`"
         );
         assert_eq!(codes("pub fn f(v: u8) {\n  touch(mut v)\n}"), ["E0206"]);
+        // The clause also changes state, which no clause does (`E0236`).
+        let clause = messages(
+            "pub fn bump(mut x: u8) -> bool = true\npub fn f() -> u8\n  ensures bump(mut result)\n= 1",
+        );
         assert_eq!(
-            messages("pub fn bump(mut x: u8) -> bool = true\npub fn f() -> u8\n  ensures bump(mut result)\n= 1"),
-            ["cannot pass as `mut` `result`, the value an `ensures` clause reads"]
+            clause[0],
+            "cannot pass as `mut` `result`, the value an `ensures` clause reads"
+        );
+        assert!(
+            clause[1].starts_with("this `ensures` clause passes `result` as `mut`"),
+            "{:?}",
+            clause
         );
         assert_eq!(
             codes("pub fn f(v: u8) {\n  declared(mut v)\n}"),
@@ -6150,5 +6173,137 @@ pub enum Light {
             )),
             ["E0206"]
         );
+    }
+
+    /// A literal refinement bound lies within `i128..=u128`, where Tier 1, the lowering and
+    /// native code keep a refinement's bounds exactly (`refinement-and-fixed-point.md`, item
+    /// 1): one below `i128` is `E0235`, in a signature, a binding, a struct's field and an
+    /// enum's payload alike. As a lower bound its fix writes the type's least value, and the
+    /// module then checks; as an upper bound it has none. The fuzzer found such a module
+    /// checking and then refused by the lowering, on six nights from 2026-11-12.
+    #[test]
+    fn test_a_literal_bound_below_i128_is_e0235() {
+        let below = "-170141183460469231731687303715884105729";
+        let least = "-170141183460469231731687303715884105728";
+        let codes = |src: &str| -> Vec<&'static str> {
+            check_source(src)
+                .err()
+                .unwrap_or_default()
+                .iter()
+                .map(|d| d.code)
+                .collect()
+        };
+        for (src, fixed) in [
+            (
+                format!(
+                    "module m
+pub fn t(y: u8[{}..=3]) -> u8 = y
+",
+                    below
+                ),
+                "module m
+pub fn t(y: u8[0..=3]) -> u8 = y
+"
+                .to_string(),
+            ),
+            (
+                format!(
+                    "module m
+pub fn t(y: i128[{}..3]) -> i128 = y
+",
+                    below
+                ),
+                format!(
+                    "module m
+pub fn t(y: i128[{}..3]) -> i128 = y
+",
+                    least
+                ),
+            ),
+            (
+                format!(
+                    "module m
+pub fn t(y: i16) -> i16 {{
+  val z: i16[{}..=y] = y
+  z
+}}
+",
+                    below
+                ),
+                "module m
+pub fn t(y: i16) -> i16 {
+  val z: i16[-32768..=y] = y
+  z
+}
+"
+                .to_string(),
+            ),
+            (
+                format!(
+                    "module m
+pub struct S {{
+  a: u8[{}..9]
+}}
+",
+                    below
+                ),
+                "module m
+pub struct S {
+  a: u8[0..9]
+}
+"
+                .to_string(),
+            ),
+            (
+                format!(
+                    "module m
+pub enum E {{
+  V(a: u8[{}..9])
+}}
+",
+                    below
+                ),
+                "module m
+pub enum E {
+  V(a: u8[0..9])
+}
+"
+                .to_string(),
+            ),
+        ] {
+            let d = check_source(&src).err().unwrap_or_default();
+            assert_eq!(
+                d.iter().map(|d| d.code).collect::<Vec<_>>(),
+                ["E0235"],
+                "{}",
+                src
+            );
+            assert_eq!(
+                d[0].fixes[0].applicability,
+                Applicability::MachineApplicable
+            );
+            let applied = mente_syntax::diagnostics::apply_fix(&src, &d[0].fixes[0]).unwrap();
+            assert_eq!(applied, fixed);
+            assert_eq!(codes(&applied), [""; 0], "{}", applied);
+        }
+        // An upper bound below `i128` leaves the refinement no value, and has no fix.
+        let empty = format!(
+            "module m
+pub fn t(y: i8[{}..{}]) -> u8 = 0
+",
+            below, below
+        );
+        let d = check_source(&empty).err().unwrap_or_default();
+        assert_eq!(d.iter().map(|d| d.code).collect::<Vec<_>>(), ["E0235"]);
+        assert!(d[0].fixes.is_empty());
+        assert!(d[0].message.contains("holds no value"), "{}", d[0].message);
+        // The ends of `i128` and `u128` are bounds like any other.
+        let ends = format!(
+            "module m
+pub fn t(y: i128[{}..=340282366920938463463374607431768211455]) -> i128 = y
+",
+            least
+        );
+        assert_eq!(codes(&ends), [""; 0]);
     }
 }

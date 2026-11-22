@@ -1,0 +1,7 @@
+// expect: pass
+module conformance
+// The least value of i128 and the greatest of u128 are bounds like any other
+// (refinement-and-fixed-point.md, item 1), and every path keeps them exactly.
+pub fn widest(y: i128[-170141183460469231731687303715884105728..=340282366920938463463374607431768211455]) -> i128 = y
+
+pub fn lowest(y: i128[-170141183460469231731687303715884105728..=0]) -> i128 = y

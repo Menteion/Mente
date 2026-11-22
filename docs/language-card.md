@@ -125,8 +125,9 @@ pub fn sign(x: i32) -> i32 = if x < 0 { -1 } else if x > 0 { 1 } else { 0 }
 ```
 
 - `if c { ... } else { ... }` is an expression when it has `else`. An `if` inside an operator's operand needs parentheses: `1 + (if c { 2 } else { 3 })`.
-- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A loop that needs a fact the compiler cannot infer states it after the condition: `while i < n invariant k <= i {`.
+- `while c { ... }` repeats while `c` holds. `break` leaves the loop, and `continue` starts its next round. A fact the compiler cannot infer goes after the condition: `while i < n invariant k <= i {`.
 - `guard c else { ... }` continues when `c` holds. Its block must leave: `return`, `break`, `continue`, `todo` or `unreachable`.
+- Conditions, contracts and `and`/`or` operands change nothing. Call first, `val v = next(mut i)`, and test `v`: atop a loop's body, inside `if a` for `a and`.
 - There is no `for`, `match`, ternary `? :`, `loop` or `do`.
 
 ## Functions and `mut`
@@ -180,7 +181,7 @@ pub fn scaled(x: u32, factor: u32) -> u32[0..=1000] {
 ## Unfinished and impossible cases
 
 - `todo("reason")` stands for any value and traps when it runs. Use it for work you have not finished, never a placeholder that looks finished.
-- `unreachable("reason")` stands for any value too, for a case you know cannot happen. It traps if it ever runs, and the compiler removes it where it proves the case impossible.
+- `unreachable("reason")` stands for any value too, for a case that cannot happen. It traps if it runs, and the compiler removes it where it proves the case impossible.
 
 ## Habits from other languages that Mente rejects
 

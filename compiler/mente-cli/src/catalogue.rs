@@ -912,6 +912,40 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "module m\npub fn f(x: u8) -> bool = x < 1 << 8\n",
         "module m\npub fn f(x: u8) -> bool = x < 1 << 7\n",
     ),
+    emitted(
+        "E0235",
+        FailureClass::Type,
+        "spec/refinement-and-fixed-point.md",
+        "A refinement bound below `i128`",
+        "A refinement's literal bounds are kept exactly, as Tier 1, the lowering and native \
+         code keep them, within `i128` and `u128`, so a bound lies between `i128`'s least \
+         value and `u128`'s greatest. No literal lies above `u128`, so only a negative one \
+         can lie beyond. As a lower bound it bounds nothing the type does not, since every \
+         value of every integer type lies above it: write the type's least value, `0` for a \
+         `u8`, which the fix does. As an upper bound it leaves the refinement no value: write \
+         the bound the values should stay below.",
+        "module m\npub fn f(y: u8[-170141183460469231731687303715884105729..=3]) -> u8 = y\n",
+        "module m\npub fn f(y: u8[0..=3]) -> u8 = y\n",
+    ),
+    emitted(
+        "E0236",
+        FailureClass::Type,
+        "spec/core-calculus.md",
+        "A condition that changes state",
+        "A condition decides or states, and changes nothing: the condition of a `while`, a \
+         `guard` or an `if`, the scrutinee of a `match` on a `bool`, a contract clause and \
+         each operand of `and` and `or` hold no assignment and pass nothing `mut`, anywhere \
+         inside them. Where one changed state, every reader of the program had to tell which \
+         of its evaluations had run: whether the right operand of `and` ran, which branch was \
+         taken, whether a round ended early, whether a clause was checked or erased. Compute \
+         the call into a `val` on a line of its own and compare the `val` in the condition, \
+         which the fix does for a call its statement evaluates first. A loop calls every \
+         round at the top of its body instead, its condition keeping what comes before the \
+         call and a `guard ... else { break }` testing the rest. A clause states what holds \
+         over the values as they are.",
+        "module m\nfn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while next(mut i) > 0 and r < 8 {\n    r += 1\n  }\n  r\n}\n",
+        "module m\nfn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while true {\n    val v = next(mut i)\n    guard v > 0 and r < 8 else {\n      break\n    }\n    r += 1\n  }\n  r\n}\n",
+    ),
     reserved(
         "E0310",
         FailureClass::Provenance,
@@ -1007,9 +1041,10 @@ pub const CATALOGUE: &[CodeEntry] = &[
         FailureClass::HardwareContract,
         "spec/morphic-layouts.md",
         "A @layout field has no @bytes range",
-        "Every field of a `@layout` struct states its bytes with `@bytes(start..end)`. When the \
-         field's type has a known size, contiguity leaves one possible range, and the fix that \
-         inserts it is machine-applicable.",
+        "Every field of a `@layout` struct states its bytes with `@bytes(start..end)`, two \
+         integer literals. When the field's type has a known size, contiguity leaves one possible \
+         range, and the fix that writes it is machine-applicable: it inserts the range, or \
+         replaces a `@bytes` that is no range.",
         "module m\n@layout(size: 8, align: 4)\npub struct S {\n  @bytes(0..4) pub a: u32\n  pub b: u32\n}\n",
         "module m\n@layout(size: 8, align: 4)\npub struct S {\n  @bytes(0..4) pub a: u32\n  @bytes(4..8) pub b: u32\n}\n",
     ),
@@ -1060,7 +1095,9 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "A @layout field's type has no known size",
         "A `@layout` struct means the same bytes on every target, so its fields are fixed-size \
          types: primitives, whole-byte `uN` / `iN`, fixed-point, arrays of those, and the module's \
-         own bitstructs and `@layout` structs. `usize` and `isize` depend on the target.",
+         own bitstructs and `@layout` structs. `usize` and `isize` depend on the target. An \
+         array of more elements, or more bytes, than a value may hold has no size either: keep \
+         fewer elements, or split the field.",
         "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub n: usize\n}\n",
         "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub n: u64\n}\n",
     ),
@@ -1120,7 +1157,8 @@ pub const CATALOGUE: &[CodeEntry] = &[
         "spec/morphic-layouts.md",
         "A bitstruct's fields do not fill its backing type",
         "The last field ends at the width of the backing integer, so every bit has a name. Write \
-         spare bits as a field, or choose a narrower backing type.",
+         spare bits as a field, or choose a narrower backing type. No field reaches past bit 128, \
+         where the widest backing, `u128`, ends.",
         "module m\npub bitstruct B : u16 {\n  @bits(0..8) pub a: u8\n}\n",
         "module m\npub bitstruct B : u16 {\n  @bits(0..8) pub a: u8\n  @bits(8..16) pub spare: u8\n}\n",
     ),
@@ -1143,6 +1181,30 @@ pub const CATALOGUE: &[CodeEntry] = &[
          fixed-point values and other types have no bit-exact packing.",
         "module m\npub bitstruct B : u32 {\n  @bits(0..32) pub v: f32\n}\n",
         "module m\npub bitstruct B : u32 {\n  @bits(0..32) pub v: u32\n}\n",
+    ),
+    emitted(
+        "E0426",
+        FailureClass::HardwareContract,
+        "spec/morphic-layouts.md",
+        "A layout attribute is missing a number, or one is no integer literal",
+        "`@layout(size: S, align: A)` names both, each an integer literal, and nothing else; a \
+         bitstruct field states its bits with `@bits(start..end)`, two integer literals. Each \
+         number is read as any integer literal is, in hexadecimal or binary or with `_` between \
+         its digits, so the struct means the same bytes on every host.",
+        "module m\n@layout(size: 8)\npub struct S {\n  @bytes(0..8) pub v: u64\n}\n",
+        "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub v: u64\n}\n",
+    ),
+    emitted(
+        "E0427",
+        FailureClass::HardwareContract,
+        "spec/morphic-layouts.md",
+        "A layout attribute written twice",
+        "A layout states each of its numbers once: a struct has one `@layout`, and a field one \
+         `@bytes` or one `@bits`. Every reader takes the first, so a second would be numbers no \
+         check reads; it is an error that names it. Keep the one that states the layout you \
+         mean.",
+        "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) @bytes(0..eight) pub v: u64\n}\n",
+        "module m\n@layout(size: 8, align: 8)\npub struct S {\n  @bytes(0..8) pub v: u64\n}\n",
     ),
     emitted(
         "E0501",

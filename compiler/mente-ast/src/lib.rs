@@ -103,7 +103,14 @@ pub fn compute_dual_hashes(module: &ModuleFile) -> DualSemanticHash {
                 for f in &bs.fields {
                     spec_h.update(
                         "bitfield",
-                        &format!("{}:{}:{:?}", f.name, f.ty, f.bit_range),
+                        // As a tuple was written, so that a range read before keeps its hash.
+                        &format!(
+                            "{}:{}:{}",
+                            f.name,
+                            f.ty,
+                            f.bit_range
+                                .map_or(String::from("?"), |(a, b)| format!("({}, {})", a, b))
+                        ),
                     );
                 }
             }
@@ -217,10 +224,10 @@ pub fn project_spec_blueprint(module: &ModuleFile) -> SpecProjectionReport {
                 ));
                 for f in &bs.fields {
                     let vis = if f.is_pub { "pub " } else { "" };
-                    out.push_str(&format!(
-                        "  @bits({}..{}) {}{}: {}\n",
-                        f.bit_range.0, f.bit_range.1, vis, f.name, f.ty
-                    ));
+                    let bits = f
+                        .bit_range
+                        .map_or(String::from("?..?"), |(a, b)| format!("{}..{}", a, b));
+                    out.push_str(&format!("  @bits({}) {}{}: {}\n", bits, vis, f.name, f.ty));
                 }
                 out.push_str("}\n\n");
             }
@@ -511,6 +518,8 @@ struct Scratch {
             ("  Left\n  Right\n}", "  Left\n  Right\n  Up\n}"),
             ("  fn hit(self) -> bool", "  fn hit(self) -> u8"),
         ] {
+            // An edit of text the module does not hold would change nothing, and prove nothing.
+            assert!(base.contains(from), "the module holds no `{}`", from);
             assert_ne!(
                 h,
                 spec(&base.replace(from, to)),
@@ -524,10 +533,14 @@ struct Scratch {
                 "bitstruct Hidden : u8 {\n  @bits(0..8) pub raw: u8",
                 "bitstruct Hidden : u8 {\n  @bits(0..8) pub bits: u8",
             ),
-            ("enum Inner { A, B }", "enum Inner { A, B, C }"),
+            (
+                "enum Inner {\n  A\n  B\n}",
+                "enum Inner {\n  A\n  B\n  C\n}",
+            ),
             ("  fn peek(self) -> bool", "  fn peek(self) -> u8"),
             ("struct Scratch {\n  n: u32", "struct Scratch {\n  n: u64"),
         ] {
+            assert!(base.contains(from), "the module holds no `{}`", from);
             assert_eq!(
                 h,
                 spec(&base.replace(from, to)),

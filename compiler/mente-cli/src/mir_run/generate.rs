@@ -477,6 +477,7 @@ fn passes_mut(e: &E, name: &str) -> bool {
         E::Array(items) => items.iter().any(sub),
         E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
         E::Return(x) => sub(x),
+        E::Leave(_) => false,
     }
 }
 
@@ -496,6 +497,7 @@ fn names(e: &E, is: &dyn Fn(&str) -> bool) -> bool {
         E::Array(items) => items.iter().any(sub),
         E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
         E::Return(x) => sub(x),
+        E::Leave(_) => false,
     }
 }
 
@@ -672,6 +674,8 @@ enum E {
     /// `return` with a value, as a branch of an `if` or an arm of a `match` in a function's
     /// expression body: the branch leaves the function.
     Return(Box<E>),
+    /// `break` or `continue`, as a branch of an `if` inside a loop: the branch leaves the round.
+    Leave(&'static str),
 }
 
 impl E {
@@ -846,6 +850,7 @@ impl E {
                 out.push_str("return ");
                 v.print(0, out);
             }
+            E::Leave(keyword) => out.push_str(keyword),
         }
     }
 
@@ -1142,6 +1147,10 @@ enum Body {
 /// The most work, in statements run, one call of a generated function may do.
 const COST_BUDGET: u64 = 4_000;
 
+/// How often, in percent, a loop gets a conjunct or a guard that is no candidate
+/// ([`Gen::no_candidate`]).
+const NO_CANDIDATE_CHANCE: u64 = 20;
+
 /// What `Gen::mark` saves.
 struct Mark {
     seen: Vec<(bool, bool)>,
@@ -1197,7 +1206,18 @@ struct Gen {
     mult: u64,
     cost: u64,
     no_calls: bool,
+    /// How many conditions the expression being written stands in: inside one, no call passes a
+    /// place `mut`, since a condition changes nothing (`core-calculus.md`, item 10).
+    pure: u32,
     names: usize,
+    /// The stream of the rules added to a function's body since the first, so that one leaves
+    /// what every other rule writes as it was: each attempt at a body has its own.
+    rules: Rng,
+    /// The stream of the loop conjuncts and guards that are no candidates ([`Gen::no_candidate`]),
+    /// apart from `rules`, so that the rules on it write what they wrote before.
+    no_candidates: Rng,
+    /// The functions those conjuncts call, written after the module's own.
+    helpers: Vec<String>,
 }
 
 impl Gen {
@@ -1227,7 +1247,11 @@ impl Gen {
             mult: 1,
             cost: 0,
             no_calls: false,
+            pure: 0,
             names: 0,
+            rules: Rng::new(seed),
+            no_candidates: Rng::new(seed),
+            helpers: Vec::new(),
         }
     }
 
@@ -1261,6 +1285,17 @@ impl Gen {
             out.push_str(&text);
             functions.push((format!("f{}", k), start..out.len()));
         }
+        // Now and then arrays that meet in one shape, from a random source of its own too, before
+        // the recursion, which ends a program, and named past its two functions
+        // (`meeting_arrays`).
+        let mut rng = stream(self.seed, count, 1);
+        if rng.chance(MEETING_CHANCE) {
+            let (name, text) = meeting_arrays(&mut rng, count + 2);
+            out.push('\n');
+            let start = out.len();
+            out.push_str(&text);
+            functions.push((name, start..out.len()));
+        }
         // Now and then a recursion the stack budget ends, from a random source of its own, so
         // that the functions above stay as they are (`deep_recursion`).
         let mut rng = stream(self.seed, count, 0);
@@ -1271,6 +1306,13 @@ impl Gen {
                 out.push_str(&text);
                 functions.push((name, start..out.len()));
             }
+        }
+        // The functions the loops' conjuncts call, which no other function is generated with.
+        for (k, text) in std::mem::take(&mut self.helpers).into_iter().enumerate() {
+            out.push('\n');
+            let start = out.len();
+            out.push_str(&text);
+            functions.push((format!("pin{}", k), start..out.len()));
         }
         (out, functions)
     }
@@ -1526,8 +1568,9 @@ impl Gen {
     /// refinement bounds the literals.
     fn scrutinee(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
         // Now and then what a call that changes a place gives, which the arms then read as the
-        // call left it. A call's result has its type's range, refined or not.
-        if self.rng.chance(60) {
+        // call left it. A call's result has its type's range, refined or not. Not for a `bool`,
+        // whose `match` decides as an `if` does and whose scrutinee changes nothing.
+        if self.rng.chance(60) && *ty != Ty::Bool {
             if let Some((e, _)) = self.call_of(depth + 1, |t| t == ty, true) {
                 let range = match ty {
                     Ty::Int(t) => Some(t.range()),
@@ -1538,7 +1581,8 @@ impl Gen {
         }
         match ty {
             Ty::Enum(name) => Some((self.enum_value(name, depth + 1), None)),
-            Ty::Bool => Some((self.bool_expr(depth + 1), None)),
+            // A `match` on a `bool` decides as an `if` does, and its scrutinee changes nothing.
+            Ty::Bool => Some((self.condition(depth + 1), None)),
             Ty::Int(t) => {
                 // A binding whose refinement has literal bounds: the literals cover its range.
                 let refined: Vec<usize> = self
@@ -1559,7 +1603,7 @@ impl Gen {
                 // such; tried a few times, or a binding of the type read.
                 if self.rng.chance(20) {
                     let m = self.mark();
-                    let c = self.bool_expr(depth + 1);
+                    let c = self.condition(depth + 1);
                     match (
                         self.int_scrutinee(*t, depth + 1),
                         self.int_scrutinee(*t, depth + 1),
@@ -1748,6 +1792,7 @@ impl Gen {
             E::Array(items) => items.iter().any(sub),
             E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
             E::Return(x) => sub(x),
+            E::Leave(_) => false,
         }
     }
 
@@ -1820,7 +1865,7 @@ impl Gen {
                     self.returns_in(x, t);
                 }
             }
-            E::Lit(_) | E::Name(_) | E::Builtin(..) | E::Return(_) => {}
+            E::Lit(_) | E::Name(_) | E::Builtin(..) | E::Return(_) | E::Leave(_) => {}
         }
     }
 
@@ -3119,9 +3164,10 @@ impl Gen {
 
     /// A call whose result is an integer, for an index, which traps where it is negative: one
     /// with `mut` arguments may change the array it indexes, which is read as it was before the index is evaluated
-    /// (`core-calculus.md`, items 10 and 12). Its own arguments make no further calls.
+    /// (`core-calculus.md`, items 10 and 12). Its own arguments make no further calls. None
+    /// inside a condition, which changes nothing.
     fn index_call(&mut self) -> Option<E> {
-        if self.no_calls {
+        if self.no_calls || self.pure > 0 {
             return None;
         }
         let options: Vec<Sig> = self
@@ -3154,6 +3200,17 @@ impl Gen {
 
     // ---------------------------------------------------------------- other expressions
 
+    /// A condition (`core-calculus.md`, item 10), the condition of an `if` or a `guard`, a
+    /// `bool` scrutinee or an operand of `and` or `or`: a `bool` expression that changes
+    /// nothing, so that no call in it, at any depth, passes a place `mut`. The clauses the
+    /// generator writes compare names and literals alone.
+    fn condition(&mut self, depth: u32) -> E {
+        self.pure += 1;
+        let c = self.bool_expr(depth);
+        self.pure -= 1;
+        c
+    }
+
     fn bool_expr(&mut self, depth: u32) -> E {
         if depth >= 3 || self.rng.chance(25 + 15 * u64::from(depth)) {
             return self.bool_leaf();
@@ -3178,10 +3235,11 @@ impl Gen {
                     E::bin(op, a.e, b.e)
                 }
             }
+            // The operands of `and` and `or` change nothing (`core-calculus.md`, item 10).
             45..=59 => {
                 let op = if self.rng.chance(50) { Op::And } else { Op::Or };
-                let a = self.bool_expr(depth + 1);
-                let b = self.bool_expr(depth + 1);
+                let a = self.condition(depth + 1);
+                let b = self.condition(depth + 1);
                 E::bin(op, a, b)
             }
             60..=69 => E::Not(Box::new(self.bool_expr(depth + 1))),
@@ -3511,7 +3569,7 @@ impl Gen {
         }
         if !matches!(ty, Ty::Array(..)) && self.rng.chance(10) {
             let m = self.mark();
-            let c = self.bool_expr(depth + 1);
+            let c = self.condition(depth + 1);
             let (a, b, hull) = match ty {
                 Ty::Int(t) => {
                     let (a, ra) = self.narrowed_range(*t, depth + 1);
@@ -3549,8 +3607,11 @@ impl Gen {
         if self.no_calls || depth >= 3 {
             return None;
         }
+        // Inside a condition, which changes nothing, no call passes a place `mut`.
+        let pure = self.pure > 0;
         let wanted = |s: &Sig| {
-            s.ret.as_ref().is_some_and(&fits) && (!changes || s.params.iter().any(|p| p.is_mut))
+            let passes_mut = s.params.iter().any(|p| p.is_mut);
+            s.ret.as_ref().is_some_and(&fits) && (!changes || passes_mut) && !(pure && passes_mut)
         };
         let mut options: Vec<Sig> = self
             .sigs
@@ -4118,7 +4179,7 @@ impl Gen {
     fn leaving_if(&mut self) -> Option<E> {
         let t = self.current.as_ref().and_then(|s| s.ret.clone())?;
         let r = self.current.as_ref().and_then(|s| s.ret_range);
-        let cond = self.bool_expr(1);
+        let cond = self.condition(1);
         let a = E::Return(Box::new(self.default_of(&t, r)));
         let b = E::Return(Box::new(self.default_of(&t, r)));
         Some(E::If(Box::new(cond), Box::new(a), Box::new(b)))
@@ -4688,9 +4749,9 @@ impl Gen {
     /// An `if`, now and then with `else if`s: each condition of the chain is generated first, so
     /// that what they need is guarded before the whole statement.
     fn if_statement(&mut self, depth: u32) -> Vec<S> {
-        let mut conds = vec![self.bool_expr(0)];
+        let mut conds = vec![self.condition(0)];
         while conds.len() < 4 && self.rng.chance(25) {
-            conds.push(self.bool_expr(0));
+            conds.push(self.condition(0));
         }
         let mut out = self.flush();
         let mut els = self
@@ -4747,6 +4808,27 @@ impl Gen {
         if let Some(more) = more {
             cond = E::bin(Op::And, cond, more);
         }
+        // Now and then a candidate that can trap, in the condition or as a guard of the body.
+        let mut first = Vec::new();
+        if let Some(trapping) = self.trapping_candidate() {
+            if self.rules.chance(50) {
+                cond = E::bin(Op::And, cond, trapping);
+            } else {
+                let leave = if self.rules.chance(50) {
+                    S::Continue
+                } else {
+                    S::Break
+                };
+                first.push(S::Guard(
+                    trapping,
+                    Block {
+                        stmts: vec![leave],
+                        tail: None,
+                    },
+                ));
+            }
+        }
+        self.no_candidate(&mut cond, &mut first);
         let mut clauses = Vec::new();
         let invariant = self.mode == Mode::Refined && self.rng.chance(50);
         if self.mode == Mode::Refined {
@@ -4799,7 +4881,8 @@ impl Gen {
             most.sub(one).map(|hi| R { lo: Num::ZERO, hi })
         }
         .filter(|r| r.lo <= r.hi);
-        let body = self.block(depth + 1, None, vec![step], None);
+        first.insert(0, step);
+        let body = self.block(depth + 1, None, first, None);
         self.binds[id].known = Some(R {
             lo: Num::ZERO,
             hi: most,
@@ -4811,6 +4894,150 @@ impl Gen {
         out
     }
 
+    /// Now and then `k % x < k + 1` over an integer binding `x` in scope that nothing guards,
+    /// no loop's counter: true wherever it does not trap, and trapping where `x` is 0. As a
+    /// loop's candidate it holds only where its divisor is proven not 0 without it
+    /// (`ghost-contracts-and-totality.md`, item 2, "Facts at a loop head"); the nightly runs
+    /// found Tier 1 proving such a divisor from the candidate itself. None for a binding known
+    /// to be 0, whose remainder would always trap.
+    fn trapping_candidate(&mut self) -> Option<E> {
+        if !self.rules.chance(15) {
+            return None;
+        }
+        let ids: Vec<usize> = self
+            .visible()
+            .into_iter()
+            .filter(|&id| {
+                let b = &self.binds[id];
+                match b.ty {
+                    Ty::Int(t) => {
+                        b.kind != Kind::Counter && self.known_range(id, t) != R::point(Num::ZERO)
+                    }
+                    _ => false,
+                }
+            })
+            .collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let id = ids[self.rules.below(ids.len() as u64) as usize];
+        let k = 1 + self.rules.below(9);
+        let x = self.read(id);
+        Some(E::bin(
+            Op::Lt,
+            E::bin(Op::Rem, E::Lit(k.to_string()), x),
+            E::Lit((k + 1).to_string()),
+        ))
+    }
+
+    /// Now and then, from a stream of its own, a conjunct of a loop's condition or a guard of its
+    /// body that is no candidate by its syntax (`ghost-contracts-and-totality.md`, item 2,
+    /// `loop-candidates-by-syntax`), of each form the reviews of pull request 182 found Tier 1
+    /// holding as a fact at a loop's head:
+    /// - an `if` that leaves on one branch, in the condition or in a guard: by `break` or
+    ///   `continue`, which in a condition leave the loop around it, so only a loop inside a loop
+    ///   has them there, and then mostly `break` (the review's d1); by `return`; or at `todo` or
+    ///   `unreachable`;
+    /// - a call whose `ensures` bounds its argument, of a function written for it that returns
+    ///   only where that holds, and which the loop's exit never calls; in a refined program only,
+    ///   since a plain one has no contracts.
+    ///
+    /// The reviews' b2, an `if` whose branch assigns, is no condition at all now: a condition
+    /// changes nothing (`core-calculus.md`, item 10), and the checker refuses one that does.
+    ///
+    /// Each reads a binding in scope, so that a fact Tier 1 wrongly held there would prove a
+    /// check some run fails. `cond` takes the conjunct, and `first` the guard, after the step.
+    fn no_candidate(&mut self, cond: &mut E, first: &mut Vec<S>) {
+        if !self.no_candidates.chance(NO_CANDIDATE_CHANCE) {
+            return;
+        }
+        let ints: Vec<(usize, IntT)> = self
+            .visible()
+            .into_iter()
+            .filter_map(|id| match self.binds[id].ty {
+                Ty::Int(t) if self.binds[id].kind != Kind::Counter => Some((id, t)),
+                _ => None,
+            })
+            .collect();
+        if ints.is_empty() {
+            return;
+        }
+        let (x, t) = ints[self.no_candidates.below(ints.len() as u64) as usize];
+        let zero = || E::Lit("0".to_string());
+        // A contract is the refined mode's alone, so a plain program's call is a leaving one.
+        let pick = match self.no_candidates.below(3) {
+            2 if self.mode != Mode::Refined => 0,
+            pick => pick,
+        };
+        let test = {
+            let k = self.no_candidates.below(10);
+            E::bin(Op::Gt, self.read(x), E::Lit(k.to_string()))
+        };
+        match pick {
+            0 | 1 => {
+                let in_guard = pick == 1;
+                let nested = !in_guard && self.loops > 0;
+                let leave = if nested && self.no_candidates.chance(50) {
+                    E::Leave("break")
+                } else {
+                    let mut leaves = vec![
+                        E::Builtin("todo", "not handled".into()),
+                        E::Builtin("unreachable", "ruled out".into()),
+                    ];
+                    if in_guard || nested {
+                        leaves.push(E::Leave("break"));
+                        leaves.push(E::Leave("continue"));
+                    }
+                    let ret = self
+                        .current
+                        .as_ref()
+                        .and_then(|s| s.ret.clone().map(|t| (t, s.ret_range)));
+                    if let Some((t, r)) = ret {
+                        leaves.push(E::Return(Box::new(self.default_of(&t, r))));
+                    }
+                    let k = self.no_candidates.below(leaves.len() as u64) as usize;
+                    leaves.swap_remove(k)
+                };
+                let conj = E::bin(
+                    Op::Eq,
+                    E::If(Box::new(test), Box::new(leave), Box::new(zero())),
+                    zero(),
+                );
+                if in_guard {
+                    let leave = if self.no_candidates.chance(50) {
+                        S::Continue
+                    } else {
+                        S::Break
+                    };
+                    first.push(S::Guard(
+                        conj,
+                        Block {
+                            stmts: vec![leave],
+                            tail: None,
+                        },
+                    ));
+                } else {
+                    *cond = E::bin(Op::And, cond.clone(), conj);
+                }
+            }
+            _ => {
+                let name = format!("pin{}", self.helpers.len());
+                // Every integer type holds 0 to 99.
+                let bound = self.no_candidates.below(100);
+                self.helpers.push(format!(
+                    "fn {0}(v: {1}) -> {1}\n  ensures v <= {2} and result == v\n{{\n  guard v <= {2} else {{\n    todo(\"past {2}\")\n  }}\n  v\n}}\n",
+                    name, t.name, bound
+                ));
+                let call = E::Call(name, vec![(false, self.read(x))]);
+                *cond = E::bin(
+                    Op::And,
+                    cond.clone(),
+                    E::bin(Op::Le, call, E::Lit(bound.to_string())),
+                );
+            }
+        }
+    }
+
     fn guard_statement(&mut self) -> Vec<S> {
         let named = self.guarded() && self.rng.chance(70);
         let cond = match named.then(|| self.int_name(None, false)).flatten() {
@@ -4819,7 +5046,7 @@ impl Gen {
                 let n = self.value_in(r);
                 E::bin(op, x, E::num(n))
             }
-            _ => self.bool_expr(0),
+            _ => self.condition(0),
         };
         self.pending.push(cond);
         self.flush()
@@ -5014,6 +5241,8 @@ impl Gen {
         // The body, of this attempt: another attempt has another body under the same signature.
         let attempt = self.attempts.get(index).copied().unwrap_or(0);
         self.rng = stream(self.seed, index, 1 + u64::from(attempt));
+        self.rules = stream(self.seed, index, (1 << 32) + u64::from(attempt));
+        self.no_candidates = stream(self.seed, index, (2 << 32) + u64::from(attempt));
         let mut first = Vec::new();
         if self.recursion.is_some() {
             let leave = S::Return(ret.as_ref().map(|t| self.default_of(t, ret_range)));
@@ -5403,6 +5632,173 @@ fn deep_recursion(rng: &mut Rng, k: usize) -> Vec<(String, String)> {
     ]
 }
 
+/// How often, in a hundred, a program also holds a function of arrays that meet in one shape
+/// ([`meeting_arrays`]).
+const MEETING_CHANCE: u64 = 20;
+
+/// A public function `f{k}` whose arrays meet in one machine shape where two become one value,
+/// from a random source of its own, so that the functions before it stay as they are: branches or
+/// arms that give arrays of different element types, an `if` the checker types narrower than the
+/// literal it holds, a row read from a literal of integers of no one type, and an element of one
+/// inside another (`core-calculus.md`, item 4). MIR once built such an array in one shape and read
+/// it in another (the nightly triage's root causes 2 and 11, and the review of PR 189); the MIR
+/// verifier now refuses any access of another shape (`cfg::check_memory`). Now and then a branch
+/// or an arm of no type stands beside those that meet, an `unreachable`, a `todo` or an `if`
+/// that leaves both ways, and an integer `if` meets beyond its type as an array's does: such a
+/// branch once dropped the whole hull, and MIR met a `u64` above `i64` in an `i64`, and 300 in
+/// a `u8` (the final review of PR 189).
+fn meeting_arrays(rng: &mut Rng, k: usize) -> (String, String) {
+    let name = format!("f{}", k);
+    let small = ["u8", "i8", "u16", "i16", "u32", "i32"];
+    let signed = ["i8", "i16", "i32", "i64"];
+    // A literal every type above holds, negative only for a signed one.
+    let literal = |t: &str, rng: &mut Rng| -> String {
+        let n = rng.below(101);
+        if t.starts_with('i') && rng.chance(40) {
+            format!("-{}", n.max(1))
+        } else {
+            n.to_string()
+        }
+    };
+    // A value of no type, which a branch or an arm may give beside the others.
+    let no_value = |rng: &mut Rng| -> String {
+        match rng.below(3) {
+            0 => "unreachable(\"ruled out\")".to_string(),
+            1 => "todo(\"not handled\")".to_string(),
+            _ => "if c { unreachable(\"ruled out\") } else { todo(\"not handled\") }".to_string(),
+        }
+    };
+    let roll = rng.below(4);
+    let text = if roll == 0 {
+        // Branches, or arms, of arrays of two element types, landing in a wider one. Half the
+        // time the second stands at the edge of 128 bits beside the first: a `u64` beside a
+        // signed type, their integers meeting in an `i128`, or a `u128` beside an unsigned one,
+        // meeting in a `u128`. One bit past it, an `i8` beside a `u128`, is E0222, which the
+        // review of PR 189 found lowering refusing where the checker let it through.
+        let a = *rng.pick(&small);
+        let mut b = *rng.pick(&small);
+        if rng.chance(50) {
+            b = if a.starts_with('i') { "u64" } else { "u128" };
+        } else if b == a {
+            b = "i64";
+        }
+        let (la, lb) = (literal(a, rng), literal(b, rng));
+        let (first, second) = (format!("[x, {}_{}]", la, a), format!("[y, {}_{}]", lb, b));
+        if rng.chance(50) {
+            // Two branches, or those two beside a third of no type, first or last.
+            let body = match rng.below(4) {
+                0 => format!(
+                    "if c {{ {} }} else if d {{ {} }} else {{ {} }}",
+                    first,
+                    second,
+                    no_value(rng)
+                ),
+                1 => format!(
+                    "if c {{ {} }} else if d {{ {} }} else {{ {} }}",
+                    no_value(rng),
+                    first,
+                    second
+                ),
+                _ => format!("if c {{ {} }} else {{ {} }}", first, second),
+            };
+            format!(
+                "pub fn {}(c: bool, d: bool, x: {}, y: {}) -> [2]i64 = {}\n",
+                name, a, b, body
+            )
+        } else {
+            let rest = match rng.below(3) {
+                0 => no_value(rng),
+                _ => format!("[{}; 2]", rng.below(1001)),
+            };
+            format!(
+                "pub fn {}(c: bool, k: u8, x: {}, y: {}) -> [2]i64 = match k {{\n  0 => {}\n  1 => {}\n  _ => {}\n}}\n",
+                name, a, b, first, second, rest
+            )
+        }
+    } else if roll == 1 {
+        // An `if` of a `[n]u8` to the checker whose literal holds more, until it lands; its
+        // `[x; n]` half the time a binding its block gives by name (the review of PR 183).
+        let n = 1 + rng.below(4);
+        let wide = *rng.pick(&["u16", "u32", "i32", "i64"]);
+        let held = 256 + rng.below(745);
+        let bytes = if rng.chance(50) {
+            format!("{{\n    val t: [{}]u8 = [x; {}]\n    t\n  }}", n, n)
+        } else {
+            format!("{{ [x; {}] }}", n)
+        };
+        // The literal's branch, or it and a branch of no type after it.
+        let rest = if rng.chance(30) {
+            format!("if d {{ [{}; {}] }} else {{ {} }}", held, n, no_value(rng))
+        } else {
+            format!("[{}; {}]", held, n)
+        };
+        if rng.chance(25) {
+            // The integer sibling: an `if` of a `u8` to the checker that holds more until it
+            // lands, beside a branch of no type.
+            format!(
+                "pub fn {}(c: bool, d: bool, x: u8) -> {} = if c {{ x }} else if d {{ {} }} else {{ {} }}\n",
+                name,
+                wide,
+                held,
+                no_value(rng)
+            )
+        } else {
+            format!(
+                "pub fn {}(c: bool, d: bool, x: u8) -> {} {{\n  val a: [{}]{} = if c {} else {{ {} }}\n  a[{}]\n}}\n",
+                name,
+                wide,
+                n,
+                wide,
+                bytes,
+                rest,
+                n - 1
+            )
+        }
+    } else {
+        // A literal of a signed type beside a `u128` keeps its integers exact: a row of it read
+        // by index, or an element of it inside another literal.
+        let s = *rng.pick(&signed);
+        let negative = rng.chance(50);
+        let (first, result) = if negative {
+            (format!("-{}", 1 + rng.below(100)), "i128")
+        } else {
+            (rng.below(101).to_string(), "u128")
+        };
+        // Values a `u128` holds, and an `i128` too beside a negative one.
+        let big = |rng: &mut Rng| -> u128 {
+            if negative {
+                rng.u128() >> 28
+            } else {
+                rng.u128()
+            }
+        };
+        let (wide, wider) = (big(rng), big(rng));
+        if roll == 2 {
+            format!(
+                "pub fn {}(k: bool) -> [2]{} = [[{}_{}, {}], [{}_u128, {}]][if k {{ 1 }} else {{ 0 }}]\n",
+                name,
+                result,
+                first,
+                s,
+                rng.below(101),
+                wide,
+                wider
+            )
+        } else {
+            format!(
+                "pub fn {}(k: bool) -> [2]{} = [[{}_{}, {}_u128][if k {{ 1 }} else {{ 0 }}], {}_i8]\n",
+                name,
+                result,
+                first,
+                s,
+                wide,
+                rng.below(101)
+            )
+        }
+    };
+    (name, text)
+}
+
 fn field_text(f: &GField) -> String {
     let range = |r: R| match (f.exclusive, r.hi.add(Num::small(1))) {
         (true, Some(end)) => format!("[{}..{}]", r.lo, end),
@@ -5471,7 +5867,8 @@ pub struct Checked {
     pub attempts: Vec<u32>,
     /// What no generated program may show: a diagnostic other than `E0508`, which is a bug of
     /// the generator; an `E0508` the reference interpreter contradicts, which is a bug of
-    /// Tier 1; and a program that still has one after [`MAX_ROUNDS`].
+    /// Tier 1; a program that still has one after [`MAX_ROUNDS`]; and a loop Tier 1 replays
+    /// from its memo other than analysing it again gives (`mente_sema::tier1_loop_replays`).
     pub problems: Vec<String>,
 }
 
@@ -5613,6 +6010,22 @@ pub fn checked(seed: u64) -> Checked {
             Ok(Ok(module)) => {
                 let deep = too_deep(&program, &module);
                 if deep.is_empty() {
+                    match panic::catch_unwind(|| mente_sema::tier1_loop_replays(&program.text)) {
+                        Ok(replays) => {
+                            for (name, _, spans) in replays {
+                                problems.extend(spans.iter().map(|s| {
+                                    format!(
+                                        "seed {}: `{}` replays the loop at {}:{} other than its analysis gives",
+                                        seed, name, s.line, s.col
+                                    )
+                                }));
+                            }
+                        }
+                        Err(_) => problems.push(format!(
+                            "seed {}: Tier 1 panicked replaying its loops",
+                            seed
+                        )),
+                    }
                     return Checked {
                         program,
                         module: Some(module),
@@ -6585,6 +6998,7 @@ mod tests {
             E::If(c, a, b) => sub(c) || sub(a) || sub(b),
             E::Array(items) => items.iter().any(sub),
             E::Match(s, arms) => sub(s) || arms.iter().any(|(_, x)| sub(x)),
+            E::Leave(_) => false,
         }
     }
 
@@ -7226,6 +7640,111 @@ mod tests {
             problems[0]
         );
     }
+
+    /// `meeting_arrays` writes each of its forms, every one of which checks: branches of arrays of
+    /// two element types, as an `if` and as a `match`, at the edge of 128 bits too, a `u64`
+    /// beside a signed type and a `u128` beside an unsigned one, an `if` of a `[n]u8` holding a literal past
+    /// `u8`, a row of an exact literal read by index, and an element of one inside another; and
+    /// branches and arms of no type beside those that meet, an `unreachable`, a `todo` and an
+    /// `if` that leaves both ways, first or last, and an integer `if` holding a literal past
+    /// `u8` beside one (the final review of PR 189). The
+    /// first functions are pinned, so that a change to a choice shows. In a program the function
+    /// lies before the recursion, which ends a program, named past the recursion's two.
+    #[test]
+    fn test_arrays_that_meet_in_one_shape_are_generated() {
+        let texts: Vec<String> = (0..200)
+            .map(|s| {
+                let (name, text) = meeting_arrays(&mut Rng::new(s), 3);
+                assert_eq!(name, "f3");
+                text
+            })
+            .collect();
+        for (s, text) in texts.iter().enumerate() {
+            assert!(text.starts_with("pub fn f3("), "{}: {}", s, text);
+            let source = format!("module m\n{}", text);
+            assert!(
+                mente_sema::check_program(&source).is_ok(),
+                "{}: {}",
+                s,
+                text
+            );
+            // Branches of two element types.
+            if let Some(rest) = text.split_once(", x: ").map(|(_, r)| r) {
+                let (a, rest) = rest.split_once(", y: ").unwrap_or((rest, ""));
+                let b = rest.split(')').next().unwrap_or("");
+                if !b.is_empty() {
+                    assert_ne!(a, b, "{}: {}", s, text);
+                }
+            }
+        }
+        for form in [
+            " = if c { [x, ",
+            " = match k {",
+            "{ [x; ",
+            "    t\n  } else { [",
+            "]][if k { 1 } else { 0 }]",
+            "_u128][if k { 1 } else { 0 }], ",
+            ", y: u64) -> [2]i64 = ",
+            ", y: u128) -> [2]i64 = ",
+            "] } else { unreachable(",
+            "] } else { todo(",
+            " = if c { unreachable(",
+            " = if c { todo(",
+            "else { if c { unreachable(\"ruled out\") } else { todo(",
+            "  _ => unreachable(",
+            "  _ => todo(",
+            " = if c { x } else if d { ",
+            " } else { if d { [",
+        ] {
+            assert!(texts.iter().any(|t| t.contains(form)), "no `{}`", form);
+        }
+        assert_eq!(
+            texts[..PINNED.len()],
+            PINNED,
+            "{:#?}",
+            &texts[..PINNED.len()]
+        );
+        // In a program, before the recursion, named past it, and followed only by the recursion and
+        // the functions the loops' conjuncts call, which end a program.
+        let mut seen = 0;
+        for seed in 0..300 {
+            let p = program(seed);
+            for (k, (name, at)) in p.functions.iter().enumerate() {
+                let text = &p.text[at.clone()];
+                let meeting = text.contains("]][if k { 1 } else { 0 }]")
+                    || text.contains("_u128][if k { 1 } else { 0 }], ")
+                    || text.contains("(c: bool, d: bool, x: ")
+                    || text.contains("(c: bool, k: u8, x: ");
+                if !meeting {
+                    continue;
+                }
+                seen += 1;
+                assert_eq!(*name, format!("f{}", k + 2), "seed {}", seed);
+                assert!(
+                    p.functions[k + 1..]
+                        .iter()
+                        .all(|(name, at)| name.starts_with("pin")
+                            || p.text[at.clone()].contains("4294967295")
+                            || p.text[at.clone()].contains("(n: u32")),
+                    "seed {}: only the recursion and the loops' functions follow",
+                    seed
+                );
+            }
+        }
+        assert!(seen >= 30, "{} programs hold arrays that meet", seen);
+    }
+
+    /// The first functions of `meeting_arrays`, from random sources 0 and on.
+    const PINNED: [&str; 8] = [
+        "pub fn f3(c: bool, k: u8, x: i8, y: u64) -> [2]i64 = match k {\n  0 => [x, -87_i8]\n  1 => [y, 81_u64]\n  _ => [565; 2]\n}\n",
+        "pub fn f3(k: bool) -> [2]i128 = [[-62_i32, 967083533817693959653399905997_u128][if k { 1 } else { 0 }], 16_i8]\n",
+        "pub fn f3(k: bool) -> [2]i128 = [[-50_i64, 33], [439395929139861948437874669498_u128, 936904490330284766988950014917]][if k { 1 } else { 0 }]\n",
+        "pub fn f3(c: bool, d: bool, x: u8) -> i64 {\n  val a: [2]i64 = if c {\n    val t: [2]u8 = [x; 2]\n    t\n  } else { [562; 2] }\n  a[1]\n}\n",
+        "pub fn f3(c: bool, k: u8, x: i16, y: u64) -> [2]i64 = match k {\n  0 => [x, -52_i16]\n  1 => [y, 72_u64]\n  _ => [346; 2]\n}\n",
+        "pub fn f3(c: bool, k: u8, x: i32, y: i64) -> [2]i64 = match k {\n  0 => [x, -50_i32]\n  1 => [y, 35_i64]\n  _ => todo(\"not handled\")\n}\n",
+        "pub fn f3(c: bool, d: bool, x: u8) -> u16 {\n  val a: [3]u16 = if c { [x; 3] } else { if d { [353; 3] } else { unreachable(\"ruled out\") } }\n  a[2]\n}\n",
+        "pub fn f3(c: bool, k: u8, x: u8, y: i16) -> [2]i64 = match k {\n  0 => [x, 64_u8]\n  1 => [y, 30_i16]\n  _ => [363; 2]\n}\n",
+    ];
 
     /// Beside integers no standard type holds, a literal compared is a plain value, compared
     /// exactly, never literals under a bit operation, which take no type there (`E0212`);

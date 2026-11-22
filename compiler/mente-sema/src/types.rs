@@ -6,7 +6,8 @@
 //! type matter: an unannotated binding, the operands of `&`, `|` and `^`, and a `mut` argument.
 //! Refinements are Tier 1's to prove and are not part of a [`Ty`].
 
-use mente_syntax::tree::{Tree, TypeId, TypeKind};
+use mente_syntax::diagnostics::{Applicability, Diagnostic};
+use mente_syntax::tree::{Bound, Tree, TypeId, TypeKind};
 
 /// A standard integer type. `usize` is 64 bits wide and unsigned, and a type of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +35,82 @@ pub const INT_TYPES: [IntTy; 11] = [
 const fn int(name: &'static str, signed: bool, bits: u32) -> IntTy {
     IntTy { name, signed, bits }
 }
+
+/// `E0235` for the integer type `t` of `tree` when a literal bound of its refinement lies
+/// below `i128` (`refinement-and-fixed-point.md`, item 1). Tier 1, the lowering and native code
+/// keep a refinement's bounds exactly in `i128` or `u128`, and no literal lies above `u128`, so
+/// only a negative one can lie beyond them. As a lower bound it bounds nothing the type does not,
+/// and the fix, certain, writes the type's least value in its place; as an upper bound it leaves
+/// the refinement no value, and no fix can say which was meant.
+pub fn bound_beyond_128_bits(tree: &Tree, t: TypeId) -> Option<Diagnostic> {
+    let node = tree.ty(t);
+    let (name, r) = match &node.kind {
+        TypeKind::Int {
+            name,
+            refinement: Some(r),
+        } => (name, r),
+        TypeKind::Int {
+            refinement: None, ..
+        }
+        | TypeKind::Bool
+        | TypeKind::Array { .. }
+        | TypeKind::Named(_)
+        | TypeKind::Enum(_)
+        | TypeKind::Error => return None,
+    };
+    let beyond = |b: &Bound| match b {
+        Bound::Int { negative, value } => *negative && *value > I128_LEAST_MAGNITUDE,
+        Bound::Name(_) | Bound::Len(_) => false,
+    };
+    let text = |b: &Bound| match b {
+        Bound::Int { negative, value } => format!("{}{}", if *negative { "-" } else { "" }, value),
+        Bound::Name(n) => n.clone(),
+        Bound::Len(n) => format!("{}.len", n),
+    };
+    let dots = if r.inclusive { "..=" } else { ".." };
+    if beyond(&r.hi) {
+        return Some(Diagnostic::error(
+            "E0235",
+            node.span,
+            format!(
+                "the bound `{}` lies below `i128`, where a refinement's bounds are kept, and below every value of `{}`, so `{}` holds no value; write the bound the values of `{}` should stay below",
+                text(&r.hi),
+                name,
+                tree.render_type(t),
+                name
+            ),
+        ));
+    }
+    if !beyond(&r.lo) {
+        return None;
+    }
+    let message = format!(
+        "the bound `{}` lies below `i128`, where a refinement's bounds are kept; every value of `{}` lies above it, so it bounds nothing `{}` does not",
+        text(&r.lo),
+        name,
+        name
+    );
+    let d = Diagnostic::error("E0235", node.span, message);
+    Some(match IntTy::named(name) {
+        Some(ty) => {
+            let least = if ty.signed {
+                format!("-{}", ty.min_magnitude())
+            } else {
+                "0".to_string()
+            };
+            d.with_fix(
+                Applicability::MachineApplicable,
+                format!("write `{}`, the least value of `{}`", least, name),
+                node.span,
+                format!("{}[{}{}{}]", name, least, dots, text(&r.hi)),
+            )
+        }
+        None => d,
+    })
+}
+
+/// The magnitude of `i128::MIN`, the least bound a refinement keeps.
+const I128_LEAST_MAGNITUDE: u128 = 1 << 127;
 
 /// The type an expression of literals alone takes.
 pub const I64: IntTy = int("i64", true, 64);
