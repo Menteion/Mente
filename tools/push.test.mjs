@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { PASSED, capped } from "./local-limits.mjs";
-import { INTERFACE, blobId, filesOf, gateEnv, gitLocations, localMain, manifestText, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
+import { INTERFACE, blobId, bootstrapLine, filesOf, gateEnv, gitLocations, localMain, manifestText, mismatch, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
 import { ENTRIES, GET_URL_MS, LOCK_FD_VARIABLE, REFRESH_MS, REMOTE_MS, TREE_RUNNER, WAIT_MS, WRITE_MS, lockHolder, refresh, takeLock } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
@@ -1292,4 +1292,35 @@ test("the refresher's command reads no variable but the handoff's, so nothing bu
   const text = fs.readFileSync(path.join(TREE, "tools", "gates.mjs"), "utf8").replace(/export function inheritedLock\(file, env = process\.env\)/, "").replace(/export const TREE_RUNNER = `[\s\S]*?`;/, "");
   assert.doesNotMatch(text, /process\.env/);
   assert.match(text, /lockFile: path\.join\(gates, "lock"\), say, allowLocal: false, seam: false/);
+});
+
+test("the bootstrap line stages exactly main's set from its objects and starts the staged refresher, which confirms it itself", async () => {
+  await withGates(async ({ work, git, gates, remote, blob, base, env }) => {
+    // The line's body, read from the commit's objects and run from standard input with the commit,
+    // as the line runs it. In the fixture the staged refresher then refuses, since the remote's URL
+    // is a path and the command admits only https: it writes nothing, and says why.
+    const body = blob(base, "tools/gate-entries/bootstrap.mjs");
+    const ran = spawnSync(process.execPath, ["--input-type=module", "-", base], { cwd: work, env, input: body, encoding: "utf8" });
+    assert.equal(ran.status, 1, ran.stderr);
+    assert.match(ran.stderr, /the refresher of [0-9a-f]{12} writes nothing: the remote's URL .* is not https/);
+    const staged = fs.readdirSync(gates).filter((name) => name.startsWith(`staging-${base}-`));
+    assert.equal(staged.length, 1, "the line staged no set, or more than one");
+    const files = filesOf(execFileSync(systemGit(), ["--git-dir", repo(work), "ls-tree", "-r", "-z", "--full-tree", base, "--", ...SET.set], { env: gateEnv(), encoding: "utf8" }), SET.set);
+    assert.equal(mismatch(path.join(gates, staged[0]), files, []), null, "the staged set is not the commit's");
+    assert.ok(!fs.existsSync(path.join(gates, "current")), "a copy was installed from a URL that is not https");
+    // A commit the repository does not hold: fetch first.
+    const missing = spawnSync(process.execPath, ["--input-type=module", "-", "0".repeat(40)], { cwd: work, env, input: body, encoding: "utf8" });
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /is not in this repository: fetch first/);
+    // The line itself, as CLAUDE.md gives it, in Windows PowerShell, with the fixture's remote.
+    if (process.platform === "win32") {
+      for (const name of fs.readdirSync(gates)) if (name.startsWith("staging-")) fs.rmSync(path.join(gates, name), { recursive: true });
+      const line = bootstrapLine(remote);
+      const shell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const r = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-Command", line], { cwd: work, env, encoding: "utf8" });
+      assert.match(`${r.stdout}${r.stderr}`, /writes nothing: the remote's URL .* is not https/, `the line did not reach the staged refresher: ${r.stdout}${r.stderr}`);
+      assert.equal(fs.readdirSync(gates).filter((name) => name.startsWith(`staging-${base}-`)).length, 1);
+    }
+    git(work, "status", "--short");
+  });
 });
