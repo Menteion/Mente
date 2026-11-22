@@ -4,7 +4,7 @@
 # saved after the tests changed the binary, would be trusted on its --version alone. ci.yml runs
 # that binary itself; the mutation runs reach it through cargo, whose aliases limits.sh refuses.
 # ci.yml, mutants.yml and mutants-full.yml run this script, and the workflow policy
-# (.github/scripts/policy.test.mjs) pins it by its digest, so that the version and the archives'
+# (.github/scripts/policy/) pins it by its digest, so that the version and the archives'
 # digests are written once, here, and change with the policy.
 set -euo pipefail
 version=0.9.149

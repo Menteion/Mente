@@ -218,7 +218,7 @@ fn may_use_every_core(under_nextest: bool, group: Option<&str>) -> Result<(), St
     Err(format!(
         "this test runs work on more than one thread while nextest runs other tests beside it \
          (its test group is {}): name it in the override of .config/nextest.toml that puts tests \
-         in the group `{}`, and in ALL_CORES_TESTS of .github/scripts/policy.test.mjs, so that it \
+         in the group `{}`, and in ALL_CORES_TESTS of .github/scripts/policy/test-runs.test.mjs, so that it \
          runs alone. An ignored test runs through `cargo test`, outside nextest, and a nextest \
          older than 0.9.90 names no group",
         group.map_or("unknown".to_string(), |g| format!("`{}`", g)),

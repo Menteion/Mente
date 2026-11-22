@@ -10,7 +10,7 @@
 # No command's failure stops the guard: errexit and pipefail are off here, though the step that
 # starts it runs with both, so a process that ends between `ps` and `kill` costs one round, not
 # the guard. When the guard was a subshell of that step, the first such `kill` ended it silently.
-# The workflow policy (.github/scripts/policy.test.mjs) sources it under errexit, with `ps` naming
+# The workflow policy (.github/scripts/policy/) sources it under errexit, with `ps` naming
 # a process that is gone and `sleep` counting the rounds, and requires every round to run; its
 # argument, the meminfo file, exists for that check and is never given in a workflow.
 set +e +o pipefail

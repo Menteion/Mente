@@ -991,7 +991,7 @@ const POLICY_STEP: [&str; 4] = [
     "      - name: The workflow policy, its required checks, path lists, pins and milestone tags",
     "        run: |",
     "          node .github/scripts/policy-collect.mjs",
-    "          node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
+    "          node --test \".github/scripts/policy/*.test.mjs\" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
 ];
 
 /// The steps before it, exactly: the checkout and node. Nothing has run when the policy does.
@@ -1025,7 +1025,7 @@ const SCRIPTS: [(&str, &str); 13] = [
     ("test:site", "node --test site/site.test.mjs"),
     (
         "test:ci",
-        "node .github/scripts/policy-collect.mjs && node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
+        "node .github/scripts/policy-collect.mjs && node --test \".github/scripts/policy/*.test.mjs\" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
     ),
     (
         "verify:docs",
@@ -1161,12 +1161,27 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
         !root.join(".npmrc").exists(),
         "a .npmrc changes what npm runs"
     );
+    // The policy's files: every module of .github/scripts/policy/, its test modules, which the step
+    // runs by their glob, and the libraries they share.
+    let mut policy: Vec<String> = fs::read_dir(root.join(".github/scripts/policy"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".mjs"))
+        .map(|n| format!(".github/scripts/policy/{n}"))
+        .collect();
+    policy.sort();
+    let policy_tests: Vec<&String> = policy.iter().filter(|f| f.ends_with(".test.mjs")).collect();
+    assert!(
+        policy_tests.len() >= 11,
+        "the policy has {} test modules: its checks lie in .github/scripts/policy/*.test.mjs",
+        policy_tests.len()
+    );
     // No test of the policy's suites is skipped, left to do or singled out.
-    for suite in [
-        ".github/scripts/policy.test.mjs",
+    for suite in policy.iter().map(String::as_str).chain([
         ".github/scripts/policy-run.test.mjs",
         ".github/scripts/yaml.test.mjs",
-    ] {
+    ]) {
         let text = fs::read_to_string(root.join(suite)).unwrap();
         for marker in [".skip(", ".todo(", ".only(", "skip:", "todo:", "only:"] {
             assert!(
@@ -1175,11 +1190,13 @@ fn test_the_documentation_job_runs_the_workflow_policy() {
             );
         }
     }
-    // The floor of checks of the policy and of its run tests equals the checks each declares.
-    for suite in [
-        ".github/scripts/policy.test.mjs",
-        ".github/scripts/policy-run.test.mjs",
-    ] {
+    // The floor of checks of each module of the policy and of its run tests equals the checks each
+    // declares.
+    for suite in policy_tests
+        .iter()
+        .map(|f| f.as_str())
+        .chain([".github/scripts/policy-run.test.mjs"])
+    {
         let text = fs::read_to_string(root.join(suite)).unwrap();
         let checks = text.lines().filter(|l| l.starts_with("check(\"")).count();
         let floor: usize = text
