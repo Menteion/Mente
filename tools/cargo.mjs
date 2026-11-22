@@ -7,7 +7,7 @@
 //   node tools/cargo.mjs test -p mente-sema frames
 //   node tools/cargo.mjs --minutes 60 build --release
 
-import { BUILD, acquireSlot, minutesFrom, requireRunner, runCapped } from "./local-limits.mjs";
+import { BUILD, acquireSlot, minutesFrom, requireHooks, requireRunner, runCapped } from "./local-limits.mjs";
 
 const { args, limits } = minutesFrom(process.argv.slice(2), BUILD);
 if (args.length === 0) {
@@ -15,6 +15,7 @@ if (args.length === 0) {
   process.exit(2);
 }
 if (!requireRunner()) process.exit(2);
+if (!requireHooks()) process.exit(2);
 const slot = acquireSlot(`cargo ${args.join(" ")}`);
 const status = runCapped(["cargo", ...args], limits);
 slot.release();

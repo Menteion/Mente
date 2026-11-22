@@ -50,6 +50,8 @@ ci.yml#docs: node .github/scripts/action-pins.mjs
 ci.yml#docs: node .github/scripts/build-time-code.mjs --before-toolchain
 ci.yml#docs: node .github/scripts/build-time-code.mjs
 ci.yml#docs: npm run verify:docs
+ci.yml#docs: node --test tools/quick.test.mjs
+ci.yml#docs: node --test tools/push.test.mjs
 ci.yml#docs: "$RUNNER_TEMP/lint/actionlint" -color -shellcheck "$RUNNER_TEMP/lint/shellcheck" -pyflakes ""
 ci.yml#docs: npm run check:benchmark
 ci.yml#docs: npm run test:benchmark

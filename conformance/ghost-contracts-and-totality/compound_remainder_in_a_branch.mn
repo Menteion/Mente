@@ -1,0 +1,15 @@
+// expect: pass
+module conformance
+// A compound remainder in one branch of an `if` keeps the bounds check after it (spec item 2):
+// it once emptied its branch's state, `v <= v - 1`, so the join after the `if` held only the other
+// branch's `y = 0`, and `arr[y]` lost its check, which `f(8, true, [9, 9], [1, 2, 3, 4])` fails: there
+// `y` is 8, past the array.
+pub fn f(x: u8, c: bool, a: [2]u8[1..=9], arr: [4]u8) -> u8 {
+  var y = x
+  if c {
+    y %= a[1]
+  } else {
+    y = 0
+  }
+  arr[y]
+}

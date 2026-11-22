@@ -394,6 +394,13 @@ jobs:
         run: if [ "$KEY_LEAKED" != false ] || [ "$HELD_OUT_LEAKED" != false ]; then echo "::error::a secret of the benchmark is set outside the environment benchmark"; exit 1; fi
       - run: npm ci --ignore-scripts
       - run: npm run verify:docs
+      - name: The quick checks' report of the tree they read
+        # tools/quick.mjs, run in a repository the test makes, with shims for the checks' commands:
+        # it says whether its checks read HEAD's tree, and writes the tree a passing run read.
+        run: node --test tools/quick.test.mjs
+      - name: The push guard, which refuses a push of a tree the quick checks have not passed
+        # tools/push.mjs, run against repositories the test makes (.claude/settings.json runs it).
+        run: node --test tools/push.test.mjs
       - name: Install actionlint and shellcheck, pinned and checksummed
         # From their releases, as the SMT job installs Z3; neither is a build dependency.
         env:
