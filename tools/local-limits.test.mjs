@@ -145,6 +145,25 @@ test("when the process that started the wrapper ends, the command ends with it",
   assert.ok(gone, "the command outlived the process that started its wrapper by 10 s");
 });
 
+test("a capped command may not be the Store's pwsh, and is told what to run instead", { skip }, () => {
+  // Norman, 2026-11-22: the Store's PowerShell 7 stays, and Mente closes its way out of the job.
+  const limits = { processGB: 1, jobGB: 2, minutes: 1 };
+  const store = path.join(process.env.LOCALAPPDATA ?? "C:\\Users\\x\\AppData\\Local", "Microsoft", "WindowsApps", "pwsh.exe");
+  for (const program of ["pwsh", "PWSH.EXE", store, "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\\pwsh.exe"]) {
+    const r = viaRunCapped([program, "-NoProfile", "-Command", "exit 0"], limits);
+    assert.equal(r.status, 2, `${program}: ${r.out}`);
+    assert.match(r.out, /C:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe instead/, program);
+  }
+});
+
+test("a capped child that starts pwsh by name finds none on its PATH", { skip }, () => {
+  // The App Execution Alias directory, where the Store's pwsh is found by name, is off the capped
+  // PATH: a test that starts `pwsh` cannot take its processes out of the job.
+  const r = viaRunCapped([process.execPath, "-e", "const r=require('child_process').spawnSync('pwsh',['-NoProfile','-Command','exit 0']);console.log(r.error?r.error.code:'started '+r.status)"], { processGB: 1, jobGB: 2, minutes: 1 });
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.stdout, /^ENOENT$/m, `a capped child started pwsh by name: ${r.out}`);
+});
+
 test("cargo's runner hands a binary its arguments as given, bounded in this repository and untouched elsewhere", { skip }, () => {
   // tools/capped.mjs, as ~/.cargo/config.toml names it, with no slot: in a checkout of this
   // repository the command runs through capped.ps1, which sets the slot's share of the cores;

@@ -21,6 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "./store-apps.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// The script that runs a command in a job object.
@@ -118,8 +119,12 @@ export function runCapped(run, limits, { cwd, menteOnly = false } = {}) {
     console.error("local-limits: no job object off Windows: the command runs unbounded");
     spawned = { cmd: run[0], args: run.slice(1), env: { ...process.env, CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS } };
   } else {
+    if (storePowerShell(run[0])) {
+      console.error(`local-limits: ${run[0]} is the Store's PowerShell, or a program of a WindowsApps directory like it, which takes every process it starts out of the job: run ${SYSTEM_POWERSHELL} instead`);
+      return 2;
+    }
     const { cmd, args, env } = capped(run, limits);
-    spawned = { cmd, args, env: { ...process.env, CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS, ...env } };
+    spawned = { cmd, args, env: { ...withoutStoreApps(process.env), CARGO_BUILD_JOBS: JOBS, RUST_TEST_THREADS: JOBS, ...env } };
   }
   const r = spawnSync(spawned.cmd, spawned.args, { stdio: "inherit", env: spawned.env, cwd });
   if (r.error) console.error(`local-limits: ${run[0]} did not start: ${r.error.message}`);

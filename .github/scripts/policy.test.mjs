@@ -39,6 +39,7 @@ import { doctestProblems, problems as testListProblems, overrideTests } from "./
 import { pins as actionPins, problems as actionPinProblems, taggedCommit } from "./lib/action-pins.mjs";
 import { BUILD_TIME_CODE, CRATES_IO, approvedCrates, listedMembers, lockPackages, lockProblems, main as buildTimeCode, metadataProblems, toolchainProblems } from "./lib/build-time-code.mjs";
 import { CARGO_HARMLESS, decide as rawBuildDecide, message as rawBuildMessage, refusal as rawBuildRefusal } from "../../tools/raw-build.mjs";
+import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "../../tools/store-apps.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -3583,6 +3584,7 @@ const GATE_FILES = [
   "/tools/mn.mjs",
   "/tools/raw-build.mjs",
   "/tools/raw-build-guard.mjs",
+  "/tools/store-apps.mjs",
   "/.claude/settings.json",
 ];
 
@@ -3761,7 +3763,7 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
 /// The local limits' files: the module that defines them, the job object's script and the type it
 /// shares with CI, the entry points, cargo's runner, the raw-build hook, and their proofs
 /// (tools/local-limits.mjs).
-const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/capped.mjs", "tools/cargo.mjs", "tools/mn.mjs", "tools/raw-build.mjs", "tools/raw-build-guard.mjs", "tools/local-limits.test.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
+const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/capped.mjs", "tools/cargo.mjs", "tools/mn.mjs", "tools/raw-build.mjs", "tools/raw-build-guard.mjs", "tools/store-apps.mjs", "tools/local-limits.test.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
 /// The most the local limits may give: builds at once, GB committed by a process and by a tree, and
 /// minutes, those --minutes may ask for among them.
 const LOCAL_CEILING = { slots: 2, processGB: 8, jobGB: 16, minutes: 60 };
@@ -3857,6 +3859,12 @@ export function localLimitsProblems({ quick, limits, capped, mn, cargo, map }) {
   const spawns = callArguments(l, "spawnSync");
   if (spawns.length !== 1 || spawns[0][0]?.map((t) => t.v).join("") !== "spawned.cmd" || spawns[0][1]?.map((t) => t.v).join("") !== "spawned.args") problems.push("tools/local-limits.mjs starts a process other than the one runCapped chose");
   if (!holds(l, ["const", "{", "cmd", ",", "args", ",", "env", "}", "=", "capped", "(", "run", ",", "limits", ")"])) problems.push("tools/local-limits.mjs runs a command other than capped() gives");
+  // The Store's pwsh, started in a job, takes every process it starts out of it (Norman,
+  // 2026-11-22): a capped run refuses it as its program, and its PATH holds no WindowsApps
+  // directory, where it is found by name.
+  if (!jsImports(l).specifiers.some((s) => s.v === "./store-apps.mjs")) problems.push("tools/local-limits.mjs does not take the Store's apps from tools/store-apps.mjs");
+  if (!holds(l, ["if", "(", "storePowerShell", "(", "run", "[", "0", "]", ")", ")"])) problems.push("tools/local-limits.mjs does not refuse the Store's pwsh as a capped command");
+  if (!holds(l, ["env", ":", "{", ".", ".", ".", "withoutStoreApps", "(", "process", ".", "env", ")"])) problems.push("tools/local-limits.mjs leaves the WindowsApps directories on a capped command's PATH");
   const untouched = [...limits.matchAll(/spawned = \{ cmd: run\[0\]/g)].length;
   const gated = [...limits.matchAll(/(?:if|else if) \(([^\n]*)\) \{\n(?:\s*console\.error\([^\n]*\);\n)?\s*spawned = \{ cmd: run\[0\]/g)].map((m) => m[1]);
   if (gated.length !== untouched || gated.some((c) => !["menteOnly && !inMente(cwd ?? process.cwd())", "!WINDOWS"].includes(c))) problems.push("tools/local-limits.mjs runs a command untouched where it should bound it");
@@ -3921,6 +3929,8 @@ check("the quick checks run every command in one of the machine's build slots, u
     ["limits", '"-File", CAPPED]', '"-File", CAPPED, ...run]', "the command as arguments"],
     ["limits", "  const { cmd, args, env } = capped(run, limits);", "  const { cmd, args, env } = { cmd: run[0], args: run.slice(1), env: {} };", "no capped()"],
     ["limits", "  if (menteOnly && !inMente(cwd ?? process.cwd())) {", "  if (true) {", "always untouched"],
+    ["limits", "    if (storePowerShell(run[0])) {", "    if (false) {", "the Store's pwsh let through"],
+    ["limits", "env: { ...withoutStoreApps(process.env),", "env: { ...process.env,", "the WindowsApps directories left on PATH"],
     ["limits", "  const r = spawnSync(spawned.cmd, spawned.args, { stdio: \"inherit\", env: spawned.env, cwd });", "  spawnSync(run[0], run.slice(1));\n  const r = spawnSync(spawned.cmd, spawned.args, { stdio: \"inherit\", env: spawned.env, cwd });", "a second process"],
     ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds, [int]$call.parent, [ref] $end)", "$status = (Start-Process $application -PassThru -Wait).ExitCode", "Start-Process"],
     ["capped", "$status = [JobLimits]::Run($job, $application, $line, $milliseconds, [int]$call.parent, [ref] $end)", "& $program @rest; $status = $LASTEXITCODE", "the call operator"],
@@ -3937,6 +3947,11 @@ check("the quick checks run every command in one of the machine's build slots, u
     assert.equal(texts[part].split(from).length, 2, `the plant "${what}" finds no place in ${part}`);
     assert.ok(localLimitsProblems({ ...texts, [part]: texts[part].replace(from, () => to) }).length > 0, `the plant "${what}" passed`);
   }
+  // What the Store's pwsh is, and the PATH a capped command gets.
+  for (const p of ["pwsh", "PWSH.EXE", "C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe", "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\\pwsh.exe", "C:/Users/x/AppData/Local/Microsoft/WindowsApps/winget.exe"]) assert.ok(storePowerShell(p), `${p} was not taken for a Store app`);
+  for (const p of [SYSTEM_POWERSHELL, "powershell", "cargo", "C:\\Windows\\System32\\cmd.exe", "C:\\tools\\mywindowsappsdemo\\x.exe"]) assert.ok(!storePowerShell(p), `${p} was taken for a Store app`);
+  const trimmed = withoutStoreApps({ Path: "C:\\Windows\\System32;C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Users\\x\\.cargo\\bin;C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\\;D:\\x\\WINDOWSAPPS\\", OTHER: "kept" });
+  assert.deepEqual(trimmed, { Path: "C:\\Windows\\System32;C:\\Users\\x\\.cargo\\bin", OTHER: "kept" });
   const noProofs = { ...texts.map, checks: texts.map.checks.filter((c) => c.run.join(" ") !== "node --test tools/local-limits.test.mjs") };
   assert.ok(localLimitsProblems({ ...texts, map: noProofs }).length > 0, "a map that runs no proof of the local limits passed");
 });
@@ -4020,6 +4035,13 @@ check("the raw-build guard refuses a build outside the local limits and names th
     ["$m = @'\ncargo test\n'@\ngit commit -m $m", null],
     ["cargo --version", null],
     ["cargo", null],
+    // A capped tool asked to run the Store's pwsh, by name or by path, gets Windows PowerShell in its place.
+    ["node tools/capped.mjs -- pwsh -NoProfile -c x", `node tools/capped.mjs -- ${SYSTEM_POWERSHELL} -NoProfile -c x`],
+    ["node tools/cargo.mjs run --bin probe -- pwsh", `node tools/cargo.mjs run --bin probe -- ${SYSTEM_POWERSHELL}`],
+    ["node tools/capped.mjs -- C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\pwsh.exe -c 1", `node tools/capped.mjs -- ${SYSTEM_POWERSHELL} -c 1`],
+    ["node tools/capped.mjs -- powershell.exe -c x", null],
+    ["node tools/mn.mjs check a.mn", null],
+    ["pwsh -c 1", null],
   ];
   const wrong = cases.filter(([command, instead]) => (rawBuildRefusal(command)?.instead ?? null) !== instead).map(([command, instead]) => `${command}: ${rawBuildRefusal(command)?.instead ?? null}, not ${instead}`);
   assert.deepEqual(wrong, []);
