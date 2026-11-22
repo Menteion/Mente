@@ -367,7 +367,7 @@ jobs:
       - name: The workflow policy, its required checks, path lists, pins and milestone tags
         run: |
           node .github/scripts/policy-collect.mjs
-          node --test .github/scripts/policy.test.mjs .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs
+          node --test ".github/scripts/policy/*.test.mjs" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs
       - name: Every pinned action is the commit its release's tag names
         # The policy checks a pin's form; this asks each action's repository for the commit its
         # tag names (.github/scripts/action-pins.mjs).

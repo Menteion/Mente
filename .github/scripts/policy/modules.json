@@ -1,0 +1,28 @@
+{
+  "about": "The workflow policy's own files, listed once: the test modules node runs, the libraries they share, and the checks they hold in all. The policy and the gates test hold the directory to exactly these, the pins exempt exactly these, and the policy pins this list (the review of f217d1e: a directory prefix exempted any script under it from its pin, and a module renamed out of the glob left every count passing).",
+  "modules": [
+    ".github/scripts/policy/actions-and-permissions.test.mjs",
+    ".github/scripts/policy/build-and-toolchain.test.mjs",
+    ".github/scripts/policy/commits.test.mjs",
+    ".github/scripts/policy/instruments.test.mjs",
+    ".github/scripts/policy/local-tools.test.mjs",
+    ".github/scripts/policy/mutation.test.mjs",
+    ".github/scripts/policy/nightly-alarm.test.mjs",
+    ".github/scripts/policy/pins-and-owners.test.mjs",
+    ".github/scripts/policy/required-checks.test.mjs",
+    ".github/scripts/policy/sandbox.test.mjs",
+    ".github/scripts/policy/secrets-and-broker.test.mjs",
+    ".github/scripts/policy/site.test.mjs",
+    ".github/scripts/policy/test-runs.test.mjs"
+  ],
+  "libraries": [
+    ".github/scripts/policy/js.mjs",
+    ".github/scripts/policy/pins.mjs",
+    ".github/scripts/policy/repo.mjs",
+    ".github/scripts/policy/sandbox.mjs",
+    ".github/scripts/policy/secrets.mjs",
+    ".github/scripts/policy/toolchain.mjs",
+    ".github/scripts/policy/workflows.mjs"
+  ],
+  "checks": 75
+}

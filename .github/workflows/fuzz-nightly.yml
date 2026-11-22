@@ -2,7 +2,7 @@
 # pull-request run): seeded from the run number, or as a dispatch names, for 45 minutes on every
 # core of the runner, in release with debug assertions and the overflow checks every release build
 # has. Its job is named apart from fuzz.yml's required check, so that no run with chosen inputs can
-# report a check of that name (.github/scripts/policy.test.mjs). Each failure, minimized, is
+# report a check of that name (.github/scripts/policy/). Each failure, minimized, is
 # uploaded as the artifact `fuzz-nightly-failures` and fails the job. Heavy runs belong here, never
 # on a developer's machine.
 name: Fuzz, nightly
@@ -82,7 +82,7 @@ jobs:
     # it or comments on it, and one that passes closes it (.github/scripts/nightly-alarm.mjs). A run
     # by hand, with inputs that can narrow it, reports nothing. It runs whatever the jobs it needs
     # ended in, a timeout or a cancellation included, and its token may write issues and read the
-    # run's jobs, nothing else; the workflow policy (.github/scripts/policy.test.mjs) pins this job
+    # run's jobs, nothing else; the workflow policy (.github/scripts/policy/) pins this job
     # and the script.
     name: Nightly alarm (Fuzz)
     needs: [fuzz]

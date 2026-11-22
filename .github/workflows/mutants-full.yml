@@ -1,7 +1,7 @@
 # The full mutation run of the compiler with cargo-mutants, weekly and on demand, split across
 # sixteen runners; a dispatch may take only the mutants a regex names, or only some shards. Its jobs
 # are named apart from mutants.yml's required checks, so that no run with chosen inputs can report a
-# check of their names (.github/scripts/policy.test.mjs). On GitHub's runners, never on a
+# check of their names (.github/scripts/policy/). On GitHub's runners, never on a
 # developer's machine. Settings: .cargo/mutants.toml and .config/nextest.toml.
 name: Mutants, full run
 
@@ -141,7 +141,7 @@ jobs:
     # it or comments on it, and one that passes closes it (.github/scripts/nightly-alarm.mjs). A run
     # by hand, with inputs that can narrow it, reports nothing. It runs whatever the jobs it needs
     # ended in, a timeout or a cancellation included, and its token may write issues and read the
-    # run's jobs, nothing else; the workflow policy (.github/scripts/policy.test.mjs) pins this job
+    # run's jobs, nothing else; the workflow policy (.github/scripts/policy/) pins this job
     # and the script.
     name: Nightly alarm (Mutants, the full run)
     needs: [full]

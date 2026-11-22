@@ -30,8 +30,20 @@ pub const NODE: &str = "node --test --test-reporter=./tools/evidence-reporter.mj
 /// The command whose output is spec-guard's report of the directives it runs.
 pub const SPEC_GUARD: &str = "npm run -s spec-guard -- --json";
 
-/// The file whose tests are the workflow policy's checks.
-pub const POLICY: &str = ".github/scripts/policy.test.mjs";
+/// The directory of the workflow policy's modules, whose top-level tests are its checks: each file
+/// `<name>.test.mjs` directly in it, as `npm run test:ci` runs them. The policy and the gates
+/// test hold the directory to the files its `modules.json` lists.
+pub const POLICY_DIR: &str = ".github/scripts/policy/";
+
+/// Whether `file`, a path with `/` between names, is a module of the workflow policy: a file
+/// `<name>.test.mjs` directly in [`POLICY_DIR`], not one of the libraries the modules share.
+pub fn is_policy_module(file: &str) -> bool {
+    let dir = format!("/{}", POLICY_DIR);
+    file.rfind(&dir).is_some_and(|at| {
+        let name = &file[at + dir.len()..];
+        !name.contains('/') && name.ends_with(".test.mjs")
+    })
+}
 
 /// A test nextest lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -575,7 +587,7 @@ impl Runs {
                 && !t.todo
                 && t.suite.is_empty()
                 && t.name == name
-                && t.file.ends_with(&format!("/{}", POLICY))
+                && is_policy_module(&t.file)
         })
     }
 

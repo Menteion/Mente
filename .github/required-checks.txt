@@ -1,6 +1,6 @@
 # The checks the ruleset of `main` requires, one a line, exactly as GitHub names them: the name of
 # the job, with its matrix values filled in. Norman sets the ruleset from this list; the workflow
-# policy test (.github/scripts/policy.test.mjs) checks that each name belongs to exactly one job,
+# policy (.github/scripts/policy/) checks that each name belongs to exactly one job,
 # that the job's workflow runs on every pull request and in the merge queue with no `paths:`
 # filter, and that every instrument docs/design-brief.md section 7.7 schedules for a finished
 # milestone has its checks here (docs/design-review.md, guard-per-problem).
