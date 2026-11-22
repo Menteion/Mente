@@ -107,6 +107,18 @@ jobs:
           cargo-nextest nextest run --locked --workspace --profile ci
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
+      - name: The tests' times, as shares of their stops
+        # A report, which fails nothing on a time: each test's share of its stop goes into the
+        # job's summary, with a notice past 45%. Pull request 183 made a test four times slower,
+        # 36 s under nextest's stop of 40 s, and nothing showed it. Seconds differ two to three
+        # times between the machines a runner may give a job, so the gate on the compiler's cost
+        # is its counts of work; this step fails only when the report cannot be read in full
+        # (.github/scripts/lib/test-times.mjs).
+        env:
+          TEST_TIMES_RUNNER: ${{ matrix.os }}
+        run: |
+          node .github/scripts/test-times.mjs
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: No doctests
         # nextest runs no doctests, and `cargo test --doc` has no limit for one: rustdoc lists
         # every doc example it would compile, in any spelling of a doc comment or attribute, and
