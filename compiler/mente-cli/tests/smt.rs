@@ -284,7 +284,7 @@ fn test_mn_smt_independent_writes_queries_and_confirm_reads_their_answers() {
     );
     assert!(
         stdout.contains("Of the checks Tier 1 erased that no input reaches, 0 are unreachable, 0 lie past the bounds and 0 past a construct the encoding lacks; 0 have no site, lying within such a construct.")
-            && stdout.ends_with("0 files do not check, 0 obligations have no site where they should.\n"),
+            && stdout.ends_with("0 files do not check, 0 obligations have no site where they should, 0 places change a binding where the language allows none.\n"),
         "{}",
         stdout
     );

@@ -30,7 +30,7 @@ use crate::{
 pub const TERMS: usize = 200_000;
 
 /// A value: an integer, a boolean or an array as a term, or no value.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 enum V {
     Int(T),
     Bool(T),
@@ -108,6 +108,8 @@ struct Exec<'m> {
     cut: Vec<T>,
     /// The paths cut off at a construct the encoding lacks.
     lacked: Vec<T>,
+    /// Each place where an expression the language requires pure changed a binding.
+    impure: Vec<Span>,
     exhausted: bool,
     /// The most terms the encoding makes.
     terms: usize,
@@ -306,6 +308,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             cut: tru,
             cut_past_bound: false,
             cut_at_lacked: true,
+            impure: Vec::new(),
             returns: fals,
             result: None,
             finals: Vec::new(),
@@ -332,6 +335,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
         cut: Vec::new(),
         lacked: Vec::new(),
         exhausted: false,
+        impure: Vec::new(),
         terms,
     };
     let tree = &f.syntax.tree;
@@ -372,6 +376,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             cut: tru,
             cut_past_bound: false,
             cut_at_lacked: true,
+            impure: Vec::new(),
             returns: fals,
             result: None,
             finals: Vec::new(),
@@ -420,6 +425,7 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
         cut,
         cut_past_bound,
         cut_at_lacked,
+        impure: x.impure,
         returns,
         result,
         finals,
@@ -910,7 +916,7 @@ impl<'m> Exec<'m> {
         let at_call = call_span.unwrap_or(f.syntax.name_span);
         for c in &f.syntax.contracts {
             if c.kind == ContractKind::Requires {
-                let v = self.eval(c.expr);
+                let v = self.pure(c.expr);
                 let ok = self.boolean(&v);
                 let at = At {
                     owner: caller,
@@ -933,7 +939,7 @@ impl<'m> Exec<'m> {
         }
         let mut values = Vec::new();
         for &m in &measures {
-            let v = self.eval(m);
+            let v = self.pure(m);
             let x = self.int(&v);
             let zero = self.t.int(0);
             let ok = self.t.le(zero, x);
@@ -1014,7 +1020,7 @@ impl<'m> Exec<'m> {
                 continue;
             }
             self.frame.vars.insert("result".to_string(), v.clone());
-            let ok = self.eval(c.expr);
+            let ok = self.pure(c.expr);
             let ok = self.boolean(&ok);
             let at = At {
                 owner: func,
@@ -1294,7 +1300,7 @@ impl<'m> Exec<'m> {
                 V::Unit
             }
             StmtKind::Guard { cond, otherwise } => {
-                let v = self.eval(*cond);
+                let v = self.pure(*cond);
                 let c = self.boolean(&v);
                 let before = self.active;
                 let saved = self.frame.vars.clone();
@@ -1424,13 +1430,13 @@ impl<'m> Exec<'m> {
                 conjuncts(tree, inv, &mut parts);
                 let clause = tree.expr(inv).span;
                 for part in parts {
-                    let v = self.eval(part);
+                    let v = self.pure(part);
                     let ok = self.boolean(&v);
                     let at = self.here(tree.expr(part).span, clause);
                     self.check(ok, Kind::Invariant, Tag::Clause(clause), at, "invariant");
                 }
             }
-            let v = self.eval(cond);
+            let v = self.pure(cond);
             let c = self.boolean(&v);
             let nc = self.t.not(c);
             let out = self.t.and2(self.active, nc);
@@ -1443,7 +1449,7 @@ impl<'m> Exec<'m> {
             if let Some(&first) = decreases.first() {
                 let mut values = Vec::new();
                 for &m in decreases {
-                    let v = self.eval(m);
+                    let v = self.pure(m);
                     let x = self.int(&v);
                     let zero = self.t.int(0);
                     let ok = self.t.le(zero, x);
@@ -1484,8 +1490,24 @@ impl<'m> Exec<'m> {
     // -- expressions -------------------------------------------------------------------------
 
     fn cond(&mut self, e: ExprId) -> T {
-        let v = self.eval(e);
+        let v = self.pure(e);
         self.boolean(&v)
+    }
+
+    /// The value of `e`, an expression the language requires pure (`spec/core-calculus.md`,
+    /// E0236): a condition, a contract clause or measure, an operand of `and` or `or`, or the
+    /// scrutinee of a match over a `bool`. The checker refuses one that changes a binding, so the
+    /// encoding does not encode one: a binding it finds changed is recorded as a defect, and the
+    /// bindings stand as they were.
+    fn pure(&mut self, e: ExprId) -> V {
+        let before = self.frame.vars.clone();
+        let v = self.eval(e);
+        if self.frame.vars != before {
+            let span = self.span(e);
+            self.impure.push(span);
+            self.frame.vars = before;
+        }
+        v
     }
 
     fn eval(&mut self, e: ExprId) -> V {
@@ -1776,19 +1798,17 @@ impl<'m> Exec<'m> {
     }
 
     /// `a and rhs` where `and`, else `a or rhs`: the right operand runs only on the path where
-    /// it decides.
+    /// it decides. It is pure ([`Exec::pure`]), so no binding of the paths that skip it differs
+    /// from one of the paths that run it, and none is joined.
     fn short(&mut self, a: T, rhs: ExprId, and: bool) -> T {
         let before = self.active;
-        let saved = self.frame.vars.clone();
         let go = if and { a } else { self.t.not(a) };
         self.active = self.t.and2(before, go);
         let b = self.cond(rhs);
         let ran = self.active;
-        let vars = std::mem::take(&mut self.frame.vars);
         let stop = self.t.not(go);
         let skipped = self.t.and2(before, stop);
         self.active = self.t.or2(skipped, ran);
-        self.frame.vars = self.join_vars(go, vars, saved);
         if and {
             self.t.and2(a, b)
         } else {
@@ -1960,7 +1980,11 @@ impl<'m> Exec<'m> {
     /// first arm whose pattern matches.
     fn match_expr(&mut self, e: ExprId, scrutinee: ExprId, arms: &'m [Arm]) -> V {
         let shape = self.shape(e);
-        let v = self.eval(scrutinee);
+        let v = if self.shape(scrutinee) == Shape::Bool {
+            self.pure(scrutinee)
+        } else {
+            self.eval(scrutinee)
+        };
         let at_scrutinee = self.span(scrutinee);
         match self.shape(scrutinee) {
             Shape::Int(t) => self.narrow_scrutinee(&v, t, at_scrutinee),

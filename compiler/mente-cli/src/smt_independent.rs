@@ -233,6 +233,9 @@ pub struct Written {
     pub unchecked: usize,
     /// Obligations of Tier 1 with no site.
     pub unmatched: usize,
+    /// Places where an expression the language requires pure changed a binding, which the
+    /// checker refuses (E0236): a defect, of the encoding or of the checker.
+    pub impure: usize,
     /// Each file read and each check Tier 1 erased, for the comparison with the base.
     pub export: Export,
 }
@@ -315,6 +318,13 @@ fn independent_with(
                     cf.syntax.name
                 );
                 w.unmatched += 1;
+            }
+            for span in &enc.impure {
+                println!(
+                    "impure: {}:{}:{}: an expression the language requires pure changes a binding in `{}`, which the checker refuses: a defect",
+                    shown, span.line, span.col, cf.syntax.name
+                );
+                w.impure += 1;
             }
             for (span, what) in &enc.unencoded {
                 println!(
@@ -1391,9 +1401,10 @@ pub fn confirm(answers: &str, gate: &Gate) -> Confirmed {
 }
 
 /// What `mn smt --independent` exits with once it wrote everything: 1 when an obligation of Tier
-/// 1 has no site where it should, a defect of the encoding, and 0 otherwise.
+/// 1 has no site where it should, or an expression the language requires pure changed a binding,
+/// each a defect; and 0 otherwise.
 fn independent_status(w: &Written) -> i32 {
-    i32::from(w.unmatched > 0)
+    i32::from(w.unmatched > 0 || w.impure > 0)
 }
 
 /// `mn smt --independent <file.mn | dir>... --out <dir> [--keys <file>]`: writes the independent
@@ -1425,7 +1436,7 @@ pub fn cmd_independent(args: &[String]) {
     match independent(&files, &out) {
         Ok(w) => {
             println!(
-                "Wrote {} independent queries for {} functions of {} files to `{}`. Of the checks Tier 1 erased that no input reaches, {} are unreachable, {} lie past the bounds and {} past a construct the encoding lacks; {} have no site, lying within such a construct. {} places hold a construct the encoding lacks, {} files do not check, {} obligations have no site where they should.",
+                "Wrote {} independent queries for {} functions of {} files to `{}`. Of the checks Tier 1 erased that no input reaches, {} are unreachable, {} lie past the bounds and {} past a construct the encoding lacks; {} have no site, lying within such a construct. {} places hold a construct the encoding lacks, {} files do not check, {} obligations have no site where they should, {} places change a binding where the language allows none.",
                 w.queries,
                 w.functions,
                 w.files,
@@ -1436,7 +1447,8 @@ pub fn cmd_independent(args: &[String]) {
                 w.no_site,
                 w.unencoded,
                 w.unchecked,
-                w.unmatched
+                w.unmatched,
+                w.impure
             );
             if let Some(keys) = keys {
                 if let Err(e) = fs::write(&keys, w.export.text()) {
@@ -3454,5 +3466,63 @@ pub fn outer(x: u8) -> u8 = inner(x)
                 runs.wrong
             );
         }
+    }
+
+    /// An expression the language requires pure that changes a binding is a defect: the checker
+    /// refuses one (E0236), so the test makes one from a program it accepts, pointing an `if`'s
+    /// condition at the call that copies a `mut` argument back. The encoding records the place,
+    /// keeps the bindings as they were, and the export fails; the program as checked has none.
+    #[test]
+    fn test_an_effect_where_the_language_requires_purity_is_a_defect() {
+        use mente_syntax::tree::{ExprId, ExprKind};
+        let dir = scratch("impure");
+        let file = dir.join("impure.mn");
+        fs::write(
+            &file,
+            "module m\nfn bump(mut x: u8) -> bool {\n  x = x / 2\n  true\n}\npub fn f(a: u8) -> u8 {\n  var y: u8 = a\n  val ok: bool = bump(mut y)\n  if ok { y } else { 0 }\n}\n",
+        )
+        .unwrap();
+        let files = std::slice::from_ref(&file);
+        let pure = independent(files, &dir.join("pure")).unwrap();
+        assert_eq!((pure.unmatched, pure.impure), (0, 0), "{:#?}", pure);
+        assert_eq!(independent_status(&pure), 0);
+        let impure = |m: &Module, i: usize| {
+            let Some(f) = m.functions[i].as_ref().filter(|f| f.syntax.name == "f") else {
+                return mente_smt::encode(m, i);
+            };
+            let mut syntax = f.syntax.clone();
+            let exprs = &syntax.tree.exprs;
+            let call = exprs
+                .iter()
+                .position(|x| matches!(&x.kind, ExprKind::Call { callee, .. } if callee == "bump"))
+                .unwrap();
+            let at = exprs
+                .iter()
+                .position(|x| matches!(x.kind, ExprKind::If { .. }))
+                .unwrap();
+            if let ExprKind::If { cond, .. } = &mut syntax.tree.exprs[at].kind {
+                *cond = ExprId(call as u32);
+            }
+            let module = Module {
+                functions: m
+                    .functions
+                    .iter()
+                    .enumerate()
+                    .map(|(k, g)| {
+                        g.as_ref().map(|g| Function {
+                            syntax: if k == i { &syntax } else { g.syntax },
+                            facts: g.facts.clone(),
+                        })
+                    })
+                    .collect(),
+            };
+            let enc = mente_smt::encode(&module, i);
+            assert_eq!(enc.impure, [syntax.tree.exprs[call].span]);
+            enc
+        };
+        let w = independent_with(files, &dir.join("impure"), &impure).unwrap();
+        assert_eq!((w.unmatched, w.impure), (0, 1), "{:#?}", w);
+        assert_eq!(independent_status(&w), 1);
+        let _ = fs::remove_dir_all(&dir);
     }
 }
