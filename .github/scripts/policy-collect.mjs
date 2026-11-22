@@ -1,7 +1,7 @@
 // The workflow policy's collector (policy-runtime-judge in docs/design-review.md): the facts the
 // policy reads from git, gathered here, so that the policy itself starts no process. It runs git
 // alone, with arguments fixed here, and writes target/policy-facts.json, which
-// .github/scripts/policy.test.mjs reads and refuses when they are of another commit than the one
+// the policy's modules (.github/scripts/policy/) read and refuse when they are of another commit than the one
 // checked out.
 //
 //   node .github/scripts/policy-collect.mjs

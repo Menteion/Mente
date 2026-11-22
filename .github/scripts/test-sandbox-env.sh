@@ -5,7 +5,7 @@
 # the step fails: nothing runs outside one. On Windows it changes nothing, since Windows has no
 # sandbox yet (docs/design-review.md, untrusted-test-isolation).
 # limits.sh sources it for the testing jobs; a job that runs its tests through cargo alone sources
-# it by itself. The workflow policy (.github/scripts/policy.test.mjs) pins it.
+# it by itself. The workflow policy (.github/scripts/policy/) pins it.
 if ! test_sandbox_env=$(/usr/bin/bash .github/scripts/test-sandbox.sh env); then
   echo "$test_sandbox_env"
   exit 1

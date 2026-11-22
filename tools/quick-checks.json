@@ -1,5 +1,5 @@
 {
-  "about": "The quick checks before a push (tools/quick.mjs; CLAUDE.md, \"Verification\"): each check's name, the pattern of the changed files that call for it, its command, and why. Data, not code: tools/quick.mjs reads it, and the workflow policy (.github/scripts/policy.test.mjs) reads it as data and never runs it, so that no edit to it changes what the policy does. Each pattern is a regular expression over a path relative to the repository's root, with forward slashes.",
+  "about": "The quick checks before a push (tools/quick.mjs; CLAUDE.md, \"Verification\"): each check's name, the pattern of the changed files that call for it, its command, and why. Data, not code: tools/quick.mjs reads it, and the workflow policy (.github/scripts/policy/) reads it as data and never runs it, so that no edit to it changes what the policy does. Each pattern is a regular expression over a path relative to the repository's root, with forward slashes.",
   "patterns": {
     "every file": ".",
     "rust inputs": "\\.rs$|(^|/)Cargo\\.(toml|lock)$|^clippy\\.toml$|^rust-toolchain(\\.toml)?$|^\\.config/|^\\.cargo/",
