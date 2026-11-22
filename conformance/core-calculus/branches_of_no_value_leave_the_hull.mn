@@ -1,0 +1,51 @@
+// expect: pass
+module conformance
+// A branch, or an arm, that gives no value holds no integer: one of no type, an `unreachable`, a
+// `todo`, or an `if` or a `match` whose branches all leave, and one that leaves through an
+// operand, which keeps its operation's type. So the values the others give meet in the machine
+// type of their hull alone (core-calculus.md, item 4), as an array literal's element that gives
+// no value is left out of the literal's hull (item 6). The final review of pull request 189
+// found such a branch dropping the whole hull: MIR then met in `i64`, which held neither a `u64`
+// above `i64` nor 300 in a `u16`'s place, and native code gave `[-1]` and 44.
+
+// Arrays: an `i8`'s integers beside a `u64`'s meet in an `i128`, whatever the third branch is.
+pub fn unreachable_tail(c: bool, d: bool, x: i8, y: u64) -> [1]i128 = if c { [x] } else if d { [y] } else { unreachable("u") }
+
+pub fn todo_tail(c: bool, d: bool, x: i8, y: u64) -> [1]i128 = if c { [x] } else if d { [y] } else { todo("t") }
+
+pub fn unreachable_first(c: bool, d: bool, x: i8, y: u64) -> [1]i128 = if c { unreachable("u") } else if d { [x] } else { [y] }
+
+pub fn unreachable_arm(k: u8, x: i8, y: u64) -> [2]i128 = match k {
+  0 => [x; 2]
+  1 => [y; 2]
+  _ => unreachable("u")
+}
+
+// The `else` a block whose value is an `if` with an `unreachable` branch of its own.
+pub fn nested_tail(c: bool, d: bool, x: i8, y: u64) -> [1]i128 = if c { [x] } else {
+  if d { [y] } else { unreachable("u") }
+}
+
+// A branch that is an `if` whose branches all leave gives no value either.
+pub fn branch_that_leaves(c: bool, d: bool, x: i8, y: u64) -> [1]i128 = if c { [x] } else if d { [y] } else {
+  if x == 0 { unreachable("u") } else { todo("t") }
+}
+
+// Integers: a `u8` beside 300 meet in an `i64`, and narrow into the `u16` result where they land.
+pub fn scalar_unreachable(c: bool, d: bool, x: u8) -> u16 = if c { x } else if d { 300 } else { unreachable("u") }
+
+pub fn scalar_todo(c: bool, d: bool, x: u8) -> u16 = if c { x } else if d { 300 } else { todo("t") }
+
+pub fn scalar_arm(k: u8, x: u8) -> u16 = match k {
+  0 => x
+  1 => 300
+  _ => unreachable("u")
+}
+
+// A `u64` above `i64` beside a negative `i8` meets in an `i128`.
+pub fn scalar_signed(c: bool, d: bool, x: i8, y: u64) -> i128 = if c { x } else if d { y } else { unreachable("u") }
+
+// A branch that leaves through an operand keeps its operation's type, and gives no value either.
+pub fn operand_tail(c: bool, d: bool, x: i8, y: u64) -> [1]i128 = if c { [x] } else if d { [y] } else { [x + todo("t")] }
+
+pub fn scalar_operand(c: bool, d: bool, x: u8) -> u16 = if c { x } else if d { 300 } else { x + todo("t") }

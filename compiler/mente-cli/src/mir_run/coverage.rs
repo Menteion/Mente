@@ -295,6 +295,21 @@ const CANDIDATES: &[&str] = &[
 /// so no generated program holds one ([`NOT_GENERATED`]).
 const CONDITIONS: &[&str] = &["condition that assigns or passes mut"];
 
+/// A nested array literal that narrows its integers by itself (`core-calculus.md`, item 4,
+/// Norman's decision of 2026-11-21): a row whose elements have one integer type, inside a literal
+/// whose rows have no one type together, which keeps the others exact. The nightly runs found MIR
+/// building such a row in the outer literal's type, where the reference interpreter narrowed it.
+/// And branches, or arms, that give arrays whose integers meet past 64 bits, in an `i128` or a
+/// `u128`, the edge E0222 holds them to (the review of PR 189 found lowering refusing arrays one
+/// bit past it, which the checker let through). And a branch or an arm of no type beside two that
+/// give values, through an `else if` too, which holds no integer of their hull (the final review
+/// of PR 189 found one dropping the whole hull, and MIR meeting the others in `i64`).
+const ROWS: &[&str] = &[
+    "row of one integer type beside rows of others",
+    "branches of arrays meeting in a 128-bit machine type",
+    "branch of no type beside two that give values",
+];
+
 /// Where a bit operation, a shift or `~` over literals alone takes the type it works in
 /// (`core-calculus.md`, item 5), by what the checker's table says of it: beside an operand
 /// of a type, which gives it; and alone, an `i64`, either narrowed into a place, which gives
@@ -1114,6 +1129,97 @@ fn a_condition_changes_state(f: &FnSyntax) -> bool {
     })
 }
 
+/// The rows of [`ROWS`] a checked function reaches: an array literal whose elements are arrays
+/// of integers of no one type, one of them a literal of one integer type; and an `if` or a
+/// `match` that gives arrays whose integers, by the checker's hull of them, need more than 64
+/// bits together; and an `if` or a `match` with a branch or an arm of no type beside two that
+/// give values, an `else if` and a branch that is itself an `if` or a `match` counted as more
+/// branches of the one join.
+fn reached_rows(f: &CheckedFn, seen: &mut BTreeSet<String>) {
+    let tree = &f.syntax.tree;
+    let ty = |e: ExprId| &f.typing.exprs[e.0 as usize];
+    let ranges = wide::intervals(&f.syntax, &f.resolution, &f.typing);
+    for (k, e) in tree.exprs.iter().enumerate() {
+        let join = matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. });
+        if !join || !matches!(ty(ExprId(k as u32)), Ty::Array(..)) {
+            continue;
+        }
+        let Some(Interval { lo, hi }) = ranges[k] else {
+            continue;
+        };
+        let above = |limit: u128| !hi.0 && hi.1 > limit;
+        if (lo.0 && above(i64::MAX as u128)) || above(u64::MAX as u128) {
+            seen.insert("branches of arrays meeting in a 128-bit machine type".to_string());
+        }
+    }
+    // The values the branches of the join `e` give, through the joins among them.
+    fn values(tree: &Tree, e: ExprId, out: &mut Vec<ExprId>) {
+        let tail = |b| match &tree.stmt(*tree.block(b).stmts.last()?).kind {
+            StmtKind::Expr(x) => Some(*x),
+            _ => None,
+        };
+        let tails: Vec<Option<ExprId>> = match &tree.expr(e).kind {
+            ExprKind::If {
+                then, otherwise, ..
+            } => vec![
+                tail(*then),
+                match otherwise {
+                    Some(Else::Block(b)) => tail(*b),
+                    Some(Else::If(i)) => Some(*i),
+                    None => None,
+                },
+            ],
+            ExprKind::Match { arms, .. } => arms
+                .iter()
+                .map(|a| match a.body {
+                    ArmBody::Expr(x) => Some(x),
+                    ArmBody::Block(b) => tail(b),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for t in tails.into_iter().flatten() {
+            match tree.expr(t).kind {
+                ExprKind::If { .. } | ExprKind::Match { .. } => values(tree, t, out),
+                _ => out.push(t),
+            }
+        }
+    }
+    for (k, e) in tree.exprs.iter().enumerate() {
+        if !matches!(e.kind, ExprKind::If { .. } | ExprKind::Match { .. }) {
+            continue;
+        }
+        let mut given = Vec::new();
+        values(tree, ExprId(k as u32), &mut given);
+        let none = given.iter().filter(|v| ty(**v).has_no_value()).count();
+        if none > 0 && given.len() - none >= 2 {
+            seen.insert("branch of no type beside two that give values".to_string());
+        }
+    }
+    // The integer type an array of integers holds, at its innermost depth.
+    fn leaf(t: &Ty) -> Option<&Int> {
+        match t {
+            Ty::Array(_, e) => leaf(e),
+            Ty::Int(i) => Some(i),
+            _ => None,
+        }
+    }
+    for (k, e) in tree.exprs.iter().enumerate() {
+        let ExprKind::Array(items) = &e.kind else {
+            continue;
+        };
+        let outer = ty(ExprId(k as u32));
+        let mixed = matches!(outer, Ty::Array(_, inner) if matches!(**inner, Ty::Array(..)))
+            && matches!(leaf(outer), Some(Int::Mixed(None)));
+        let one = items.iter().any(|&i| {
+            tree.expr(i).kind.is_array_literal() && matches!(leaf(ty(i)), Some(Int::One(_)))
+        });
+        if mixed && one {
+            seen.insert("row of one integer type beside rows of others".to_string());
+        }
+    }
+}
+
 /// Whether a function's `ensures` names one of its parameters, which then bounds the argument a
 /// call passes it, where the call returns.
 fn ensures_names_a_parameter(f: &mente_syntax::tree::FnSyntax) -> bool {
@@ -1491,6 +1597,7 @@ fn grammar() -> BTreeSet<String> {
         TRAPS,
         CANDIDATES,
         CONDITIONS,
+        ROWS,
         LITERALS,
         COMPARISONS,
         EXPRESSIONS,
@@ -1545,6 +1652,7 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
                 reached_edges(f, &mut seen);
                 reached_traps(f, &mut seen);
                 reached_candidates(module, f, &mut seen);
+                reached_rows(f, &mut seen);
                 reached_literals(f, &mut seen);
                 reached_comparisons(f, &mut seen);
                 reached_expressions(f, &mut seen);
@@ -1736,6 +1844,41 @@ fn test_a_condition_that_changes_state_is_seen() {
             "{}",
             body
         );
+    }
+}
+
+/// A join counts as "branch of no type beside two that give values" only with a branch or an arm
+/// that gives none and two that give one, through an `else if` and a branch that is an `if`
+/// itself: one value beside an `unreachable`, as a guard's `if` has, or two values and no branch
+/// of no type, does not.
+#[test]
+fn test_a_branch_of_no_type_counts_beside_two_values_only() {
+    let row = "branch of no type beside two that give values";
+    let reaches = |body: &str| {
+        let source = format!("module m\npub fn f(c: bool, d: bool, k: u8, x: u8) -> u8 = {body}\n");
+        let module = mente_sema::check_program(&source).unwrap();
+        let mut seen = BTreeSet::new();
+        module
+            .functions
+            .iter()
+            .flatten()
+            .for_each(|f| reached_rows(f, &mut seen));
+        seen.contains(row)
+    };
+    for body in [
+        "if c { x } else if d { 3 } else { unreachable(\"u\") }",
+        "if c { unreachable(\"u\") } else if d { x } else { 3 }",
+        "if c { x } else {\n  if d { 3 } else { todo(\"t\") }\n}",
+        "match k {\n  0 => x\n  1 => 3\n  _ => unreachable(\"u\")\n}",
+    ] {
+        assert!(reaches(body), "{}", body);
+    }
+    for body in [
+        "if c { x } else { unreachable(\"u\") }",
+        "if c { x } else if d { 3 } else { 4 }",
+        "match k {\n  0 => x\n  _ => todo(\"t\")\n}",
+    ] {
+        assert!(!reaches(body), "{}", body);
     }
 }
 

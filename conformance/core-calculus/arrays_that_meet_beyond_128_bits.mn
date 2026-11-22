@@ -1,0 +1,29 @@
+// expect: E0222 E0222 E0222 E0222 E0222
+module conformance
+// Branches, or arms, that give arrays whose integers fit neither `i128` nor `u128` together meet
+// in no one machine type, as branches of integers that do not fit one together do not
+// (core-calculus.md, item 4): each is E0222, whichever of a repeat, a literal or a name gives
+// them. The review of pull request 189 found MIR and native code refusing them where the
+// reference interpreter ran them, since the hull was checked for branches of integers alone.
+
+pub fn w4(y: u128, k: u8) -> [2]i64 = match k {
+  0 => [-1; 2]
+  _ => [y; 2]
+}
+
+pub fn repeat(c: bool, x: i8, y: u128) -> [2]i64 = if c { [x; 2] } else { [y; 2] }
+
+pub fn named(c: bool, x: i8, y: u128) -> i64 {
+  val a: [2]i8 = [x; 2]
+  val b: [2]u128 = [y; 2]
+  val r: [2]i64 = if c { a } else { b }
+  r[0]
+}
+
+// So is an array literal of literals alone, kept exact until it lands as one of no one type is.
+pub fn literals_alone() -> [2]i8 = [-1, 340282366920938463463374607431768211455]
+
+// A branch of no type gives no value, and leaves the others' hull as it is: an `i8`'s integers
+// beside a `u128`'s are E0222, whatever the third branch is (the final review of pull request
+// 189, which found the `unreachable` dropping the hull and the check with it).
+pub fn unreachable_tail(c: bool, d: bool, x: i8, y: u128) -> [1]i64 = if c { [x] } else if d { [y] } else { unreachable("u") }
