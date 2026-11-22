@@ -13,49 +13,198 @@
     "generator": "^compiler/mente-cli/src/mir_run/"
   },
   "checks": [
-    { "name": "format", "when": "rust inputs", "run": ["cargo", "fmt", "--all", "--check"] },
-    { "name": "lints", "when": "rust inputs", "run": ["cargo", "clippy", "--all-targets", "--workspace", "--", "-D", "warnings"] },
-    { "name": "gates", "when": "every file", "run": ["cargo", "test", "-p", "mente-cli", "--test", "gates"], "why": "The repository's gates: English text, the dependency policy, the lock's crates." },
+    {
+      "name": "format",
+      "when": "rust inputs",
+      "run": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--check"
+      ]
+    },
+    {
+      "name": "lints",
+      "when": "rust inputs",
+      "run": [
+        "cargo",
+        "clippy",
+        "--all-targets",
+        "--workspace",
+        "--",
+        "-D",
+        "warnings"
+      ]
+    },
+    {
+      "name": "gates",
+      "when": "every file",
+      "run": [
+        "cargo",
+        "test",
+        "-p",
+        "mente-cli",
+        "--test",
+        "gates"
+      ],
+      "why": "The repository's gates: English text, the dependency policy, the lock's crates."
+    },
     {
       "name": "lint list, golden files and conformance",
       "when": "programs",
-      "run": ["cargo", "test", "-p", "mente-cli", "--test", "lints", "--test", "reproducible", "--test", "conformance"],
+      "run": [
+        "cargo",
+        "test",
+        "-p",
+        "mente-cli",
+        "--test",
+        "lints",
+        "--test",
+        "reproducible",
+        "--test",
+        "conformance"
+      ],
       "why": "What a change to the compiler or to its programs must keep: the lint's list of what it does not see, the golden files every conformance program writes, and each program's expected report."
     },
     {
       "name": "MIR mutation gate",
       "when": "mir",
-      "run": ["cargo", "test", "-p", "mente-cli", "--bin", "mn", "mir_mutants"],
+      "run": [
+        "cargo",
+        "test",
+        "-p",
+        "mente-cli",
+        "--bin",
+        "mn",
+        "mir_mutants"
+      ],
       "why": "The gate's records name each mutant by the MIR it changes, so a change to MIR, to the lowering or to the gate can add, drop or rename a mutant, which only the gate's own tests see (PR 158: an operation made exact stopped verifying, and the gate's records named a mutant that no longer existed, which CI found and these checks had not run)."
     },
     {
       "name": "demo mutation gate",
       "when": "mir",
-      "run": ["cargo", "test", "-p", "mente-cli", "--test", "cli", "test_mn_test_mutate_runs_the_demo_gate"],
+      "run": [
+        "cargo",
+        "test",
+        "-p",
+        "mente-cli",
+        "--test",
+        "cli",
+        "test_mn_test_mutate_runs_the_demo_gate"
+      ],
       "why": "`mn test --mutate` runs the same gate on the corpus, through the command."
     },
     {
       "name": "program generator",
       "when": "generator",
-      "run": ["cargo", "test", "-p", "mente-cli", "--bin", "mn", "--", "mir_run::coverage::", "mir_run::differential::", "mir_run::generate::", "mir_run::host_shapes::"],
+      "run": [
+        "cargo",
+        "test",
+        "-p",
+        "mente-cli",
+        "--bin",
+        "mn",
+        "--",
+        "mir_run::coverage::",
+        "mir_run::differential::",
+        "mir_run::generate::",
+        "mir_run::host_shapes::"
+      ],
       "why": "The program generator's own tests, one filter for each module of its directory: every construct of the grammar reached, every generated program well typed and replayable, the three paths agreeing on them, and the host's shapes. No other check runs them, so a change to the generator passed these checks and failed only on CI (compiler-fixes, 2026-11-22). The policy's check \"tools/quick.mjs runs the program generator's own tests for a change to it\" holds a filter here for each module of the directory."
     },
-    { "name": "spec directives", "when": "documents", "run": ["cargo", "run", "--quiet", "--bin", "mn", "--", "spec"] },
-    { "name": "documentation tools", "when": "documents", "run": ["npm", "run", "verify:docs"] },
+    {
+      "name": "spec directives",
+      "when": "documents",
+      "run": [
+        "cargo",
+        "run",
+        "--quiet",
+        "--bin",
+        "mn",
+        "--",
+        "spec"
+      ]
+    },
+    {
+      "name": "documentation tools",
+      "when": "documents",
+      "run": [
+        "npm",
+        "run",
+        "verify:docs"
+      ]
+    },
+    {
+      "name": "records",
+      "when": "documents",
+      "run": [
+        "cargo",
+        "test",
+        "-p",
+        "mente-cli",
+        "--test",
+        "register",
+        "--test",
+        "records",
+        "--test",
+        "escapes"
+      ],
+      "why": "What a change to a document must keep of the records: the register's entries, their keys and the condition that would reopen each decision, every Markdown file declared once, and each escaped bug's form (the escape register-change-unchecked-locally: a decided entry with no condition reached CI)."
+    },
     {
       "name": "workflow policy",
       "when": "every file",
-      "run": ["npm", "run", "test:ci"],
+      "run": [
+        "npm",
+        "run",
+        "test:ci"
+      ],
       "why": "The workflow policy reads files across the whole tree, not the gates alone: every module a job that holds a secret runs, the compiler's sources for its ignored tests, the corpus, the spec and the docs. So any change can fail it, and every change calls for it (PR 161: a change to the benchmark's harness alone failed it in CI, where this map had not run it). The policy's check \"tools/quick.mjs runs this policy before a push for a change to any file\" holds this."
     },
-    { "name": "benchmark corpus", "when": "benchmark", "run": ["npm", "run", "check:benchmark"] },
-    { "name": "benchmark checker", "when": "benchmark", "run": ["npm", "run", "test:benchmark"] },
-    { "name": "benchmark harness", "when": "harness", "run": ["npm", "run", "test:harness"] },
-    { "name": "site", "when": "site", "run": ["npm", "run", "test:site"] },
+    {
+      "name": "benchmark corpus",
+      "when": "benchmark",
+      "run": [
+        "npm",
+        "run",
+        "check:benchmark"
+      ]
+    },
+    {
+      "name": "benchmark checker",
+      "when": "benchmark",
+      "run": [
+        "npm",
+        "run",
+        "test:benchmark"
+      ]
+    },
+    {
+      "name": "benchmark harness",
+      "when": "harness",
+      "run": [
+        "npm",
+        "run",
+        "test:harness"
+      ]
+    },
+    {
+      "name": "site",
+      "when": "site",
+      "run": [
+        "npm",
+        "run",
+        "test:site"
+      ]
+    },
     {
       "name": "local limits",
       "when": "local limits",
-      "run": ["node", "--test", "tools/local-limits.test.mjs"],
+      "run": [
+        "node",
+        "--test",
+        "tools/local-limits.test.mjs"
+      ],
       "why": "The local limits proved on this machine: a process past its memory dies alone, a command past its time ends with its children, a third build waits for a slot, a killed holder frees its slot, and -MenteOnly leaves other projects untouched. They run on Windows alone, so CI does not run them. The policy's check \"the quick checks run every command in one of the machine's build slots, under the local limits\" holds this."
     }
   ]
