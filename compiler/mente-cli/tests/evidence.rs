@@ -221,7 +221,7 @@ fn test_a_node_report_is_read_as_our_reporter_writes_it() {
     assert_eq!(
         tests[1],
         NodeTest {
-            file: "/w/.github/scripts/policy.test.mjs".to_string(),
+            file: "/w/.github/scripts/policy/commits.test.mjs".to_string(),
             suite: vec![],
             name: "a check with > < & \" ' and <!-- a comment -->".to_string(),
             skipped: false,
@@ -233,7 +233,7 @@ fn test_a_node_report_is_read_as_our_reporter_writes_it() {
     assert_eq!(
         tests[6],
         NodeTest {
-            file: "/w/.github/scripts/policy-helpers.mjs".to_string(),
+            file: "/w/.github/scripts/policy/repo.mjs".to_string(),
             suite: vec!["a policy suite".to_string()],
             name: "a check from a helper".to_string(),
             skipped: false,
@@ -698,8 +698,26 @@ fn escape_with(guard: &str) -> String {
     )
 }
 
+/// A module of the workflow policy is a file `<name>.test.mjs` directly in its directory, as
+/// `npm run test:ci` runs them, wherever the checkout stands; a library the modules share, a file
+/// below the directory, and a test file beside it are none.
+#[test]
+fn test_a_policy_module_is_a_test_file_of_the_policy_directory() {
+    for (file, module) in [
+        ("/w/.github/scripts/policy/commits.test.mjs", true),
+        ("C:/w/.github/scripts/policy/mutation.test.mjs", true),
+        ("/w/.github/scripts/policy/repo.mjs", false),
+        ("/w/.github/scripts/policy/fixtures/x.test.mjs", false),
+        ("/w/.github/scripts/policy-run.test.mjs", false),
+        ("/w/.github/scripts/policy.test.mjs", false),
+        ("/w/tools/policy/x.test.mjs", false),
+    ] {
+        assert_eq!(evidence::is_policy_module(file), module, "{}", file);
+    }
+}
+
 /// Each kind of guard is found in its runner's list: a Rust test of the package it names, which
-/// nextest runs; a check at the top of the policy's own file; a test any Node run ran; a quick
+/// nextest runs; a check at the top of one of the policy's modules; a test any Node run ran; a quick
 /// check by name. Skipped, left to do, ignored and filtered tests do not count, and a Rust guard
 /// that names no package does not read, since one name may stand in two crates.
 #[test]
@@ -718,6 +736,8 @@ fn test_each_guard_is_found_in_its_runners_list() {
         ("node test \"a nested check\"", true),
         ("policy check \"a skipped check\"", false),
         ("policy check \"a check left to do\"", false),
+        ("policy check \"a parent\"", false),
+        ("node test \"a parent\"", true),
         ("node test \"a deeper test\"", true),
         ("node test \"a subtest\"", true),
         ("node test \"a skipped check\"", false),

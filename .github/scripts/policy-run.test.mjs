@@ -1,8 +1,8 @@
 // The workflow policy's run tests (policy-runtime-judge in docs/design-review.md, its PR 2): every
 // check that runs a script or a program of the tree, which the policy itself
-// (.github/scripts/policy.test.mjs) no longer does. They test the change's own scripts in the
+// (.github/scripts/policy/) no longer does. They test the change's own scripts in the
 // change's own run, as the crates' tests do; the code owner's review and the pins of
-// policy.test.mjs hold this file, the fixtures it runs and the scripts they run in turn. Each check
+// the policy hold this file, the fixtures it runs and the scripts they run in turn. Each check
 // counts itself when it runs, and the suite fails when fewer ran than FLOOR, the checks below:
 // test_the_documentation_job_runs_the_workflow_policy keeps FLOOR equal to them.
 import { after, test } from "node:test";

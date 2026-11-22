@@ -4,7 +4,7 @@
 # mutation runs under `mutants` (.github/workflows/mutants.yml and mutants-full.yml), so a test
 # that outgrows its limit fails a required check, not only a mutation run's first pass. The two
 # differ only in whether the first failure stops the run. The workflow policy test
-# (.github/scripts/policy.test.mjs) reads every line of this file and holds its own copy of each
+# (.github/scripts/policy/test-runs.test.mjs) reads every line of this file and holds its own copy of each
 # limit and of the tests each override names, so that a change to a limit, more time for another
 # test, or another test run alone, is a change to the policy too. Every test an override names
 # must be a test that runs.

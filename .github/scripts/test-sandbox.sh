@@ -66,7 +66,7 @@
 # tells a mutant, as above, and fails whenever it does, which would catch every mutant: that is
 # outside any sandbox, and the diff a reviewer reads is what sees it. Windows has no sandbox yet.
 #
-# The workflow policy (.github/scripts/policy.test.mjs) pins this script and the steps that run it.
+# The workflow policy (.github/scripts/policy/) pins this script and the steps that run it.
 set -euo pipefail
 
 # Root's own: this script's copy, which the shell route runs, the one program, and the root.
