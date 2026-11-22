@@ -294,11 +294,18 @@ test("on posix the runner kills the command's group at its time even after the c
   // A stand-in for git that starts a sleeper holding its output, as a transport would, and exits.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-"));
   const sleeper = path.join(dir, "sleeper.pid");
-  const standIn = `const { spawn } = require("node:child_process"); const s = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(sleeper)}, String(s.pid)); process.exit(0);`;
+  // The sleeper carries a marker of this run in its command line, so that it is told apart from any
+  // process that later takes its id (the eleventh review).
+  const marker = `mente-orphan-${process.pid}-${Date.now()}`;
+  const sleep = `setTimeout(() => {}, 30000); // ${marker}`;
+  const standIn = `const { spawn } = require("node:child_process"); const s = spawn(process.execPath, ["-e", ${JSON.stringify(sleep)}], { stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(sleeper)}, String(s.pid)); process.exit(0);`;
   const env = { ...process.env, TREE_ARGS: JSON.stringify([process.execPath, "-e", standIn]), TREE_TIMEOUT: "1500" };
+  // Ends the sleeper if it still lives: only the process whose command line holds this run's
+  // marker, never another that has taken its id since.
   const end = () => {
     try {
-      process.kill(Number(fs.readFileSync(sleeper, "utf8")), "SIGKILL");
+      const pid = Number(fs.readFileSync(sleeper, "utf8"));
+      if (fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").includes(marker)) process.kill(pid, "SIGKILL");
     } catch {
       // Gone already.
     }
