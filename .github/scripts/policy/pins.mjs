@@ -50,7 +50,7 @@ export const PINNED_FILES = new Map([
   [".github/scripts/install-mdbook.sh", "1bbc5b95423f7c849ab9e2e036108fc198120177beee4bf6d8d239bb7832eef6"],
   [".github/scripts/test-list.mjs", "6aa8a0c532adf0a5ccef1e65b9a4a0f05090929db3be40d667d9ebefc828df09"],
   [".github/scripts/lib/test-list.mjs", "9aab6d21844be4b964bcfa9e19257c4b2c61ce3cf40f03a0319b1a759bc05b6b"],
-  [".github/scripts/lib/test-times.mjs", "d69a9b59b5bf2e5c94a045cf07ffe992c9576951fbbd040083a384eb47637b08"],
+  [".github/scripts/lib/test-times.mjs", "3ca15a31f747f5125186af1648202803a2563f347a326a13c06642cc5a9bc372"],
   [".github/scripts/test-times.mjs", "397e521bd3c3932429a6c16b5634c0de99ec9b2cf3203eb148ee51c462a392e9"],
   [".github/scripts/tools.sh", "dee23b6f996a8b6772446056aa448ad2a35e60563a3e0320e1855b6a420e90d0"],
   [".github/scripts/test-sandbox.sh", "9ac640fe36800bc80902151031552ff8f218c104f03c85a3a79951df880a7bbd"],
