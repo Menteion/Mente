@@ -290,6 +290,47 @@ test("the hook asks the remote git pushes to, never one an insteadOf rewrites to
   }
 });
 
+test("on posix the runner kills the command's group at its time even after the command has exited, a child of it holding the pipe", { skip: process.platform === "win32" && "on Windows the job object, not a process group, ends the tree" }, () => {
+  // A stand-in for git that starts a sleeper holding its output, as a transport would, and exits.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-"));
+  const sleeper = path.join(dir, "sleeper.pid");
+  const standIn = `const { spawn } = require("node:child_process"); const s = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: ["ignore", "inherit", "inherit"] }); require("node:fs").writeFileSync(${JSON.stringify(sleeper)}, String(s.pid)); process.exit(0);`;
+  const env = { ...process.env, TREE_ARGS: JSON.stringify([process.execPath, "-e", standIn]), TREE_TIMEOUT: "1500" };
+  const end = () => {
+    try {
+      process.kill(Number(fs.readFileSync(sleeper, "utf8")), "SIGKILL");
+    } catch {
+      // Gone already.
+    }
+  };
+  try {
+    // A positive control: round 10's runner killed only while the command lived, so it waits on the
+    // pipe the sleeper holds, past any time.
+    const fixed = `  if (windows) {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  } else {
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+  }`;
+    const guarded = `  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (windows) child.kill();
+  else { try { process.kill(-child.pid, "SIGKILL"); } catch {} }`;
+    assert.equal(TREE_RUNNER.split(fixed).length, 2, "the runner's kill is as this test knows it");
+    const old = spawnSync(process.execPath, ["-e", TREE_RUNNER.split(fixed).join(guarded)], { env, encoding: "utf8", timeout: 6000 });
+    assert.equal(old.error?.code, "ETIMEDOUT", "round 10's runner returned, so this case does not reproduce the orphan");
+    end();
+    // The runner: its time passes, the whole group dies, the pipe closes, and it answers at once.
+    const started = Date.now();
+    const r = spawnSync(process.execPath, ["-e", TREE_RUNNER], { env, encoding: "utf8", timeout: 20000 });
+    assert.equal(r.error, undefined, "the runner waited on the pipe past its time");
+    const answer = JSON.parse(r.stdout);
+    assert.equal(answer.timedOut, true);
+    assert.ok(Date.now() - started < 10000, "the runner answered long after its time");
+  } finally {
+    end();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("the runner reports once, as one JSON, even when its command cannot start", () => {
   // A command that cannot start makes Node report both an error and a close; the runner answers the
   // first and only that one (the ninth review), so the hook reads its answer, not a parse error.

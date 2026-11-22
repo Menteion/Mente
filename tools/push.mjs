@@ -65,7 +65,9 @@ export const REMOTE_TIMEOUT_MS = 60000;
  * limit on the command alone would kill git and leave its transport, git-remote-http, holding its
  * connection (the eighth review of #203). The tree is never found by process ids, which Windows
  * reuses and does not clear from a dead parent's children (the ninth review):
- * - on posix the command leads a process group of its own, killed whole while its leader lives;
+ * - on posix the command leads a process group of its own, killed whole whenever its time passes
+ *   before the runner has seen it close, even once git has exited while a transport holds its pipes:
+ *   a group's id is not reused while any member lives (the tenth review);
  * - on Windows the command is tools/capped.ps1, which runs git in a job object that ends every
  *   process in it when the job's owner ends (local-limits.mjs, capped); killing that one direct
  *   child, by its own handle, ends exactly the job's members.
@@ -81,9 +83,11 @@ child.stdout.setEncoding("utf8").on("data", (d) => (out += d));
 child.stderr.setEncoding("utf8").on("data", (d) => (err += d));
 const timer = setTimeout(() => {
   timedOut = true;
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  if (windows) child.kill();
-  else { try { process.kill(-child.pid, "SIGKILL"); } catch {} }
+  if (windows) {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  } else {
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+  }
 }, Number(process.env.TREE_TIMEOUT));
 const done = (code) => {
   if (finished) return;
