@@ -542,7 +542,42 @@ fn group(mode: Mode) -> &'static str {
 /// for these alone, and only for their code; a listed program that checks is a problem too, so
 /// that the list does not outlive its cause. The generator's rework (pull request 204) removes
 /// it. Generation is deterministic per seed, so the list holds while the generator stays.
-pub(crate) const ROOT_CAUSE_8: &[(u64, &str)] = &[];
+pub(crate) const ROOT_CAUSE_8: &[(u64, &str)] = &[
+    (1551, "E0212"),
+    (1706, "E0212"),
+    (1901, "E0212"),
+    (2907, "E0212"),
+    (2984, "E0212"),
+    (3047, "E0212"),
+    (3618, "E0222"),
+    (3661, "E0222"),
+    (3901, "E0212"),
+];
+
+/// The problems of the program of `seed` that `list` does not excuse: the refusals of a code it
+/// lists for the seed are excused, and none other; a listed program that checks is a problem
+/// of its own, so that the list does not outlive its cause.
+fn unexcused(seed: u64, checks: bool, problems: Vec<String>, list: &[(u64, &str)]) -> Vec<String> {
+    let listed: Vec<&str> = list
+        .iter()
+        .filter(|(s, _)| *s == seed)
+        .map(|(_, code)| *code)
+        .collect();
+    let mut out = Vec::new();
+    if checks && !listed.is_empty() {
+        out.push(format!(
+            "seed {}: listed in ROOT_CAUSE_8 as refused, but it checks: remove it from the list",
+            seed
+        ));
+    }
+    let excused = |p: &String| {
+        listed
+            .iter()
+            .any(|code| p.starts_with(&format!("seed {}: {} at ", seed, code)))
+    };
+    out.extend(problems.into_iter().filter(|p| !excused(p)));
+    out
+}
 
 /// The programs of the `count` seeds from `first`, generated and checked, Tier 1 included, but
 /// not run: a line of what they show, and what no generated program may show
@@ -557,23 +592,12 @@ fn check_generated(first: u64, count: u64) -> (String, Vec<String>) {
         let seed = c.program.seed;
         accepted += usize::from(c.module.is_some());
         regenerated += c.regenerated;
-        let listed: Vec<&str> = ROOT_CAUSE_8
-            .iter()
-            .filter(|(s, _)| *s == seed)
-            .map(|(_, code)| *code)
-            .collect();
-        if !listed.is_empty() && c.module.is_some() {
-            problems.push(format!(
-                "seed {}: listed in ROOT_CAUSE_8 as refused, but it checks: remove it from the list",
-                seed
-            ));
-        }
-        let expected = |p: &String| {
-            listed
-                .iter()
-                .any(|code| p.starts_with(&format!("seed {}: {} at ", seed, code)))
-        };
-        problems.extend(c.problems.into_iter().filter(|p| !expected(p)));
+        problems.extend(unexcused(
+            seed,
+            c.module.is_some(),
+            c.problems,
+            ROOT_CAUSE_8,
+        ));
         claims.extend(c.claims.into_iter().map(|a| (seed, a)));
     }
     problems.extend(generate::beyond_the_bars(count, regenerated, &claims));
@@ -1139,6 +1163,43 @@ mod tests {
                 Err("the program ran for more than 300 ms".to_string()),
                 Ok(vec!["0".to_string()]),
             ])
+        );
+    }
+
+    /// The list of expected refusals excuses exactly what it names (`unexcused`): a refusal of
+    /// a listed code at a listed seed, and nothing else; and a listed program that checks is a
+    /// problem.
+    #[test]
+    fn test_the_expected_refusals_excuse_only_what_they_name() {
+        let list = [(7, "E0212"), (9, "E0222")];
+        let refused = |seed: u64, code: &str| format!("seed {}: {} at 3:4: no type", seed, code);
+        assert_eq!(
+            unexcused(
+                7,
+                false,
+                vec![refused(7, "E0212"), refused(7, "E0212")],
+                &list
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            unexcused(7, false, vec![refused(7, "E0222")], &list),
+            [refused(7, "E0222")]
+        );
+        assert_eq!(
+            unexcused(8, false, vec![refused(8, "E0212")], &list),
+            [refused(8, "E0212")]
+        );
+        assert_eq!(
+            unexcused(9, true, Vec::new(), &list),
+            ["seed 9: listed in ROOT_CAUSE_8 as refused, but it checks: remove it from the list"]
+        );
+        assert_eq!(unexcused(8, true, Vec::new(), &list), Vec::<String>::new());
+        // A refusal for another reason at a listed seed stands, a panic among them.
+        let panicked = "seed 7: the checker panicked: internal error".to_string();
+        assert_eq!(
+            unexcused(7, false, vec![panicked.clone()], &list),
+            [panicked]
         );
     }
 

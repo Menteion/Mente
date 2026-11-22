@@ -7969,6 +7969,32 @@ mod tests {
         assert_eq!(seen[0].nearest.as_deref(), Some("-4"));
     }
 
+    /// A checker that panics is reported with what it said (`panic_message`), so that a run
+    /// names the internal error and not only that there was one: the 18 programs the 4000 seeds
+    /// of pull request 204 refused were each `the checker panicked`, and named nothing.
+    #[test]
+    fn test_a_panic_is_reported_with_what_it_said() {
+        fn planted(n: u8) -> u8 {
+            if n == 0 {
+                panic!("internal error: planted at {}", n);
+            }
+            n
+        }
+        let said = |caught: std::thread::Result<u8>| match caught {
+            Err(payload) => panic_message(&*payload),
+            Ok(n) => n.to_string(),
+        };
+        assert_eq!(
+            said(panic::catch_unwind(|| planted(0))),
+            "internal error: planted at 0"
+        );
+        assert_eq!(
+            said(panic::catch_unwind(|| -> u8 { panic::panic_any(7_u8) })),
+            "a panic with no message"
+        );
+        assert_eq!(said(panic::catch_unwind(|| planted(3))), "3");
+    }
+
     /// A run is held to two bars, whatever its size: the functions it generates again for
     /// each hundred programs, and the claims of each hundred that no call reached. Each is
     /// reported with its count, and the summary names every claim never reached.

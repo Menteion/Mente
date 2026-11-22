@@ -38626,6 +38626,7 @@ block0(v0: u8, v1: effect):
 t0: stack-overflow @47:8 ["the call stack ran out"]
 t1: unreachable @47:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/ghost-contracts-and-totality/compound_remainder_proves_only_what_holds.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/decreases_negative_at_a_call.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/decreases_not_smaller.mn == (exit 2)
 == conformance/ghost-contracts-and-totality/decreases_proven.mn ==
