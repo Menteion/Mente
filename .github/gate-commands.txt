@@ -14,6 +14,7 @@ ci.yml#rust: node .github/scripts/build-time-code.mjs
 ci.yml#rust: cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
 ci.yml#rust: node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"
 ci.yml#rust: cargo-nextest nextest run --locked --workspace --profile ci
+ci.yml#rust: node .github/scripts/test-times.mjs calibrate
 ci.yml#rust: node .github/scripts/test-times.mjs
 ci.yml#rust: cargo test --locked --workspace --doc -- --list > "$RUNNER_TEMP/doctests.txt" 2>&1
 ci.yml#rust: node .github/scripts/test-list.mjs doctests "$RUNNER_TEMP/doctests.txt"

@@ -27,12 +27,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # judged: the runners whose tests' growth is judged against main's runs, which alone
+          # get the token that reads them (.github/scripts/lib/test-times.mjs).
           - name: x86-64 Linux
             os: ubuntu-24.04
+            judged: true
           - name: x86-64 Windows
             os: windows-2025
           - name: AArch64 Linux
             os: ubuntu-24.04-arm
+            judged: true
     runs-on: ${{ matrix.os }}
     # Reading the actions of the repository, the times main's runs uploaded, for the step that
     # judges the tests' times against them.
@@ -112,23 +116,33 @@ jobs:
           cargo-nextest nextest run --locked --workspace --profile ci
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
+      - name: Time the calibration workload
+        # A fixed workload, timed right after the tests on the same machine, which no change can
+        # move: the run's speed against main's runs is its time against theirs.
+        run: |
+          node .github/scripts/test-times.mjs calibrate
+          /usr/bin/bash .github/scripts/tools.sh verify
       - name: Upload the test times
-        # nextest's JUnit report of the run, each test's time, which later runs judge against when
-        # this is a run of main: the step below reads the reports of main's green runs alone.
+        # nextest's JUnit report of the run, each test's time, and the calibration, which later runs
+        # judge against when this is a run of main; a job run again replaces its own.
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-times-${{ matrix.os }}
-          path: target/nextest/ci/junit.xml
+          path: |
+            target/nextest/ci/junit.xml
+            target/nextest/ci/calibration.json
           if-no-files-found: error
-      - name: The tests' times, against main's own green runs on this runner
-        # A test past 10 s that takes more than 1.5 times its time in main's latest green runs,
-        # at this run's speed, fails the job: pull request 183 made a test four times slower,
-        # 36 s under nextest's stop of 40 s, and the queue's next runs failed on it. The Linux
-        # runners are judged, the Windows runner's times recorded
-        # (.github/scripts/lib/test-times.mjs says why); .config/slower-tests.txt accepts a time.
+          overwrite: true
+      - name: The tests' times, against their stops and main's own runs on this runner
+        # On every runner a test past 60% of its stop fails, unless .config/slower-tests.txt
+        # accepts it near its limit with the fix scheduled for it; on the Linux runners a test
+        # past 10 s that takes more than 1.5 times its time in main's latest runs, at the run's
+        # speed, fails too: pull request 183 made a test four times slower, 36 s under nextest's
+        # stop of 40 s, and the queue's next runs failed on it (.github/scripts/lib/test-times.mjs).
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ matrix.judged && github.token || '' }}
           TEST_TIMES_RUNNER: ${{ matrix.os }}
+          TEST_TIMES_JOB: Rust (${{ matrix.name }})
         run: |
           node .github/scripts/test-times.mjs
           /usr/bin/bash .github/scripts/tools.sh verify
