@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use mente_ast::project_spec_blueprint;
 use mente_mir::{run_in_memory_mutation_gate, MirOp, MirRegionSoA, MirType, NodeId, ValueLattice};
-use mente_sema::check_module;
+use mente_sema::{check_module, check_module_listed, Listings};
 use mente_syntax::diagnostics::{line_col, render_json, render_text, Diagnostic, FileDiagnostics};
 use mente_syntax::parse_module;
 
@@ -744,13 +744,13 @@ fn cmd_check(args: &[String]) {
                 continue;
             }
         };
-        let diagnostics = match parse_module(&src) {
-            Err(d) => vec![d],
-            Ok(module) => match check_module(&src, &module) {
-                Ok(rep) => {
-                    if !json {
-                        let proj = project_spec_blueprint(&module);
-                        println!(
+        let (checked_module, listings) = check_source_listed(&src);
+        let diagnostics = match checked_module {
+            Err(d) => d,
+            Ok((module, rep)) => {
+                if !json {
+                    let proj = project_spec_blueprint(&module);
+                    println!(
                             "[PASS] [{}] module `{}` | spec_hash: {}.. | layouts: {} | bitstructs: {} | @branchless: {} | @total: {} | @kernel: {}",
                             shown,
                             rep.module_path,
@@ -761,17 +761,15 @@ fn cmd_check(args: &[String]) {
                             rep.total_functions_verified,
                             rep.kernel_functions_verified,
                         );
-                        for lp in &rep.layout_proofs {
-                            println!(
+                    for lp in &rep.layout_proofs {
+                        println!(
                                 "       Proven @layout `{}` ({} bytes, align {} bytes — 0 padding holes)",
                                 lp.struct_name, lp.total_bytes, lp.align_bytes
                             );
-                        }
                     }
-                    Vec::new()
                 }
-                Err(diagnostics) => diagnostics,
-            },
+                Vec::new()
+            }
         };
         if !diagnostics.is_empty() {
             all_ok = false;
@@ -781,8 +779,8 @@ fn cmd_check(args: &[String]) {
                 }
             }
         }
-        // Every todo and every trusted clause, which change nothing in the verdict.
-        let listings = mente_sema::listings(&src);
+        // Every todo and every trusted clause, which change nothing in the verdict, from the
+        // same run of the checker.
         if !json {
             for line in listing_lines(&shown, &src, &listings) {
                 println!("{}", line);
@@ -812,6 +810,45 @@ Checked {} `.mn` file(s) in {:.2} ms.",
     }
     if !all_ok {
         process::exit(1);
+    }
+}
+
+/// What `mn check` reports for one module's source: the parsed module with the checker's report,
+/// or the diagnostics; and every `todo` and trusted clause it lists. One run of the checker gives
+/// both, Tier 1 included, so each module is proved once (`mente_sema::check_module_listed`).
+type Checked = (
+    Result<
+        (
+            mente_syntax::ModuleFile,
+            mente_sema::ModuleVerificationReport,
+        ),
+        Vec<Diagnostic>,
+    >,
+    Listings,
+);
+
+fn check_source_listed(src: &str) -> Checked {
+    checked_by(src, check_module_listed)
+}
+
+/// One run of the checker over a parsed module: its verdict and what it lists.
+type Proof = (
+    Result<mente_sema::ModuleVerificationReport, Vec<Diagnostic>>,
+    Listings,
+);
+
+/// [`check_source_listed`] by `prove`, which runs the checker over a parsed module and gives its
+/// verdict and listings: `check_module_listed` there, and in a test a prover that counts its runs.
+fn checked_by(
+    src: &str,
+    mut prove: impl FnMut(&str, &mente_syntax::ModuleFile) -> Proof,
+) -> Checked {
+    match parse_module(src) {
+        Err(d) => (Err(vec![d]), Listings::default()),
+        Ok(module) => {
+            let (verdict, listings) = prove(src, &module);
+            (verdict.map(|rep| (module, rep)), listings)
+        }
     }
 }
 
@@ -1273,6 +1310,42 @@ fn cmd_spec(_args: &[String]) {
 mod tests {
     use super::*;
     use mente_sema::verify_module;
+
+    /// `mn check` proves each module once: its verdict and what it lists come from one run of the
+    /// checker, Tier 1 included, the same verdict and listings the two give apart. It once ran the
+    /// checker for the verdict and again for the listings, and a corpus program whose proof takes
+    /// seconds made the diagnostics test run past its limit on Windows (pull request 183 brought
+    /// the program; the guard of this one, 2026-11-22).
+    #[test]
+    fn test_mn_check_proves_each_module_once() {
+        let src = "module m\npub fn f(x: u8) -> u8 = if x > 2 { todo(\"a\") } else { x }\npub fn g(xs: [4]u8, i: usize) -> u8 = xs[i]\n";
+        // The prover `mn check` uses, counting its runs.
+        let checked = |src: &str| {
+            let mut runs = 0;
+            let out = checked_by(src, |s, m| {
+                runs += 1;
+                check_module_listed(s, m)
+            });
+            (out, runs)
+        };
+        let ((verdict, listings), runs) = checked(src);
+        assert_eq!(runs, 1);
+        assert_eq!(check_source_listed(src).1, listings);
+        let module = parse_module(src).unwrap();
+        assert_eq!(
+            verdict.map(|(_, rep)| rep.module_path).map_err(|d| d.len()),
+            check_module(src, &module)
+                .map(|rep| rep.module_path)
+                .map_err(|d| d.len())
+        );
+        assert_eq!(listings, mente_sema::listings(src));
+        assert_eq!(listings.todos.len(), 1);
+        // A module that does not parse is proved never, and lists nothing.
+        let ((verdict, listings), runs) = checked("module m\nlet x = 1\n");
+        assert!(verdict.is_err());
+        assert_eq!(listings, Listings::default());
+        assert_eq!(runs, 0);
+    }
 
     /// Whether a function of the module has a loop inside another loop, in its body or its
     /// condition, by their spans.
