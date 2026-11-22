@@ -30,7 +30,7 @@
 // that one, and quick runs nothing until core.hooksPath names that hook's directory.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { BUILD, acquireSlot, requireRunner, runCapped } from "./local-limits.mjs";
 import { PASSED, requireHooks } from "./local-limits.mjs";
 
@@ -42,12 +42,19 @@ function git(args, env = {}) {
 /**
  * The id of the tree the working tree would commit: every tracked and unignored file as it stands,
  * however the repository's index marks it, through an index of its own, which leaves the
- * repository's index as it was.
+ * repository's index as it was. It starts from a copy of the repository's index, whose modes a
+ * commit takes (a file staged executable where core.fileMode is false, as on Windows, which an
+ * index read from HEAD would take as not: the push of 203's third round met it), with the marks
+ * that keep git from comparing a file, assume-unchanged and skip-worktree, taken off.
  */
 function workingTree() {
   const index = git(["rev-parse", "--git-path", `quick-index-${process.pid}`])[0];
+  const own = git(["rev-parse", "--git-path", "index"])[0];
   try {
-    git(["read-tree", "HEAD"], { GIT_INDEX_FILE: index });
+    if (existsSync(own)) copyFileSync(own, index);
+    else git(["read-tree", "HEAD"], { GIT_INDEX_FILE: index });
+    const marked = git(["ls-files", "-v"], { GIT_INDEX_FILE: index }).filter((line) => /^([a-z]|S) /.test(line)).map((line) => line.slice(2));
+    if (marked.length) git(["update-index", "--no-assume-unchanged", "--no-skip-worktree", "--", ...marked], { GIT_INDEX_FILE: index });
     git(["add", "--all"], { GIT_INDEX_FILE: index });
     return git(["write-tree"], { GIT_INDEX_FILE: index })[0];
   } finally {

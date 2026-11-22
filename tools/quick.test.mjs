@@ -205,6 +205,21 @@ test("a passing run on a working tree that differs from HEAD exits 0, says what 
   });
 });
 
+test("a new file staged executable is recorded as a commit takes it, so the record is HEAD's tree after the commit", (t) => {
+  withRepository((r) => {
+    const file = path.join(r.work, "run.sh");
+    fs.writeFileSync(file, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(file, 0o755);
+    r.git("add", "--chmod=+x", "run.sh");
+    const run = r.quick();
+    if (noRunner(run)) return t.skip("cargo's runner is not the capped one here, so quick.mjs runs no check");
+    assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
+    r.git("commit", "-q", "-m", "an executable file");
+    assert.equal(r.git("ls-files", "-s", "run.sh").split(" ")[0], "100755");
+    assert.equal(r.passed(), r.git("rev-parse", "HEAD^{tree}"));
+  });
+});
+
 test("a run refuses to start until core.hooksPath names the repository's hooks, and says the command to run", (t) => {
   withRepository((r) => {
     r.git("config", "--unset", "core.hooksPath");
