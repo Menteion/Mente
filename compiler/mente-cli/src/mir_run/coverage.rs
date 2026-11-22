@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use mente_interp::{Event, Stop, Trap, TrapKind};
 use mente_sema::check;
 use mente_sema::literals::From;
 use mente_sema::octagon::{INF, RELATIONAL_LIMIT};
@@ -18,9 +19,9 @@ use mente_sema::types::{Int, Ty, INT_TYPES};
 use mente_sema::wide::{self, Interval};
 use mente_sema::{CheckedFn, CheckedModule};
 use mente_syntax::tree::{
-    Arg, ArmBody, AssignOp, BinaryOp, Body, Bound, Contract, ContractKind, Else, EnumSyntax,
-    ExprId, ExprKind, FieldSyntax, FnSyntax, Param, PatBinding, PatternKind, Payload, Refinement,
-    StmtKind, StructSyntax, Tree, TypeId, TypeKind, UnaryOp,
+    Arg, ArmBody, AssignOp, BinaryOp, BlockId, Body, Bound, Contract, ContractKind, Else,
+    EnumSyntax, ExprId, ExprKind, FieldSyntax, FnSyntax, Param, PatBinding, PatternKind, Payload,
+    Refinement, StmtKind, StructSyntax, Tree, TypeId, TypeKind, UnaryOp,
 };
 
 use super::generate;
@@ -355,16 +356,63 @@ const SHIFTS: &[&str] = &["right shift past the bits its value is kept in"];
 /// that the containment oracle claims nothing inside it (`ghost-contracts-and-totality.md`,
 /// item 2). The oracle's first version reported a false alarm inside such an `ensures`, which no
 /// generated program held (`tier1-containment`).
-const ROUTED: &[&str] = &[
-    "requires holding an if, in a routed function",
-    "requires holding a match with a block arm, in a routed function",
-    "ensures holding an if, in a routed function",
-    "ensures holding a match with a block arm, in a routed function",
-    "invariant holding an if, in a routed function",
-    "invariant holding a match with a block arm, in a routed function",
-    "loop decreases holding an if, in a routed function",
-    "loop decreases holding a match with a block arm, in a routed function",
+const ROUTED_CLAUSES: &[&str] = &["requires", "ensures", "invariant", "loop decreases"];
+
+/// The forms of a clause [`ROUTED_CLAUSES`] names: an `if`, and a `match` with a block arm.
+const ROUTED_FORMS: &[&str] = &["an if", "a match with a block arm"];
+
+/// The attributes that route a function's clauses outside the Tier-1 fragment, each its own
+/// path through the checker (`tier1::Routing`): `@checked` makes them run-time checks, and
+/// `@prove` trusted axioms until `mn prove` runs, which Tier 1 lists.
+const ROUTES: &[&str] = &["@checked", "@prove"];
+
+/// The row of a clause of kind `clause` and form `form` in a function marked `route`.
+fn routed_row(clause: &str, form: &str, route: &str) -> String {
+    format!("{} holding {}, in a {} function", clause, form, route)
+}
+
+/// The ways of each form of [`ROUTED_FORMS`]: an `if`'s two branches, and a `match`'s arms by
+/// what they hold.
+const ROUTED_WAYS: &[(&str, &[&str])] = &[
+    ("an if", &["its then branch", "its else branch"]),
+    (
+        "a match with a block arm",
+        &["an expression arm", "a block arm"],
+    ),
 ];
+
+/// The row of a way of a clause of kind `clause` and form `form`, routed either way, that a run
+/// of its program takes, evaluating the value of that branch or arm ([`reached_routed_runs`]):
+/// each way of each kind and form, taken in programs enough, so that no generated clause is split
+/// where no value its runs give falls on one side.
+fn way_row(clause: &str, form: &str, way: &str) -> String {
+    format!(
+        "{} holding {} in a routed function, {} taken",
+        clause, form, way
+    )
+}
+
+/// A `requires` of a `@checked` function that holds a block and that a call breaks, so that
+/// the run-time check such a function writes traps it: a lowering that dropped the check would
+/// run that call on where the reference interpreter traps.
+const TRAPPING_REQUIRES: &str =
+    "requires holding a block that traps a call, in a @checked function";
+
+/// Every row the clauses of routed functions give: each kind, form and attribute, each way of
+/// each kind and form taken, and the `requires` that traps.
+fn routed_rows() -> Vec<String> {
+    let mut rows = Vec::new();
+    for clause in ROUTED_CLAUSES {
+        for form in ROUTED_FORMS {
+            rows.extend(ROUTES.iter().map(|route| routed_row(clause, form, route)));
+        }
+        for (form, ways) in ROUTED_WAYS {
+            rows.extend(ways.iter().map(|way| way_row(clause, form, way)));
+        }
+    }
+    rows.push(TRAPPING_REQUIRES.to_string());
+    rows
+}
 
 /// What generated programs never hold, each with its reason.
 pub(super) const NOT_GENERATED: &[(&str, &str)] = &[
@@ -682,12 +730,29 @@ fn reached(f: &FnSyntax, seen: &mut BTreeSet<String>) {
     }
 }
 
-/// The rows of [`ROUTED`] a function that routes its clauses outside the Tier-1 fragment
-/// reaches: each of its clauses, its loops' invariants and measures among them, that is an `if`
-/// or a `match` with a block arm.
-fn reached_routed(f: &FnSyntax, seen: &mut BTreeSet<String>) {
+/// A clause of a function that is an `if` or a `match` with a block arm: its kind, its form, the
+/// clause, and each of its ways, a branch of the `if` or an arm of the `match`, named as
+/// [`ROUTED_WAYS`] names it, with the expression a run evaluates when it takes that way, its value.
+struct RoutedClause {
+    kind: &'static str,
+    form: &'static str,
+    clause: ExprId,
+    ways: Vec<(&'static str, Option<ExprId>)>,
+}
+
+/// Each clause of `f`, its loops' invariants and measures among them, that is an `if` or a
+/// `match` with a block arm.
+fn routed_clauses(f: &FnSyntax) -> Vec<RoutedClause> {
     let tree = &f.tree;
-    let mut clauses: Vec<(&str, ExprId)> = f
+    // A block's value, its last statement's expression.
+    let value = |b: BlockId| {
+        let last = *tree.block(b).stmts.last()?;
+        match tree.stmt(last).kind {
+            StmtKind::Expr(e) => Some(e),
+            _ => None,
+        }
+    };
+    let mut clauses: Vec<(&'static str, ExprId)> = f
         .contracts
         .iter()
         .map(|c| (contract_kind(c), c.expr))
@@ -703,20 +768,135 @@ fn reached_routed(f: &FnSyntax, seen: &mut BTreeSet<String>) {
             clauses.extend(decreases.iter().map(|&d| ("loop decreases", d)));
         }
     }
-    for (kind, e) in clauses {
-        let form = match &tree.expr(e).kind {
+    let mut out = Vec::new();
+    for (kind, clause) in clauses {
+        let (form, ways) = match &tree.expr(clause).kind {
             ExprKind::If {
-                otherwise: Some(_), ..
-            } => "an if",
+                then,
+                otherwise: Some(other),
+                ..
+            } => {
+                let other = match other {
+                    Else::Block(b) => value(*b),
+                    Else::If(i) => Some(*i),
+                };
+                (
+                    "an if",
+                    vec![
+                        ("its then branch", value(*then)),
+                        ("its else branch", other),
+                    ],
+                )
+            }
             ExprKind::Match { arms, .. }
                 if arms.iter().any(|a| matches!(a.body, ArmBody::Block(_))) =>
             {
-                "a match with a block arm"
+                let ways = arms
+                    .iter()
+                    .map(|a| match a.body {
+                        ArmBody::Expr(x) => ("an expression arm", Some(x)),
+                        ArmBody::Block(b) => ("a block arm", value(b)),
+                    })
+                    .collect();
+                ("a match with a block arm", ways)
             }
             _ => continue,
         };
-        seen.insert(format!("{} holding {}, in a routed function", kind, form));
+        out.push(RoutedClause {
+            kind,
+            form,
+            clause,
+            ways,
+        });
     }
+    out
+}
+
+/// The rows of [`routed_row`] a function reaches, by each attribute it routes its clauses with.
+fn reached_routed(f: &FnSyntax, routing: Routing, seen: &mut BTreeSet<String>) {
+    let on = [routing.checked, routing.prove];
+    for c in routed_clauses(f) {
+        for (route, _) in ROUTES.iter().zip(on).filter(|(_, on)| *on) {
+            seen.insert(routed_row(c.kind, c.form, route));
+        }
+    }
+}
+
+/// The calls the runs of a program with routed functions make: the comparison's own, by its
+/// default plan (`differential.rs`, `generated_programs_run_alike_on_the_three_paths`).
+const ROUTED_PLAN: generate::CallPlan = generate::CallPlan {
+    random: 12,
+    exhaustive: 256,
+};
+
+/// The rows of [`way_row`] and [`TRAPPING_REQUIRES`] the runs of a program reach, when it holds
+/// a routed function: each call the comparison makes of it runs on the reference interpreter,
+/// traced, and a way of a clause is taken when a run evaluates its value, and a `requires` traps
+/// when a run stops at it. `routings` is each function's,
+/// as `module` has them. A problem when the runs do not run.
+fn reached_routed_runs(
+    seed: u64,
+    text: &str,
+    module: &CheckedModule,
+    routings: &[Routing],
+    seen: &mut BTreeSet<String>,
+) -> Option<String> {
+    if !routings.iter().any(|r| r.checked || r.prove) {
+        return None;
+    }
+    if routings.len() != module.functions.len() {
+        return Some(format!(
+            "seed {}: {} functions parse and {} check",
+            seed,
+            routings.len(),
+            module.functions.len()
+        ));
+    }
+    let calls = generate::calls(text, module, seed, ROUTED_PLAN);
+    let mut given: BTreeSet<(usize, u32)> = BTreeSet::new();
+    let mut trapped: BTreeSet<String> = BTreeSet::new();
+    let ran = mente_interp::with_calls(module, super::differential::STEPS, |interp| {
+        for (name, args) in &calls {
+            let values = args.iter().map(|(_, v)| v.clone()).collect();
+            let outcome = interp.traced(name, values, &mut |e| {
+                if let Event::Given { function, expr, .. } = e {
+                    given.insert((function, expr.0));
+                }
+            });
+            if let Err(Stop::Trap(Trap {
+                kind: TrapKind::Requires(clause),
+                ..
+            })) = outcome
+            {
+                trapped.insert(clause);
+            }
+        }
+    });
+    if let Err(stop) = ran {
+        return Some(format!(
+            "seed {}: the runs of its routed clauses did not run: {}",
+            seed, stop
+        ));
+    }
+    for (k, f) in module.functions.iter().enumerate() {
+        let (Some(f), true) = (f, routings[k].checked || routings[k].prove) else {
+            continue;
+        };
+        for c in routed_clauses(&f.syntax) {
+            for (way, value) in &c.ways {
+                if value.is_some_and(|v| given.contains(&(k, v.0))) {
+                    seen.insert(way_row(c.kind, c.form, way));
+                }
+            }
+            if c.kind == "requires"
+                && routings[k].checked
+                && trapped.contains(&f.syntax.tree.render_expr(c.clause))
+            {
+                seen.insert(TRAPPING_REQUIRES.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Whether a place holds a field: `s.f`, `s.f[i]`, `xs[i].f`.
@@ -1724,7 +1904,6 @@ fn grammar() -> BTreeSet<String> {
         COMPARISONS,
         EXPRESSIONS,
         SHIFTS,
-        ROUTED,
         &["array of arrays"],
     ];
     let mut all = BTreeSet::new();
@@ -1734,6 +1913,9 @@ fn grammar() -> BTreeSet<String> {
     for t in INT_TYPES {
         assert!(all.insert(format!("type {}", t.name)));
         assert!(all.insert(format!("literal of {}", t.name)));
+    }
+    for name in routed_rows() {
+        assert!(all.insert(name.clone()), "`{}` is named twice", name);
     }
     let compound = compound_assignments();
     assert!(!compound.is_empty(), "no compound assignment parses");
@@ -1766,12 +1948,15 @@ fn test_generated_programs_reach_every_construct_of_the_grammar() {
         let mut problems = c.problems;
         if let Some(module) = &c.module {
             let text = &c.program.text;
-            for (f, routing) in functions(text) {
-                reached(&f, &mut seen);
-                if routing.checked || routing.prove {
-                    reached_routed(&f, &mut seen);
-                }
+            let fns = functions(text);
+            for (f, routing) in &fns {
+                reached(f, &mut seen);
+                reached_routed(f, *routing, &mut seen);
             }
+            let routings: Vec<Routing> = fns.iter().map(|(_, r)| *r).collect();
+            problems.extend(reached_routed_runs(
+                seed, text, module, &routings, &mut seen,
+            ));
             structs(text)
                 .iter()
                 .for_each(|s| reached_struct(s, &mut seen));

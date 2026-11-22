@@ -35,10 +35,11 @@ use super::containment;
 use super::generate::{self, CallPlan, Mode};
 use super::{native_within, reference_within, run_lowered, CallArgs, Printed};
 
-/// The reference interpreter's limits in a comparison: a generated call does a few thousand
-/// steps at most, far below MIR's own limit. The stack is no limit of these: item 25's budget
-/// bounds every run alike.
-const STEPS: Limits = Limits {
+/// The reference interpreter's limits in a comparison, and in the coverage test's runs of the
+/// calls the comparison makes (`coverage::reached_routed_runs`): a generated call does a few
+/// thousand steps at most, far below MIR's own limit. The stack is no limit of these: item
+/// 25's budget bounds every run alike.
+pub(super) const STEPS: Limits = Limits {
     max_steps: 1_000_000,
     max_array: 1 << 24,
 };
