@@ -4949,7 +4949,7 @@ impl Gen {
     ///   assigns just before it, and sets to 0 after, so that the remainder is a candidate the
     ///   head holds, and whose `else` narrows `y` into `u8`, which only the left conjunct
     ///   bounds: Fable's review of pull request 182 found the head's fact of such a remainder
-    ///   deciding the `else` (`no-condition-outlives-its-owner`).
+    ///   deciding the `else` (`no-site-value-from-another-evaluation`).
     ///
     /// The reviews' b2, an `if` whose branch assigns, is no condition at all now: a condition
     /// changes nothing (`core-calculus.md`, item 10), and the checker refuses one that does.

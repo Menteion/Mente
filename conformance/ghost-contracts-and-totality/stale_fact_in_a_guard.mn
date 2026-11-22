@@ -1,7 +1,7 @@
 // expect: pass
 module conformance
-// A condition names only evaluations its state ran (spec item 2): the remainder of a loop's
-// candidate, evaluated at the head, leaves no fact past it, so a round that changes `x` decides
+// A condition is decided on the evaluations its state ran (spec item 2): a loop's candidate,
+// a remainder evaluated at the head, decides no later guard, so a round that changes `x` decides
 // its guard on `x` as it is. Tier 1 once kept the head's `x % 4 <= 1` and decided the `else` on
 // it: there `w` was 0, and `a[w]` lost its check, which `f(3, 1, 1)` fails. The forms: a
 // remainder, an `if`-valued conjunct, an `or` under the `and`, and a `not`.
