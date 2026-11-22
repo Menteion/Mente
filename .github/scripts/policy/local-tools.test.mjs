@@ -50,7 +50,7 @@ check("tools/quick.mjs runs this policy before a push for a change to any file, 
 /// The local limits' files: the module that defines them, the job object's script and the type it
 /// shares with CI, the entry points, cargo's runner, the raw-build hook, and their proofs
 /// (tools/local-limits.mjs).
-const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/capped.mjs", "tools/cargo.mjs", "tools/mn.mjs", "tools/raw-build.mjs", "tools/raw-build-guard.mjs", "tools/store-apps.mjs", "tools/local-limits.test.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
+const LOCAL_LIMITS = ["tools/local-limits.mjs", "tools/capped.ps1", "tools/capped.mjs", "tools/cargo.mjs", "tools/mn.mjs", "tools/raw-build.mjs", "tools/raw-build-guard.mjs", "tools/store-apps.mjs", "tools/local-limits.test.mjs", "tools/gate-entries/verify.mjs", ".github/scripts/lib/job-object.cs", ".github/scripts/job-limits.ps1"];
 /// The most the local limits may give: builds at once, GB committed by a process and by a tree, and
 /// minutes, those --minutes may ask for among them.
 const LOCAL_CEILING = { slots: 2, processGB: 8, jobGB: 16, minutes: 60 };

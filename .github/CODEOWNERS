@@ -92,6 +92,11 @@
 /tools/pr-body-guard.mjs @Dancraft3746
 /tools/push.test.mjs @Dancraft3746
 /tools/git-hooks/ @Dancraft3746
+# The gates' copy of main, its refresher and its stable entries (briefs/gate-tools-from-main.md):
+# every checkout's builds, tests and pushes run what they install and check.
+/tools/gates.mjs @Dancraft3746
+/tools/gate-set.json @Dancraft3746
+/tools/gate-entries/ @Dancraft3746
 
 # The local limits every session builds and tests under on the laptop, and their proofs: an edit
 # could lift the caps that keep one runaway from taking the machine down (the reset of 2026-11-22).
