@@ -22022,6 +22022,7 @@ block0(v0: addr, v1: effect):
 t0: stack-overflow @67:8 ["the call stack ran out"]
 t1: unreachable @67:8 ["unreachable reached: control left the code the checker allows"]
 }
+== conformance/core-calculus/literal_typed_by_every_operand_not_its_neighbour.mn == (exit 2)
 == conformance/core-calculus/loop_changes_what_a_payload_passes_mut.mn == (exit 2)
 == conformance/core-calculus/m1_slice.mn ==
 mente-dump 3 mir
