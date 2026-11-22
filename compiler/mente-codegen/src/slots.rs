@@ -136,7 +136,7 @@ pub(crate) fn layout(f: &cfg::Function) -> Result<Layout, String> {
     for (k, v) in makers.iter().enumerate() {
         roots[v.0 as usize].insert(k);
     }
-    let address = |v: NodeId| f.ty(v) == cfg::Ty::Addr;
+    let address = |v: NodeId| f.ty(v).mem().is_some();
     let mut changed = true;
     while changed {
         changed = false;
@@ -405,23 +405,23 @@ mod tests {
     /// frame of 363, which CI's build of it refused (seed 93 of the generator, 2026-11-21).
     #[test]
     fn test_the_slots_one_parameter_may_take_share_bytes() {
-        use mente_mir::cfg::{BlockId, Builder, IntTy, Num, Ty};
+        use mente_mir::cfg::{BlockId, Builder, IntTy, MemId, Num, Ty};
         let u8t = Ty::Int(IntTy::new(8, false));
         let mut b = Builder::new("f", &[Ty::Bool], Some(u8t));
         let c = b.params(BlockId(0))[0];
-        let first = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let first = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         let later = b.block(&[]);
-        let join = b.block(&[Ty::Addr]);
+        let join = b.block(&[Ty::Addr(MemId(0))]);
         b.branch(c, (later, vec![]), (join, vec![first]));
         b.switch(later);
-        let second = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let second = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         b.jump(join, vec![second]);
         b.switch(join);
         let p = b.params(join)[0];
         // An element of the parameter, alive beside it, has its base: it points into the one
         // slot the parameter holds, not into a second.
         let one = b.int(IntTy::new(64, false), Num::new(false, 1));
-        let at = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[p, one]);
+        let at = b.inst(Op::Elem { stride: 1 }, Ty::Addr(MemId(0)), &[p, one]);
         let x = b.inst(Op::Load, u8t, &[at]);
         let y = b.inst(Op::Load, u8t, &[p]);
         let v = b.inst(Op::Bits(mente_mir::cfg::BitOp::Or), u8t, &[x, y]);
@@ -437,7 +437,7 @@ mod tests {
     /// branches, start at one. With no room in the frame, they share their bytes from the start.
     #[test]
     fn test_slots_one_run_makes_start_apart_within_the_frame() {
-        use mente_mir::cfg::{BlockId, Builder, IntTy, Ty};
+        use mente_mir::cfg::{BlockId, Builder, IntTy, MemId, Ty};
         let u8t = Ty::Int(IntTy::new(8, false));
         let build = |frame: u128| {
             let mut b = Builder::new("f", &[Ty::Bool, u8t], None);
@@ -445,20 +445,20 @@ mod tests {
                 panic!("two parameters")
             };
             // Two slots of the entry block, the first dead before the second is made.
-            let s1 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            let s1 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
             b.inst(Op::Store, Ty::Unit, &[s1, x]);
-            let s2 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            let s2 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
             b.inst(Op::Store, Ty::Unit, &[s2, x]);
             // A slot in each branch, one made after an instruction more than the other.
             let (yes, no) = (b.block(&[]), b.block(&[]));
             b.branch(c, (yes, vec![]), (no, vec![]));
             b.switch(yes);
-            let s3 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            let s3 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
             b.inst(Op::Store, Ty::Unit, &[s3, x]);
             b.ret(None);
             b.switch(no);
             let y = b.inst(Op::Not, u8t, &[x]);
-            let s4 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+            let s4 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
             b.inst(Op::Store, Ty::Unit, &[s4, y]);
             b.ret(None);
             let mut f = b.finish();
@@ -481,31 +481,31 @@ mod tests {
     /// `term_uses` give nothing, 2026-11-22).
     #[test]
     fn test_with_no_room_only_slots_dead_before_the_next_share_bytes() {
-        use mente_mir::cfg::{BlockId, Builder, IntTy, Num, Ty};
+        use mente_mir::cfg::{BlockId, Builder, IntTy, MemId, Num, Ty};
         let u8t = Ty::Int(IntTy::new(8, false));
         let mut b = Builder::new("f", &[u8t], Some(u8t));
         let x = b.params(BlockId(0))[0];
         // A slot alive past the next one's making through an element of it.
-        let s1 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let s1 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         let zero = b.int(IntTy::new(64, false), Num::new(false, 0));
-        let e1 = b.inst(Op::Elem { stride: 1 }, Ty::Addr, &[s1, zero]);
-        let s2 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let e1 = b.inst(Op::Elem { stride: 1 }, Ty::Addr(MemId(0)), &[s1, zero]);
+        let s2 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         b.inst(Op::Store, Ty::Unit, &[s2, x]);
         b.inst(Op::Store, Ty::Unit, &[e1, x]);
         // A slot alive past the next one's making through the jump that passes it on.
-        let s3 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let s3 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         b.inst(Op::Store, Ty::Unit, &[s3, x]);
-        let s4 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let s4 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         b.inst(Op::Store, Ty::Unit, &[s4, x]);
-        let join = b.block(&[Ty::Addr]);
+        let join = b.block(&[Ty::Addr(MemId(0))]);
         b.jump(join, vec![s3]);
         b.switch(join);
         let p = b.params(join)[0];
         let y = b.inst(Op::Load, u8t, &[p]);
         // Two slots, the first dead before the second is made.
-        let s5 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let s5 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         b.inst(Op::Store, Ty::Unit, &[s5, y]);
-        let s6 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr, &[]);
+        let s6 = b.inst(Op::Slot { bytes: 16 }, Ty::Addr(MemId(0)), &[]);
         b.inst(Op::Store, Ty::Unit, &[s6, y]);
         b.ret(Some(y));
         let mut f = b.finish();
