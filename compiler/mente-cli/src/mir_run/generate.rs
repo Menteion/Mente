@@ -1134,6 +1134,19 @@ struct Param {
 }
 
 impl Param {
+    /// The values the calls from outside pass it (`calls`): those of its integer type, or of its
+    /// refinement when both bounds are literals; none for one of another type or refined by
+    /// another parameter, whose values the generator does not know. These are the values a
+    /// routed function's clauses see, since it writes no `requires` of the fragment before them
+    /// and no other function calls it (`Gen::function`).
+    fn domain(&self) -> Option<R> {
+        match (&self.ty, &self.refine) {
+            (Ty::Int(t), None) => Some(t.range()),
+            (Ty::Int(_), Some(_)) => self.literal_range(),
+            _ => None,
+        }
+    }
+
     /// The range its refinement gives it when both bounds are literals.
     fn literal_range(&self) -> Option<R> {
         let r = self.refine.as_ref()?;
@@ -1147,6 +1160,32 @@ impl Param {
                 },
             }),
             _ => None,
+        }
+    }
+}
+
+/// Where a routed clause over a name splits (`Gen::holding`): an `if` at `k`, the name above it one
+/// way and not above it the other; a `match`'s expression arm at `arm`, its block arm at every
+/// other value; and the value it fails on, if any, which that way then says only the name is not.
+#[derive(Clone, Copy, Debug)]
+struct Split {
+    k: Num,
+    arm: Num,
+    fails_on: Option<Num>,
+}
+
+impl Split {
+    /// Across the values `r` a parameter is passed, `r.lo < r.hi`: the `if` at their middle, so that
+    /// the call of every lowest value takes one way and the call of every highest the other, and
+    /// random ones either (`function_calls`); the `match`'s arm at the lowest, which the first call
+    /// passes; and with `fails`, failing on the lowest, the arm at the highest instead.
+    fn across(r: R, fails: bool) -> Split {
+        let half = r.hi.sub(r.lo).map_or(0, |s| s.mag / 2);
+        let k = r.lo.add(Num::new(false, half)).unwrap_or(r.lo);
+        Split {
+            k,
+            arm: if fails { r.hi } else { r.lo },
+            fails_on: fails.then_some(r.lo),
         }
     }
 }
@@ -1397,7 +1436,7 @@ impl Gen {
         for (k, public) in public.into_iter().enumerate() {
             // A function's text holds the marks of its bit operations of literals alone, which
             // give each one's span here, and nothing else does (`E::Bits`).
-            let (text, marked) = unmarked(&self.function(k, public));
+            let (text, marked) = unmarked(&self.function(k, public, false));
             out.push('\n');
             let start = out.len();
             out.push_str(&text);
@@ -1427,6 +1466,20 @@ impl Gen {
                 out.push_str(&text);
                 functions.push((name, start..out.len()));
             }
+        }
+        // A refined program ends with a routed function (`Gen::function`), public, written after
+        // every function the program calls and from random sources of its own, so that every
+        // function above stays as it is and none calls it.
+        if self.mode == Mode::Refined {
+            let k = functions.len();
+            let (text, marked) = unmarked(&self.function(k, true, true));
+            out.push('\n');
+            let start = out.len();
+            out.push_str(&text);
+            functions.push((format!("f{}", k), start..out.len()));
+            bits.extend(marked.into_iter().filter_map(|(at, name)| {
+                Some((start + at.start..start + at.end, IntT::named(&name)?))
+            }));
         }
         // The functions the loops' conjuncts call, which no other function is generated with.
         for (k, text) in std::mem::take(&mut self.helpers).into_iter().enumerate() {
@@ -5078,32 +5131,12 @@ impl Gen {
                     format!("invariant {} <= {}", c.marked(), bound)
                 });
             }
-            // In a routed function, now and then an invariant outside the fragment, which every
-            // round's head holds, and always a measure, most often one that holds an `if` or a
-            // `match` with a block arm. A run evaluates the invariant at every head, the last
-            // one, where the condition fails, included, so the counter takes there every value
-            // from 0 to `bound`.
-            if self.routed && self.rng.chance(85) {
-                let heads = R {
-                    lo: Num::ZERO,
-                    hi: Num::new(false, u128::from(bound)),
-                };
-                if let Some(holding) = self.holding(&c.marked(), heads, false, None) {
-                    clauses.push(format!("invariant {}", holding));
-                }
-            }
-            if self.rng.chance(60) || self.routed {
-                let split = match self.routed && self.rng.chance(90) {
-                    true => self.measure(&c.marked(), up, bound),
-                    false => None,
-                };
-                clauses.push(split.unwrap_or_else(|| {
-                    if up {
-                        format!("decreases {} - {}", bound, c.marked())
-                    } else {
-                        format!("decreases {}", c.marked())
-                    }
-                }));
+            if self.rng.chance(60) {
+                clauses.push(if up {
+                    format!("decreases {} - {}", bound, c.marked())
+                } else {
+                    format!("decreases {}", c.marked())
+                });
             }
         }
         let mut out = self.flush();
@@ -5417,7 +5450,7 @@ impl Gen {
 
     // ---------------------------------------------------------------- functions
 
-    fn function(&mut self, index: usize, public: bool) -> String {
+    fn function(&mut self, index: usize, public: bool, routed: bool) -> String {
         self.binds.clear();
         self.exclude.clear();
         self.pending.clear();
@@ -5428,14 +5461,20 @@ impl Gen {
         self.loops = 0;
         self.recursed = false;
         self.safe.clear();
-        self.rng = stream(self.seed, index, 0);
+        // The routed function a refined program ends with draws from sources of its own, apart
+        // from every other function's and from those of the functions written before it
+        // (`Gen::module`).
+        let lane = if routed { ROUTED_LANE } else { 0 };
+        self.rng = stream(self.seed, index, lane);
         let name = format!("f{}", index);
         let refined = self.mode == Mode::Refined;
         let mut params: Vec<Param> = Vec::new();
+        // A routed function does not recurse: no call but those from outside passes it values.
         self.recursion = self
             .rng
             .chance(if refined { 20 } else { 10 })
-            .then(|| 2 + self.rng.below(6));
+            .then(|| 2 + self.rng.below(6))
+            .filter(|_| !routed);
         // Now and then a refined function that does not recurse stays small too, so that its
         // calls may relate two names.
         self.small = refined && self.recursion.is_none() && self.rng.chance(50);
@@ -5500,6 +5539,35 @@ impl Gen {
                 refine: None,
             });
         }
+        // A routed function marks itself `@checked` or `@prove`, and holds a parameter of an
+        // integer type whose values the calls from outside pass (`Param::domain`), which its
+        // routed `requires` and `ensures` read: one is added where none is.
+        let route = routed.then(|| {
+            if self.rng.chance(50) {
+                "checked"
+            } else {
+                "prove"
+            }
+        });
+        let seen = |params: &[Param]| -> Vec<(usize, R)> {
+            params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !p.is_mut)
+                .filter_map(|(i, p)| Some((i, p.domain().filter(|r| r.lo < r.hi)?)))
+                .collect()
+        };
+        if routed && seen(&params).is_empty() {
+            let t = *self
+                .rng
+                .pick(&[INTS[0], INTS[1], INTS[2], INTS[3], INTS[5], INTS[6]]);
+            params.push(Param {
+                name: format!("p{}", params.len()),
+                is_mut: false,
+                ty: Ty::Int(t),
+                refine: None,
+            });
+        }
         let ret = if changer {
             Some(Ty::Int(USIZE))
         } else {
@@ -5525,7 +5593,9 @@ impl Gen {
                 }
             }
         }
-        let requires = if refined && self.rng.chance(45) {
+        // A routed function writes no `requires` of the fragment, so that every call from outside
+        // reaches its routed one with the values it passes.
+        let requires = if refined && !routed && self.rng.chance(45) {
             self.requires(&params)
         } else {
             Vec::new()
@@ -5563,88 +5633,41 @@ impl Gen {
                 self.learn(&E::bin(op, E::name(&params[a].name), E::num(c)));
             }
         }
-        // Now and then a refined function that routes its clauses outside the Tier-1 fragment,
-        // by `@checked` or `@prove`, with a `requires` and an `ensures` that hold an `if` or a
-        // `match` with a block arm ([`Gen::holding`]), and in its loops an invariant and a
-        // measure that do. Tier 1 walks the `requires`, the invariant and the measure where it
-        // decides them, and a routed `ensures` nowhere, which a run evaluates all the same, so the
-        // containment oracle claims nothing inside it (`ghost-contracts-and-totality.md`, item 2;
-        // `tier1-containment`). A stream of its own decides, so that every other function is
-        // written as before.
-        let signature = std::mem::replace(&mut self.rng, stream(self.seed, index, 3 << 32));
-        let route = (refined && self.rng.chance(50)).then(|| {
-            if self.rng.chance(50) {
-                "checked"
-            } else {
-                "prove"
-            }
-        });
+        // A routed function's `requires` and `ensures` hold an `if` or a `match` with a block arm over a
+        // parameter, split where the values the calls from outside pass fall on both sides
+        // (`Gen::holding`, `Split::across`), and its first loop an invariant and a measure that do
+        // (`Gen::leading_loop`). Tier 1 walks the `requires`, the invariant and the measure where
+        // it decides them, and a routed `ensures` nowhere, which a run evaluates all the same, so
+        // the containment oracle claims nothing inside it (`ghost-contracts-and-totality.md`,
+        // item 2; `tier1-containment`).
         let mut routed_requires = Vec::new();
         let mut routed_ensures = Vec::new();
-        if route.is_some() {
-            // A parameter whose range the generator knows: its type's, or a refinement's of
-            // literals, which the calls from outside pass values across, its extremes first.
-            let ints: Vec<usize> = (0..params.len())
-                .filter(|&i| {
-                    let p = &params[i];
-                    matches!(p.ty, Ty::Int(_))
-                        && !p.is_mut
-                        && (p.refine.is_none() || p.literal_range().is_some())
-                })
-                .collect();
-            if !ints.is_empty() && self.rng.chance(70) {
-                let p = &params[*self.rng.pick(&ints)];
-                // Under `@checked` alone, now and then a `requires` that fails on the lowest value,
-                // so that the run-time check of a clause that holds a block traps a call or two
-                // and leaves the others: `@prove` trusts its clauses, and MIR drops a check it
-                // trusts.
-                let fails = route == Some("checked") && self.rng.chance(50);
-                if let Ty::Int(t) = p.ty {
-                    let range = p.literal_range().unwrap_or(t.range());
-                    if let Some(c) = self.holding(&p.name, range, fails, None) {
-                        routed_requires.push(format!("requires {}", c));
-                    }
-                }
+        if let Some(attr) = route {
+            let seen = seen(&params);
+            if !seen.is_empty() && self.rng.chance(70) {
+                let (i, r) = *self.rng.pick(&seen);
+                // Under `@checked`, now and then a `requires` that fails on the parameter's lowest
+                // value and holds on the others, so that the run-time check `@checked` asks for traps
+                // the calls that pass it and lets the rest through. An `@prove` clause holds on every
+                // value: `@prove` states that `mn prove` will prove it, which a clause that fails
+                // on a call refutes.
+                let fails = attr == "checked" && self.rng.chance(50);
+                let c = self.holding(&params[i].name, Split::across(r, fails));
+                routed_requires.push(format!("requires {}", c));
             }
-            // An `ensures` over the result, split at the value the function gives where it leaves
-            // early, its range's lowest or 0 (`Gen::default_of`), or over a parameter, which
-            // holds at every return the value the call passed: a function that leaves early gives
-            // one result whatever it is passed, while the calls pass a parameter values across
-            // its range.
-            let over_result = match &ret {
-                Some(Ty::Int(t)) if ints.is_empty() || self.rng.chance(50) => Some(*t),
-                _ => None,
-            };
-            if self.rng.chance(70) {
-                let ensures = match over_result {
-                    Some(t) => {
-                        let range = ret_range.unwrap_or(t.range());
-                        let early = ret_range.map_or(Num::ZERO, |r| r.lo);
-                        self.holding("result", range, false, Some(early))
-                    }
-                    None if !ints.is_empty() => {
-                        let p = &params[*self.rng.pick(&ints)];
-                        match p.ty {
-                            Ty::Int(t) => {
-                                let range = p.literal_range().unwrap_or(t.range());
-                                self.holding(&p.name, range, false, None)
-                            }
-                            _ => None,
-                        }
-                    }
-                    None => None,
-                };
-                routed_ensures.extend(ensures.map(|c| format!("ensures {}", c)));
+            if !seen.is_empty() && self.rng.chance(70) {
+                let (i, r) = *self.rng.pick(&seen);
+                let c = self.holding(&params[i].name, Split::across(r, false));
+                routed_ensures.push(format!("ensures {}", c));
             }
         }
-        self.rng = signature;
         self.routed = route.is_some();
         self.current = Some(sig.clone());
         // The body, of this attempt: another attempt has another body under the same signature.
         let attempt = self.attempts.get(index).copied().unwrap_or(0);
-        self.rng = stream(self.seed, index, 1 + u64::from(attempt));
-        self.rules = stream(self.seed, index, (1 << 32) + u64::from(attempt));
-        self.no_candidates = stream(self.seed, index, (2 << 32) + u64::from(attempt));
+        self.rng = stream(self.seed, index, lane + 1 + u64::from(attempt));
+        self.rules = stream(self.seed, index, lane + (1 << 32) + u64::from(attempt));
+        self.no_candidates = stream(self.seed, index, lane + (2 << 32) + u64::from(attempt));
         let mut first = Vec::new();
         if self.recursion.is_some() {
             let leave = S::Return(ret.as_ref().map(|t| self.default_of(t, ret_range)));
@@ -5674,11 +5697,8 @@ impl Gen {
                 }
             }
         }
-        // A routed function begins with a loop, so that every call that enters it evaluates
-        // the invariant and the measure such a function's loops write, which a loop further
-        // down, past the guards that leave early, seldom reaches.
         if self.routed {
-            let lead = self.loop_statement(0);
+            let lead = self.leading_loop();
             first.extend(lead);
         }
         // An expression body for a small function without contracts on its result.
@@ -5711,7 +5731,12 @@ impl Gen {
         if let Some(depth) = self.recursion {
             cost *= depth + 1;
         }
-        self.sigs.push(Sig { cost, ..sig });
+        // No other function calls a routed one, so that the values its clauses see are those the
+        // calls from outside pass, and no internal call passes the value its failing `requires`
+        // fails on, as a recursion would on its way down.
+        if !routed {
+            self.sigs.push(Sig { cost, ..sig });
+        }
         self.current = None;
         self.routed = false;
 
@@ -5782,84 +5807,107 @@ impl Gen {
         out
     }
 
-    /// A clause outside the Tier-1 fragment over `x`, whose values lie in `r`, for a routed
-    /// function to write ([`Gen::function`], [`Gen::loop_statement`]): an `if`, or a `match` with
-    /// an expression arm and a block arm, split at a value `k` such that values of `r` lie on
-    /// both sides, so that runs may take both ways; none when `r` holds one value. `at` is a
-    /// value runs often give `x`, where it splits when it can; a `match` splits elsewhere at
-    /// `r.lo`, which the calls from outside pass among the extremes ([`calls`]), since its arm
-    /// is taken at that one value alone. Each branch holds where it is taken, so that the clause
-    /// never fails. With `fails`, the branch of the values on `r.lo`'s side says only that `x`
-    /// is not `r.lo`, so that the clause fails on `r.lo`, a function's lowest argument, which
-    /// those calls pass first, and holds elsewhere; such a `match` splits at `r.hi`, another.
-    fn holding(&mut self, x: &str, r: R, fails: bool, at: Option<Num>) -> Option<String> {
-        let below = r.hi.sub(Num::small(1)).filter(|b| r.lo <= *b)?;
-        let at = at.filter(|v| r.lo <= *v && *v <= below);
-        let not_lowest = format!("{} != {}", x, r.lo);
+    /// A clause outside the Tier-1 fragment over `x`, for a routed function to write
+    /// ([`Gen::function`], [`Gen::leading_loop`]), split as `s` says: an `if` at `s.k`, or a `match`
+    /// whose expression arm takes `s.arm` and whose block arm takes every other value. Each way
+    /// holds where it is taken, but where the clause fails on `s.fails_on`, whose way says only
+    /// that `x` is not it.
+    fn holding(&mut self, x: &str, s: Split) -> String {
         if self.rng.chance(50) {
-            // `x > k` holds above `k`, which `r.hi` is.
-            let k = match at {
-                Some(v) => v,
-                None => self.value_in(R {
-                    lo: r.lo,
-                    hi: below,
-                }),
+            let other = match s.fails_on {
+                Some(v) => format!("{} != {}", x, v),
+                None => format!("{} <= {}", x, s.k),
             };
-            let other = if fails {
-                not_lowest
-            } else {
-                format!("{} <= {}", x, k)
-            };
-            Some(format!(
+            format!(
                 "(if {0} > {1} {{ {0} > {1} }} else {{ {2} }})",
-                x, k, other
-            ))
+                x, s.k, other
+            )
         } else {
-            // The arm of `k` is taken at `k`, the block arm at the other values of `r`.
-            let (k, other) = if fails {
-                (r.hi, not_lowest)
-            } else {
-                let k = at.unwrap_or(r.lo);
-                (k, format!("{} != {}", x, k))
+            let other = match s.fails_on {
+                Some(v) => format!("{} != {}", x, v),
+                None => format!("{} != {}", x, s.arm),
             };
-            Some(format!(
+            format!(
                 "(match {0} {{\n  {1} => true\n  _ => {{ {2} }}\n}})",
-                x, k, other
-            ))
+                x, s.arm, other
+            )
         }
     }
 
-    /// A loop's measure in a routed function that holds an `if` or a `match` with a block arm:
-    /// what its counter `c` has left to go, `bound - c` going up and `c` going down, the same
-    /// expression in both ways, so that Tier 1 proves it decreases without a fact from a branch's
-    /// condition or an arm's pattern, which it does not keep for every one. A run evaluates the
-    /// measure only once the loop's condition holds, so `c` lies in `0 ..= bound - 1` going up
-    /// and in `1 ..= bound` going down: the `if` splits below the highest of those values, and
-    /// the `match` at one of them, so that runs may take both ways; none for a loop of fewer than
-    /// two rounds, where one value is all there is.
-    fn measure(&mut self, c: &str, up: bool, bound: u64) -> Option<String> {
-        if bound < 2 {
-            return None;
-        }
-        let (lo, left) = if up {
-            (0, format!("{} - {}", bound, c))
+    /// The loop a routed function begins with, before any statement that may leave, whose body
+    /// only steps its counter, from 0 up to `bound` or down from it, 2 to 5 rounds: every call
+    /// that enters the function runs each round, so that its invariant and its measure, which hold
+    /// an `if` or a `match` with a block arm, see the counter's first value and the others, on
+    /// either side of their split ([`Gen::holding`], [`Gen::measure`]).
+    fn leading_loop(&mut self) -> Vec<S> {
+        let up = self.rng.chance(70);
+        let t = *self.rng.pick(&[
+            INTS[0], INTS[1], INTS[2], INTS[3], INTS[5], INTS[6], INTS[7], INTS[8], INTS[9],
+        ]);
+        let bound = 2 + self.rng.below(4);
+        let name = self.fresh("c");
+        let c = E::name(&name);
+        let id = self.declare(name, Ty::Int(t), Kind::Counter, None);
+        self.binds[id].read = true;
+        self.binds[id].assigned = true;
+        let cond = if up {
+            E::bin(Op::Lt, c.clone(), E::Lit(bound.to_string()))
         } else {
-            (1, c.to_string())
+            E::bin(Op::Gt, c.clone(), E::Lit("0".into()))
         };
-        // The values `c` takes there: `lo ..= lo + bound - 1`.
-        Some(if self.rng.chance(50) {
-            let k = lo + self.rng.below(bound - 1);
+        // The heads see 0 to `bound` going up and `bound` down to 0 going down, the first of them
+        // first: the invariant splits between the first value and the second.
+        let (first, k) = if up { (0, 0) } else { (bound, bound - 1) };
+        let split = Split {
+            k: Num::new(false, u128::from(k)),
+            arm: Num::new(false, u128::from(first)),
+            fails_on: None,
+        };
+        let invariant = format!("invariant {}", self.holding(&c.marked(), split));
+        let measure = self.measure(&c.marked(), up, bound);
+        let step = S::Assign(c.clone(), if up { "+=" } else { "-=" }, E::Lit("1".into()));
+        self.binds[id].known = Some(R {
+            lo: Num::ZERO,
+            hi: Num::new(false, u128::from(bound)),
+        });
+        let init = if up { 0 } else { bound };
+        vec![
+            S::Bind(id, Some(t.name.to_string()), E::Lit(init.to_string())),
+            S::While(
+                cond,
+                vec![invariant, measure],
+                Block {
+                    stmts: vec![step],
+                    tail: None,
+                },
+            ),
+        ]
+    }
+
+    /// A loop's measure that holds an `if` or a `match` with a block arm: what its counter `c` has
+    /// left to go, `bound - c` going up and `c` going down, the same expression both ways, so that
+    /// Tier 1 proves it decreases without a fact from a branch's condition or an arm's pattern,
+    /// which it does not keep in every function. A run evaluates the measure only once the loop's
+    /// condition holds, so `c` takes `0` to `bound - 1` going up and `bound` down to 1 going down,
+    /// the first of them first: the `if` splits between the first value and the second, and the
+    /// `match`'s expression arm takes the first. A loop of two rounds or more takes both ways.
+    fn measure(&mut self, c: &str, up: bool, bound: u64) -> String {
+        let (first, k, left) = if up {
+            (0, 0, format!("{} - {}", bound, c))
+        } else {
+            (bound, bound - 1, c.to_string())
+        };
+        if self.rng.chance(50) {
             format!(
                 "decreases (if {0} > {1} {{ {2} }} else {{ {2} }})",
                 c, k, left
             )
         } else {
-            let k = lo + self.rng.below(bound);
             format!(
                 "decreases (match {0} {{\n  {1} => {2}\n  _ => {{ {2} }}\n}})",
-                c, k, left
+                c, first, left
             )
-        })
+        }
     }
 
     fn param_refinement(&mut self, t: IntT, before: &[Param]) -> Option<Refine> {
@@ -6452,6 +6500,11 @@ pub struct AlwaysTraps {
     /// that came furthest toward it.
     pub furthest: String,
 }
+
+/// The part every random source of a routed function adds to its own (`stream`), past those of
+/// every other function's sources, so that the routed function a refined program ends with draws
+/// apart from the functions written before it at its index (`meeting_arrays`, `deep_recursion`).
+const ROUTED_LANE: u64 = 4 << 32;
 
 /// The least magnitude of an operand [`Gen::near_edge`] reads as lying near 2^62 or beyond.
 const EDGE_OPERAND: u128 = 1 << 61;
@@ -8282,8 +8335,9 @@ mod tests {
             "{:#?}",
             &texts[..PINNED.len()]
         );
-        // In a program, before the recursion, named past it, and followed only by the recursion and
-        // the functions the loops' conjuncts call, which end a program.
+        // In a program, before the recursion, named past it, and followed only by the recursion, the
+        // routed function a refined program ends with, and the functions the loops' conjuncts call,
+        // which end a program.
         let mut seen = 0;
         for seed in 0..300 {
             let p = program(seed);
@@ -8303,8 +8357,10 @@ mod tests {
                         .iter()
                         .all(|(name, at)| name.starts_with("pin")
                             || p.text[at.clone()].contains("4294967295")
-                            || p.text[at.clone()].contains("(n: u32")),
-                    "seed {}: only the recursion and the loops' functions follow",
+                            || p.text[at.clone()].contains("(n: u32")
+                            || p.text[at.clone()].starts_with("@checked")
+                            || p.text[at.clone()].starts_with("@prove")),
+                    "seed {}: only the recursion, the routed function and the loops' functions follow",
                     seed
                 );
             }
