@@ -138,6 +138,8 @@ export const GATE_FILES = [
   "/rust-toolchain",
   "/.config/",
   "/clippy.toml",
+  "/CLAUDE.md",
+  "/spec/philosophy.md",
   "/package.json",
   "/package-lock.json",
   "/.spec-guard.json",
