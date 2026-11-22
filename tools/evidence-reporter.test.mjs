@@ -11,8 +11,8 @@ import { fileURLToPath } from "node:url";
 import reporter from "./evidence-reporter.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const POLICY = "/w/.github/scripts/policy.test.mjs";
-const HELPER = "/w/.github/scripts/policy-helpers.mjs";
+const POLICY = "/w/.github/scripts/policy/commits.test.mjs";
+const HELPER = "/w/.github/scripts/policy/repo.mjs";
 const SITE = "/w/site/site.test.mjs";
 
 /// The events of the tests of one entry file: each with its id and its parent's within that file,

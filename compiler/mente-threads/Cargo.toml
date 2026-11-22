@@ -10,7 +10,7 @@ description = "The one place the workspace starts threads: work spread over ever
 # The workspace's lints, with one difference: the workspace forbids clippy's disallowed_methods,
 # so that no `allow` anywhere else can start a thread or read the core count, and this crate,
 # whose functions are the only ones that may, denies it and names each use with `#[expect]`.
-# .github/scripts/policy.test.mjs holds this table equal to the workspace's but for that line.
+# .github/scripts/policy/mutation.test.mjs holds this table equal to the workspace's but for that line.
 [lints.rust]
 unsafe_code = "forbid"
 
