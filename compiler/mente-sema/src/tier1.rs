@@ -18,6 +18,7 @@
 //! [`tier1-counterexample`]: ../../docs/design-review.md#tier1-counterexample
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use mente_syntax::diagnostics::{line_col, Applicability, Diagnostic, Edit, Fix};
 use mente_syntax::tree::{
@@ -498,6 +499,54 @@ fn var_val(v: usize) -> Val {
     Val::Lin(vec![Term::pos(v)], 0)
 }
 
+/// The value of site variable `v` as evaluation `at` gave it: every read of it names that
+/// evaluation, and the octagon refuses it where the state holds another ([`Octagon::stamp`];
+/// `ghost-contracts-and-totality.md`, item 2, `no-site-value-from-another-evaluation`).
+fn site_val(v: usize, at: u32) -> Val {
+    Val::Lin(vec![Term::of(v, at)], 0)
+}
+
+/// The variables a site writes: a value's, or a call's arguments, results and field paths.
+fn site_vars(site: &Site, out: &mut Vec<usize>) {
+    match site {
+        Site::Value(v) => out.push(*v),
+        Site::Call(cs) => {
+            out.extend(cs.ins.iter().chain(&cs.outs).flatten());
+            out.extend(cs.result);
+            out.extend(cs.paths.iter().flatten().map(|p| p.var));
+        }
+        Site::None => {}
+    }
+}
+
+/// The right operand of an `and` or an `or`.
+fn right_operand(kind: &ExprKind) -> Option<ExprId> {
+    match kind {
+        ExprKind::Binary {
+            op: BinaryOp::And | BinaryOp::Or,
+            rhs,
+            ..
+        } => Some(*rhs),
+        ExprKind::Int { .. }
+        | ExprKind::Bool(_)
+        | ExprKind::Name(_)
+        | ExprKind::Todo(_)
+        | ExprKind::Unreachable(_)
+        | ExprKind::Unary { .. }
+        | ExprKind::Binary { .. }
+        | ExprKind::Index { .. }
+        | ExprKind::Field { .. }
+        | ExprKind::Call { .. }
+        | ExprKind::Construct { .. }
+        | ExprKind::Variant { .. }
+        | ExprKind::Match { .. }
+        | ExprKind::Array(_)
+        | ExprKind::Repeat { .. }
+        | ExprKind::If { .. }
+        | ExprKind::Error => None,
+    }
+}
+
 fn lin(terms: Vec<Term>, c: i128) -> Val {
     if c.abs() >= BIG {
         TOP
@@ -515,15 +564,19 @@ fn neg_terms(terms: &[Term]) -> Vec<Term> {
 }
 
 /// The sum of two linear forms' terms; `None` when it has more than two terms or a coefficient
-/// other than 1 or -1, which octagons cannot hold.
-fn lin_add(a: &[Term], b: &[Term]) -> Option<Vec<Term>> {
+/// other than 1 or -1, which octagons cannot hold. Two terms of one variable are of one
+/// evaluation of it, or the state `st` stops the compile ([`Octagon::one_evaluation`]).
+fn lin_add(st: &Octagon, a: &[Term], b: &[Term]) -> Option<Vec<Term>> {
     let mut out: Vec<Term> = Vec::new();
     for t in a.iter().chain(b) {
         match out.iter().position(|u| u.var == t.var) {
-            Some(k) if out[k].neg != t.neg => {
+            Some(k) => {
+                st.one_evaluation(out[k], *t);
+                if out[k].neg == t.neg {
+                    return None;
+                }
                 out.remove(k);
             }
-            Some(_) => return None,
             None => out.push(*t),
         }
     }
@@ -570,7 +623,7 @@ fn interval(st: &Octagon, v: &Val) -> (i128, i128) {
             let num_itv = lin_interval(st, &num.0, num.1);
             let quotient = bounds::div(INF, num_itv, (*div, *div));
             let mut both = bounds::add(INF, base_itv, quotient);
-            if let Some(sum) = lin_add(&base.0, &num.0) {
+            if let Some(sum) = lin_add(st, &base.0, &num.0) {
                 // `base + num / div` is `base + num` less what the division leaves of `num`.
                 let sum_itv = lin_interval(st, &sum, base.1 + num.1);
                 let left = bounds::neg(INF, bounds::rest(INF, num_itv, *div));
@@ -605,13 +658,13 @@ fn join_summary(a: &Val, b: &Val) -> Val {
 fn add_vals(st: &Octagon, l: &Val, r: &Val) -> Val {
     match (l, r) {
         (Val::Lin(a, c), Val::Lin(b, d)) => {
-            if let Some(t) = lin_add(a, b) {
+            if let Some(t) = lin_add(st, a, b) {
                 return lin(t, c + d);
             }
         }
         (Val::Quot { base, num, div }, Val::Lin(b, d))
         | (Val::Lin(b, d), Val::Quot { base, num, div }) => {
-            if let (Some(t), true) = (lin_add(&base.0, b), (base.1 + d).abs() < BIG) {
+            if let (Some(t), true) = (lin_add(st, &base.0, b), (base.1 + d).abs() < BIG) {
                 return Val::Quot {
                     base: (t, base.1 + d),
                     num: num.clone(),
@@ -1211,7 +1264,7 @@ fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
     let [t] = terms else {
         return;
     };
-    let (lo, hi) = st.far_bounds(t.var);
+    let (lo, hi) = st.far_bounds_of(*t);
     if lo.is_none() && hi.is_none() {
         return;
     }
@@ -1253,7 +1306,7 @@ fn constrain_far(st: &mut Octagon, op: Rel, t: Term, k: i128, c: Exact) {
         // A value other than one beyond the octagon's reach: no bound narrows to it.
         Rel::Ne => (None, None),
     };
-    st.add_exact(t.var, lower, upper);
+    st.add_exact_of(t, lower, upper);
 }
 
 /// `x - (terms + c)` lies in `[lo, hi]`: exactly when `terms` has at most one term, else as the
@@ -1508,6 +1561,7 @@ struct Rest {
     probe: usize,
     measures: Vec<Vec<(usize, usize)>>,
     entry_measures: Vec<(usize, usize)>,
+    compounds: Vec<Option<usize>>,
 }
 
 /// A scalar field path, as its field names, and a value of it.
@@ -2006,7 +2060,11 @@ struct Frame {
 /// The rest of `Fx`, field by field, is none of it:
 /// - fixed for the whole function, read only: `syntax`, `tree`, `resolution`, `typing`,
 ///   `routing`, `structs`, `callees`, `src`, `vars`, `paths`, `sites`, `result`, `result_shape`,
-///   `temps`, `scratch`, `probe`, `count`, `measures`, `entry_measures`, `pattern_shapes`;
+///   `temps`, `scratch`, `probe`, `count`, `measures`, `entry_measures`, `pattern_shapes`,
+///   `names`, `operand_sites`, `compounds`;
+/// - a count whose values need only differ, which no outcome reads: `evals`, the stamps of
+///   site values ([`Fx::evaluation`]); a replay rebases the stamps it restores
+///   ([`LoopOutcome::restamped`]);
 /// - written only while recording, which never replays from the memo: `report`, `retries`,
 ///   `queries`;
 /// - restored by the statement or expression that changes it before it ends: `recording`,
@@ -2027,6 +2085,22 @@ struct LoopOutcome {
     exit: Octagon,
     unproven: usize,
     escapes: Vec<Frame>,
+}
+
+impl LoopOutcome {
+    /// The outcome computed from entry `from`, replayed at entry `to`, equal to it but in its
+    /// stamps: a variable the loop left as it was entered holds `to`'s evaluation, not
+    /// `from`'s, so that a value read before the loop reads the same evaluation after it.
+    fn restamped(&self, from: &Octagon, to: &Octagon) -> LoopOutcome {
+        let mut out = self.clone();
+        out.exit.restamp(from, to);
+        for frame in &mut out.escapes {
+            for st in frame.breaks.iter_mut().chain(frame.continues.iter_mut()) {
+                st.restamp(from, to);
+            }
+        }
+        out
+    }
 }
 
 /// A loop analysed outside the recording pass, from an entry state, and its outcome.
@@ -2122,6 +2196,9 @@ struct Fx<'a> {
     /// variable for its value on entry, against which a recursive call's is compared, and one
     /// for its value at the call, for a diagnostic.
     entry_measures: Vec<(usize, usize)>,
+    /// For each statement that is a compound remainder `p %= e`, the variable of its value
+    /// ([`Fx::binary`]).
+    compounds: Vec<Option<usize>>,
     /// The measures of the enclosing loops' rounds, each followed by how much it has changed.
     tracks: Vec<Track>,
     /// The `E0502`s a refined `var` might fix.
@@ -2131,6 +2208,13 @@ struct Fx<'a> {
     /// The loop whose header, its condition and measures at the head of a round, is being
     /// read.
     head_of: Option<StmtId>,
+    /// The evaluations of site variables given out so far ([`Fx::evaluation`]).
+    evals: u32,
+    /// What each variable is, for the internal error a stale read stops the compile with.
+    names: Arc<[String]>,
+    /// For the right operand of each `and` and `or`, the site variables its evaluation writes
+    /// ([`Fx::sites_of_operands`]).
+    operand_sites: Vec<Vec<usize>>,
     /// Each loop analysed outside the recording pass, with what its outcome depends on and the
     /// outcome ([`LoopOutcome`]): without it a loop would be analysed again for every round of
     /// every loop around it, in time exponential in their nesting.
@@ -2232,7 +2316,7 @@ fn run(
         fx.replays = Some(Replays::default());
     }
     fx.route();
-    let mut st = Octagon::new(fx.count);
+    let mut st = fx.start();
     fx.entry(&mut st);
     fx.body(&mut st);
     fx.report.variables = fx.count;
@@ -2450,6 +2534,7 @@ impl<'a> Fx<'a> {
             probe,
             measures,
             entry_measures,
+            compounds,
         } = Fx::rest(f, callees, &mut n);
         let mut room = RELATIONAL_LIMIT.saturating_sub(n.0);
         let paths: Vec<Vec<FieldPath>> = f
@@ -2503,10 +2588,14 @@ impl<'a> Fx<'a> {
             heads: Vec::new(),
             measures,
             entry_measures,
+            compounds,
             tracks: Vec::new(),
             retries: Vec::new(),
             queries: None,
             head_of: None,
+            evals: 0,
+            names: Arc::from(Vec::new()),
+            operand_sites: Vec::new(),
             loop_memo: Vec::new(),
             replays: None,
             passes: 0,
@@ -2516,12 +2605,90 @@ impl<'a> Fx<'a> {
         };
         let shape = f.syntax.result.map(|t| fx.own_shape(t));
         fx.result_shape = shape;
+        fx.names = fx.site_names();
+        fx.operand_sites = fx.sites_of_operands();
         fx
+    }
+
+    /// What each variable is: a site variable by its expression and its place.
+    fn site_names(&self) -> Arc<[String]> {
+        let name = &self.syntax.name;
+        let mut names: Vec<String> = (0..self.count)
+            .map(|v| format!("in `{}`, variable {}", name, v))
+            .collect();
+        for (i, site) in self.sites.iter().enumerate() {
+            let e = ExprId(i as u32);
+            let at = self.span(e);
+            let what = format!("`{}` at {}:{}", self.own_text(e).0, at.line, at.col);
+            let (var, of) = match site {
+                Site::Value(v) => (Some(*v), "the value"),
+                Site::Call(cs) => (cs.result, "the result"),
+                Site::None => (None, ""),
+            };
+            if let Some(slot) = var.and_then(|v| names.get_mut(v)) {
+                *slot = format!("in `{}`, {} of {}", name, of, what);
+            }
+        }
+        for (i, var) in self.compounds.iter().enumerate() {
+            let at = self.tree.stmts[i].span;
+            let text = self.src.get(at.start..at.end).unwrap_or("");
+            if let Some(slot) = var.and_then(|v| names.get_mut(v)) {
+                *slot = format!(
+                    "in `{}`, the value of `{}` at {}:{}",
+                    name, text, at.line, at.col
+                );
+            }
+        }
+        names.into()
+    }
+
+    /// For the right operand of each `and` and `or`, the site variables its evaluation writes:
+    /// those of every expression inside it.
+    fn sites_of_operands(&self) -> Vec<Vec<usize>> {
+        let tree = self.tree;
+        let mut out = vec![Vec::new(); tree.exprs.len()];
+        for x in &tree.exprs {
+            let Some(rhs) = right_operand(&x.kind) else {
+                continue;
+            };
+            let at = tree.expr(rhs).span;
+            let mut vars = Vec::new();
+            for (i, y) in tree.exprs.iter().enumerate() {
+                if at.start <= y.span.start && y.span.end <= at.end {
+                    site_vars(&self.sites[i], &mut vars);
+                }
+            }
+            out[rhs.0 as usize] = vars;
+        }
+        out
+    }
+
+    /// The variable of `e`'s own value, where it has one: the site variable of a remainder, an
+    /// `if`, a `match`, an index or a field.
+    fn site_var(&self, e: ExprId) -> Option<usize> {
+        match self.sites[e.0 as usize] {
+            Site::Value(var) => Some(var),
+            Site::None | Site::Call(_) => None,
+        }
+    }
+
+    /// A new evaluation of a site variable: the stamp of the value it gives, which no other
+    /// evaluation in the function has ([`Octagon::stamp`]).
+    fn evaluation(&mut self) -> u32 {
+        self.evals += 1;
+        self.evals
+    }
+
+    /// The state a function's analysis starts from: every variable unconstrained, and named.
+    fn start(&self) -> Octagon {
+        let mut st = Octagon::new(self.count);
+        st.name(self.names.clone());
+        st
     }
 
     /// The variables of a function besides its bindings' and their paths': each call site's,
     /// each value site's, a field read's included, which a path it follows leaves unused,
-    /// the temporaries, the scratch and the probe, and each measure's.
+    /// the temporaries, the scratch and the probe, each measure's, and each compound remainder's.
     fn rest(f: &Function<'a>, callees: &'a [Option<Callee<'a>>], n: &mut Counter) -> Rest {
         let tree = &f.syntax.tree;
         let sites = tree
@@ -2636,6 +2803,29 @@ impl<'a> Fx<'a> {
             .filter(|c| c.kind == ContractKind::Decreases)
             .map(|_| (n.alloc(true).unwrap_or(0), n.alloc(true).unwrap_or(0)))
             .collect();
+        // A compound remainder `p %= e` is no expression's, so its value has a variable of its
+        // own, which no expression's value is held in (`Fx::binary`). Tier 1 reads only a
+        // program the checker accepted, where its place is an integer, or the `Any` of `todo` or
+        // `unreachable`, which Tier 1 meets only in an empty state, since evaluating either
+        // empties it first.
+        let compounds = tree
+            .stmts
+            .iter()
+            .map(|s| match &s.kind {
+                StmtKind::Assign { op, .. } => match op {
+                    AssignOp::Compound(BinaryOp::Rem) => n.alloc(true),
+                    AssignOp::Set | AssignOp::Compound(_) => None,
+                },
+                StmtKind::Binding { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Guard { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Discard(_)
+                | StmtKind::Expr(_) => None,
+            })
+            .collect();
         Rest {
             sites,
             temps,
@@ -2643,6 +2833,7 @@ impl<'a> Fx<'a> {
             probe,
             measures,
             entry_measures,
+            compounds,
         }
     }
 
@@ -3592,7 +3783,7 @@ impl<'a> Fx<'a> {
                 let num_itv = lin_interval(st, &num.0, num.1);
                 let (qlo, qhi) = bounds::div(INF, num_itv, (*div, *div));
                 constrain_offset(st, var, &base.0, base.1, qlo, qhi);
-                if let Some(sum) = lin_add(&base.0, &num.0) {
+                if let Some(sum) = lin_add(st, &base.0, &num.0) {
                     let (llo, lhi) = bounds::neg(INF, bounds::rest(INF, num_itv, *div));
                     constrain_offset(st, var, &sum, base.1 + num.1, llo, lhi);
                 }
@@ -3618,7 +3809,7 @@ impl<'a> Fx<'a> {
     fn le(&self, st: &mut Octagon, a: &Val, b: &Val, k: i128) {
         let [t0, t1] = self.temps;
         if let (Some(x), Some(y)) = (self.linear(st, a, t0), self.linear(st, b, t1)) {
-            let (terms, c) = match lin_add(&x.0, &neg_terms(&y.0)) {
+            let (terms, c) = match lin_add(st, &x.0, &neg_terms(&y.0)) {
                 Some(t) => (t, x.1 - y.1),
                 None => {
                     self.assign(st, t0, &Val::Lin(x.0, x.1));
@@ -4391,7 +4582,7 @@ impl<'a> Fx<'a> {
                     self.scope.push(b);
                 }
             }
-            StmtKind::Assign { place, op, value } => self.assign_stmt(st, *place, *op, *value),
+            StmtKind::Assign { place, op, value } => self.assign_stmt(st, s, (*place, *op, *value)),
             StmtKind::While {
                 cond,
                 invariants,
@@ -4470,7 +4661,12 @@ impl<'a> Fx<'a> {
         }
     }
 
-    fn assign_stmt(&mut self, st: &mut Octagon, place: ExprId, op: AssignOp, value: ExprId) {
+    fn assign_stmt(
+        &mut self,
+        st: &mut Octagon,
+        s: StmtId,
+        (place, op, value): (ExprId, AssignOp, ExprId),
+    ) {
         let mut steps = Vec::new();
         let root = self.place_parts(place, &mut steps);
         for (k, step) in steps.iter().enumerate() {
@@ -4495,7 +4691,9 @@ impl<'a> Fx<'a> {
                 let mut current = scalar.map_or_else(|| self.summary(st, &shape), var_val);
                 self.read_before(st, value, [&mut current]);
                 let r = self.eval(st, value);
-                let v = self.binary(st, value, bop, (place, &current), (value, &r));
+                // The operation is the statement's, not `value`'s own (`Fx::binary`).
+                let at = (self.span(value), self.compounds[s.0 as usize]);
+                let v = self.binary(st, at, bop, (place, &current), (value, &r));
                 let p = prec(&ExprKind::Binary {
                     op: bop,
                     lhs: place,
@@ -4594,13 +4792,15 @@ impl<'a> Fx<'a> {
     /// An integer literal: a constant, or, beyond the octagon's reach, its variable, held at
     /// the value exactly. Apart from [`Self::eval`], whose frame every nested expression
     /// stacks up.
-    fn int_val(&self, st: &mut Octagon, e: ExprId, value: u128) -> Val {
+    fn int_val(&mut self, st: &mut Octagon, e: ExprId, value: u128) -> Val {
         match self.sites[e.0 as usize] {
             Site::Value(var) => {
                 let exact = Exact::new(false, value);
                 st.forget(var);
                 st.add_exact(var, Some(exact), Some(exact));
-                var_val(var)
+                let at = self.evaluation();
+                st.stamp(var, at);
+                site_val(var, at)
             }
             Site::None | Site::Call(_) => int_literal(value),
         }
@@ -4711,7 +4911,8 @@ impl<'a> Fx<'a> {
                     let mut l = self.eval(st, *lhs);
                     self.read_before(st, *rhs, [&mut l]);
                     let r = self.eval(st, *rhs);
-                    self.binary(st, e, *op, (*lhs, &l), (*rhs, &r))
+                    let at = (self.span(e), self.site_var(e));
+                    self.binary(st, at, *op, (*lhs, &l), (*rhs, &r))
                 }
             },
             ExprKind::Index { base, index } => {
@@ -4737,7 +4938,9 @@ impl<'a> Fx<'a> {
                     let shape = self.place_shape(Some(root), &steps);
                     self.facts(st, var, &shape);
                 }
-                var_val(var)
+                let at = self.evaluation();
+                st.stamp(var, at);
+                site_val(var, at)
             }
             ExprKind::Field { base, name } => {
                 // A field path Tier 1 follows is its variable.
@@ -4757,7 +4960,9 @@ impl<'a> Fx<'a> {
                         };
                         self.assign(st, var, &each);
                         self.facts(st, var, &shape);
-                        var_val(var)
+                        let at = self.evaluation();
+                        st.stamp(var, at);
+                        site_val(var, at)
                     }
                     Ty::Int(_) | Ty::Bool | Ty::Enum(_) | Ty::Unit | Ty::Any => TOP,
                 }
@@ -4800,17 +5005,22 @@ impl<'a> Fx<'a> {
         int_of(&self.typing.exprs[e.0 as usize]).or(taken.map(|t| t.ty))
     }
 
+    /// An arithmetic or bit operation on `l` and `r`, the values of `le` and `re`, reported at
+    /// `span`, its value held in `site`, the variable its caller gives it: an expression's own
+    /// site variable when it evaluates that expression ([`Fx::site_var`]), and a compound
+    /// remainder's own when it is `p %= e` ([`Fx::compounds`]), which is no expression's, so
+    /// that it never overwrites the one that holds `e`'s value, which `r` reads.
     fn binary(
         &mut self,
         st: &mut Octagon,
-        e: ExprId,
+        (span, site): (Span, Option<usize>),
         op: BinaryOp,
         (le, l): (ExprId, &Val),
         (re, r): (ExprId, &Val),
     ) -> Val {
         let lt = int_of(&self.typing.exprs[le.0 as usize]);
         let rt = int_of(&self.typing.exprs[re.0 as usize]);
-        let (span, rspan) = (self.span(e), self.span(re));
+        let rspan = self.span(re);
         let v = match op {
             BinaryOp::Shl | BinaryOp::Shr => {
                 // The type the shift works in: its left operand's, or the one its literals take.
@@ -4853,7 +5063,7 @@ impl<'a> Fx<'a> {
                     (BinaryOp::Div, true) => lin(Vec::new(), 0),
                     (_, true) => l.clone(),
                     (BinaryOp::Div, false) => div_vals(st, l, r),
-                    (_, false) => self.rem(st, e, l, r),
+                    (_, false) => self.rem(st, site, l, r),
                 }
             }
             BinaryOp::Sub => add_vals(st, l, &negate(r)),
@@ -4897,15 +5107,18 @@ impl<'a> Fx<'a> {
         }
     }
 
-    /// `x % y`, with the facts `core-calculus.md` item 8 gives it.
-    fn rem(&mut self, st: &mut Octagon, e: ExprId, l: &Val, r: &Val) -> Val {
+    /// `x % y`, with the facts `core-calculus.md` item 8 gives it, as the value of `site`, the
+    /// variable its caller gives it ([`Fx::binary`]), where there is one.
+    fn rem(&mut self, st: &mut Octagon, site: Option<usize>, l: &Val, r: &Val) -> Val {
         let (lo, hi) = rem_interval(st, l, r);
-        let Site::Value(var) = self.sites[e.0 as usize] else {
+        let Some(var) = site else {
             return Val::Itv(lo, hi);
         };
         let ((llo, lhi), (rlo, rhi)) = (interval(st, l), interval(st, r));
         self.assign(st, var, &Val::Itv(lo, hi));
-        let v = var_val(var);
+        let at = self.evaluation();
+        st.stamp(var, at);
+        let v = site_val(var, at);
         // A zero divisor traps, so one that is not negative is positive where this runs, and
         // one that is not positive is negative.
         if rlo >= 0 {
@@ -4965,9 +5178,12 @@ impl<'a> Fx<'a> {
         let ends = self.match_arms(st.clone(), e, scrutinee, arms);
         let v = match self.sites[e.0 as usize] {
             Site::Value(var) => {
+                // Every arm gives the one evaluation of the `match` its value.
+                let at = self.evaluation();
                 let mut out: Option<Octagon> = None;
                 for (mut s, v) in ends {
                     self.assign(&mut s, var, &v);
+                    s.stamp(var, at);
                     out = Some(match out {
                         Some(o) => o.join(&s),
                         None => s,
@@ -4978,7 +5194,7 @@ impl<'a> Fx<'a> {
                     s.set_empty();
                     s
                 });
-                return var_val(var);
+                return site_val(var, at);
             }
             Site::None | Site::Call(_) => {
                 let vals: Vec<Val> = ends
@@ -5224,9 +5440,13 @@ impl<'a> Fx<'a> {
         };
         let v = match self.sites[e.0 as usize] {
             Site::Value(var) => {
+                // Both branches give the one evaluation of the `if` its value.
+                let at = self.evaluation();
                 self.assign(&mut t, var, &tv);
                 self.assign(&mut o, var, &ov);
-                var_val(var)
+                t.stamp(var, at);
+                o.stamp(var, at);
+                site_val(var, at)
             }
             Site::None | Site::Call(_) => {
                 let arms: Vec<Val> = [(&t, &tv), (&o, &ov)]
@@ -5278,10 +5498,9 @@ impl<'a> Fx<'a> {
     }
 
     /// A condition, its operands evaluated once; the right operand of `and` and `or` is
-    /// evaluated where the left one has decided that it runs, and changes nothing there
-    /// ([`Fx::changes_nothing`]), so that the state after the operator is where the left one
-    /// decided it. A right operand that changed state left that state to say which operands had
-    /// run, which Tier 1 once answered by merging the two and forgetting what the left one read.
+    /// evaluated where the left one has decided that it runs, and changes no binding there
+    /// ([`Fx::changes_nothing`]). The state after the operator joins where the left one decided
+    /// that the right one does not run with where it ran.
     fn cond(&mut self, st: &mut Octagon, e: ExprId) -> Cond {
         let tree = self.tree;
         match &tree.expr(e).kind {
@@ -5301,6 +5520,18 @@ impl<'a> Fx<'a> {
                 let mut s2 = st.clone();
                 self.assume(&mut s2, &l, and);
                 let r = self.cond(&mut s2, *rhs);
+                // Where the left operand decided that the right one does not run, the right
+                // one's values, the site variables it writes, are forgotten, and that state is
+                // joined with where it ran: the condition's values are as they are where the
+                // right operand ran, the evaluation every read of them names
+                // (`no-site-value-from-another-evaluation`). Applied to the state as the left
+                // operand left it, they would be read where it holds an earlier evaluation, or a
+                // join of two, and the octagon would stop the compile there.
+                self.assume(st, &l, !and);
+                for &v in &self.operand_sites[rhs.0 as usize] {
+                    st.forget(v);
+                }
+                *st = st.join(&s2);
                 if and {
                     Cond::And(Box::new(l), Box::new(r))
                 } else {
@@ -5629,6 +5860,9 @@ impl<'a> Fx<'a> {
         };
         let span = self.span(e);
         forget_site(st, &site);
+        if let Some(r) = site.result {
+            st.forget(r);
+        }
         // Every argument is evaluated, left to right, its value kept as it is then, before any
         // enters its parameter's type, as the reference interpreter does: a narrowing inside a
         // later argument comes before an earlier argument's ...
@@ -5799,7 +6033,11 @@ impl<'a> Fx<'a> {
             self.give_back(st, (root, &steps), a.value, &back, &shape);
         }
         let value = match (site.result, callee.result()) {
-            (Some(r), _) => var_val(r),
+            (Some(r), _) => {
+                let at = self.evaluation();
+                st.stamp(r, at);
+                site_val(r, at)
+            }
             (None, Some(t)) => {
                 let shape = self.callee_shape(&c, &site, args, t);
                 self.summary(st, &shape)
@@ -6717,7 +6955,7 @@ impl<'a> Fx<'a> {
             self.loop_memo
                 .iter()
                 .find(|m| m.stmt == s && m.entry == *entry)
-                .map(|m| m.outcome.clone())
+                .map(|m| m.outcome.restamped(&m.entry, entry))
         });
         let outcome = match replayed {
             Some(outcome) => {
@@ -7125,7 +7363,7 @@ mod tests {
         };
         let mut fx = Fx::new(&f, &callees, &text);
         fx.route();
-        let mut st = Octagon::new(fx.count);
+        let mut st = fx.start();
         fx.entry(&mut st);
         run(&mut fx, &st)
     }
@@ -8080,6 +8318,275 @@ mod tests {
             );
             assert_eq!(codes(&src), ["E0236"], "{}", changes);
         }
+    }
+
+    /// A condition is decided on the evaluations its state ran (`ghost-contracts-and-totality.md`,
+    /// item 2, `no-site-value-from-another-evaluation`). Fable's final review of pull request 182
+    /// found the remainder `x % 4` of a loop's candidate evaluated at the head, its fact `<= 1` left
+    /// in the state, and the round, after `x = v`, deciding the guard on it: the right operand of
+    /// `and` ran in a copy of the state, and its condition was applied to the state itself, which
+    /// held the head's evaluation. The `else` then knew `w` was 0, and `a[w]` lost its check;
+    /// `f(3, 1, 1)` read past the array natively. Each form below kept the stale fact so: an
+    /// `if`-valued conjunct, an `or` under the `and`, and a `not`. A loop's exit after a conjunct
+    /// that assigns did too, which no condition holds now (`core-calculus.md`, item 10).
+    #[test]
+    fn test_a_condition_names_only_evaluations_its_state_ran() {
+        let head = "pub fn f(v: u8, w: u8[0..=1], n: u8) -> u8 {\n  var x: u8 = 0\n  var i: u8 = 0\n  val a: [1]u8 = [5]\n  var r: u8 = 0\n";
+        let guarded = |cond: &str| {
+            format!(
+                "{}  while i < n {{\n    x = v\n    guard {} else {{\n      r = a[w]\n      break\n    }}\n    x = 0\n    i += 1\n  }}\n  r\n}}",
+                head, cond
+            )
+        };
+        let programs: Vec<String> = [
+            "w > 0 and x % 4 <= 1",
+            "w > 0 and (if x > 1 { 1 } else { 0 }) == 0",
+            "w > 0 and (x % 4 <= 1 or w > 5)",
+            "not (w == 0) and x % 4 <= 1",
+        ]
+        .iter()
+        .map(|c| guarded(c))
+        .collect();
+        for src in &programs {
+            let found: Vec<(ObligationKind, bool)> = obligations(src)
+                .into_iter()
+                .map(|(k, _, proven)| (k, proven))
+                .collect();
+            assert!(
+                found.contains(&(ObligationKind::Index, false)),
+                "{}\n{:?}",
+                src,
+                found
+            );
+            assert_eq!(codes(src), NONE, "{}", src);
+        }
+    }
+
+    /// The condition of the one `guard` of the function `fx` analyses.
+    fn guard_condition(fx: &Fx<'_>) -> ExprId {
+        fx.tree
+            .stmts
+            .iter()
+            .find_map(|s| match s.kind {
+                StmtKind::Guard { cond, .. } => Some(cond),
+                StmtKind::Binding { .. }
+                | StmtKind::Assign { .. }
+                | StmtKind::While { .. }
+                | StmtKind::Return(_)
+                | StmtKind::Break
+                | StmtKind::Continue
+                | StmtKind::Discard(_)
+                | StmtKind::Expr(_) => None,
+            })
+            .unwrap_or(ExprId(0))
+    }
+
+    const STALE: &str =
+        "pub fn f(x: u8) -> u8 {\n  guard x % 4 <= 1 else {\n    return 0\n  }\n  x\n}";
+
+    /// A value read from an evaluation the state does not hold stops the compile, in every build,
+    /// with an internal error that names the expression (`no-site-value-from-another-evaluation`).
+    /// Planted here as pull request 182 read it: the guard's condition decided in a copy of the
+    /// state that evaluated `x % 4` again, and applied to the state, which holds the earlier
+    /// evaluation.
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the value of `x % 4` at 3:9 is read as one evaluation, where the state holds another"
+    )]
+    fn test_a_value_read_from_another_evaluation_stops_the_compile() {
+        with_fx(STALE, |fx, st| {
+            let cond = guard_condition(fx);
+            let mut held = st.clone();
+            fx.cond(&mut held, cond);
+            let mut again = held.clone();
+            let c = fx.cond(&mut again, cond);
+            fx.assume(&mut held, &c, true);
+        });
+    }
+
+    /// The same where the state joins two evaluations: the right operand's values not forgotten
+    /// where it did not run, before the join of `Fx::cond`.
+    #[test]
+    #[should_panic(
+        expected = "internal error: in `f`, the value of `x % 4` at 3:9 is read as one evaluation, where the state holds two joined"
+    )]
+    fn test_a_value_read_where_two_evaluations_are_joined_stops_the_compile() {
+        with_fx(STALE, |fx, st| {
+            let cond = guard_condition(fx);
+            let mut one = st.clone();
+            fx.cond(&mut one, cond);
+            let mut two = st.clone();
+            let c = fx.cond(&mut two, cond);
+            let mut joined = one.join(&two);
+            fx.assume(&mut joined, &c, true);
+        });
+    }
+
+    /// A compound remainder `y %= e` whose right side has a site variable, an index, a field
+    /// read through an index, a remainder, an `if` or a `match`, gives its value a variable of its
+    /// own (`Fx::compounds`): it once took `e`'s, and related the remainder to its divisor, the
+    /// same variable, `v <= v - 1`, which emptied the state, so that Tier 1 proved whatever
+    /// followed. Since the stamps, the read of `e` after the write stopped the compile, which the
+    /// 4000 generated programs of pull request 204 met in 18. A call, whose value is no site value,
+    /// and a field Tier 1 follows were never in the class. The remainder lies in `[0, 8]` for each:
+    /// `u8[0..9]` holds, and `u8[0..5]` is not proven. Every form is tried before any fails.
+    #[test]
+    fn test_a_compound_remainder_keeps_the_value_it_divides_by() {
+        let with = |rhs: &str, result: &str| {
+            format!(
+                "pub struct S {{\n  d: u8[1..=9]\n}}\npub fn f(x: u8, a: [2]u8[1..=9], b: [2]S, c: bool) -> {} {{\n  var y = x\n  y %= {}\n  y\n}}",
+                result, rhs
+            )
+        };
+        let mut wrong = Vec::new();
+        for rhs in [
+            "a[1]",
+            "b[1].d",
+            "x % 7",
+            "(if c { 3 } else { 9 })",
+            "match c {\n    true => 3\n    false => 9\n  }",
+        ] {
+            for (result, expected) in [("u8[0..9]", &NONE[..]), ("u8[0..5]", &["E0502"][..])] {
+                let found = codes(&with(rhs, result));
+                if found != expected {
+                    wrong.push(format!("{} within {}: {:?}", rhs, result, found));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        // The remainder's own variable keeps its relations: below the divisor, here a field
+        // Tier 1 follows, so that `s.d - y` cannot go below 0, and every check is proven.
+        let kept = "pub struct S {\n  d: u8[1..=9]\n}\npub fn f(x: u8, s: S) -> u8 {\n  var y = x\n  y %= s.d\n  s.d - y\n}";
+        let unproven: Vec<(ObligationKind, bool)> = obligations(kept)
+            .into_iter()
+            .filter(|(_, _, proven)| !proven)
+            .map(|(k, _, proven)| (k, proven))
+            .collect();
+        assert_eq!(unproven, Vec::new());
+    }
+
+    /// A compound remainder's place is an integer, or the `Any` of `todo` or `unreachable`, which
+    /// the checker accepts too (`Fx::rest`): Tier 1 meets such a place only where no run
+    /// reaches, since evaluating either empties the state first. For each, the program checks, and
+    /// the statement after it is reached in an empty state.
+    #[test]
+    fn test_a_compound_remainder_of_a_todo_place_is_met_only_where_no_run_reaches() {
+        for leaves in ["todo(\"later\")", "unreachable(\"later\")"] {
+            let src = format!(
+                "pub fn f(a: [2]u8[1..=9]) -> u8 {{\n  var y = {}\n  y %= a[1]\n  _ = y\n  0\n}}",
+                leaves
+            );
+            assert_eq!(codes(&src), NONE, "{}", leaves);
+            with_fx(&src, |fx, st| {
+                let Some(Body::Block(b)) = fx.syntax.body else {
+                    panic!("a block body");
+                };
+                let stmts = fx.tree.block(b).stmts.clone();
+                let mut at = st.clone();
+                fx.stmt_eval(&mut at, stmts[0], None);
+                assert!(at.is_empty(), "the state after {} is reached", leaves);
+            });
+        }
+    }
+
+    /// Every compound operator, after a site value on its right side, proves only what holds:
+    /// a refinement the result does not hold stays unproven, `E0502` for each of the ten, so that
+    /// an operator that later takes a site variable of its own is held to it too.
+    #[test]
+    fn test_every_compound_operator_by_a_site_value_proves_only_what_holds() {
+        let mut wrong = Vec::new();
+        for (op, x, divisor) in [
+            ("+=", "u8[0..10]", "u8[1..=9]"),
+            ("-=", "u8[20..30]", "u8[1..=9]"),
+            ("*=", "u8[0..10]", "u8[1..=9]"),
+            ("/=", "u8", "u8[1..=9]"),
+            ("%=", "u8", "u8[1..=9]"),
+            ("&=", "u8", "u8[1..=9]"),
+            ("|=", "u8", "u8[1..=9]"),
+            ("^=", "u8", "u8[1..=9]"),
+            ("<<=", "u8[0..3]", "u8[1..=3]"),
+            (">>=", "u8", "u8[1..=3]"),
+        ] {
+            let src = format!(
+                "pub fn f(x: {}, a: [2]{}) -> u8[0..5] {{\n  var y = x\n  y {} a[1]\n  y\n}}",
+                x, divisor, op
+            );
+            let found = codes(&src);
+            if found != ["E0502"] {
+                wrong.push(format!("{}: {:?}", op, found));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Where the left operand of `and` decided that the right one does not run, only the right
+    /// operand's values are forgotten (`Fx::sites_of_operands`): `x % 4`, evaluated before the
+    /// condition and read after it, keeps its facts, and the sum fits the result's refinement.
+    #[test]
+    fn test_a_right_operand_forgets_only_its_own_values() {
+        let src = "pub fn f(x: u8, w: u8, y: u8) -> u8[0..5] = x % 4 + (if w > 0 and y > 1 { 1 } else { 0 })";
+        assert_eq!(codes(src), NONE);
+    }
+
+    /// One value never combines two evaluations of a variable (`Octagon::one_evaluation`): a
+    /// compound remainder once related the remainder to its divisor through one variable, and
+    /// `v - r` cancelled `x@new - x@old` to `[] <= -1`, which emptied the state with neither term
+    /// read, so that only a later relation, which read `r`, tripped a stamp. Planted here as
+    /// that sum: it stops the compile, whatever relation comes after.
+    #[test]
+    #[should_panic(
+        expected = "internal error: variable 0 is combined in one value from two evaluations"
+    )]
+    fn test_a_value_of_two_evaluations_of_one_variable_stops_the_compile() {
+        let st = Octagon::new(1);
+        lin_add(&st, &[Term::of(0, 5)], &[Term::of(0, 4).negated()]);
+    }
+
+    /// A loop replayed from the memo restores the state its analysis left, computed from an entry
+    /// that held other evaluations of the values the loop leaves alone. The replay rebases them
+    /// on the entry it is replayed at (`LoopOutcome::restamped`), so that a value read before the
+    /// loop is read after it as the evaluation it is: without it, the second read of `x % 4`
+    /// below stops the compile.
+    #[test]
+    fn test_a_loop_replayed_from_the_memo_holds_the_evaluations_it_was_entered_with() {
+        let src = "pub fn f(x: u8) -> u8 {\n  val k = x % 4\n  var j: u8 = 0\n  while j < 2 {\n    j += 1\n  }\n  k + j\n}";
+        with_fx(src, |fx, st| {
+            let tree = fx.tree;
+            let rem = (0..tree.exprs.len())
+                .map(|i| ExprId(i as u32))
+                .find(|&e| fx.own_text(e).0 == "x % 4")
+                .unwrap_or(ExprId(0));
+            let (s, cond, invariants, body) = tree
+                .stmts
+                .iter()
+                .enumerate()
+                .find_map(|(i, s)| match &s.kind {
+                    StmtKind::While {
+                        cond,
+                        invariants,
+                        body,
+                        ..
+                    } => Some((StmtId(i as u32), *cond, invariants.clone(), *body)),
+                    StmtKind::Binding { .. }
+                    | StmtKind::Assign { .. }
+                    | StmtKind::Guard { .. }
+                    | StmtKind::Return(_)
+                    | StmtKind::Break
+                    | StmtKind::Continue
+                    | StmtKind::Discard(_)
+                    | StmtKind::Expr(_) => None,
+                })
+                .unwrap_or((StmtId(0), ExprId(0), Vec::new(), BlockId(0)));
+            fx.recording = false;
+            let mut first = st.clone();
+            fx.eval(&mut first, rem);
+            fx.while_loop(&mut first, s, cond, &invariants, body);
+            let mut again = st.clone();
+            let v = fx.eval(&mut again, rem);
+            fx.while_loop(&mut again, s, cond, &invariants, body);
+            assert_eq!(fx.loop_memo.len(), 1, "the second loop is replayed");
+            assert_eq!(interval(&again, &v), (0, 3));
+        });
     }
 
     /// A loop's candidate holds only where evaluating it cannot trap (`ghost-contracts-and-
@@ -9783,10 +10290,13 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         );
         let x = Term::pos(0);
         let y = Term::pos(1);
-        assert_eq!(lin_add(&[x], &[x.negated()]), Some(vec![]));
-        assert_eq!(lin_add(&[x], &[x]), None);
-        assert_eq!(lin_add(&[x, y], &[Term::pos(2)]), None);
-        assert_eq!(lin_add(&[x], &[y]), Some(vec![x, y]));
+        let three = Octagon::new(3);
+        assert_eq!(lin_add(&three, &[x], &[x.negated()]), Some(vec![]));
+        assert_eq!(lin_add(&three, &[x], &[x]), None);
+        assert_eq!(lin_add(&three, &[x, y], &[Term::pos(2)]), None);
+        assert_eq!(lin_add(&three, &[x], &[y]), Some(vec![x, y]));
+        let (x4, x5) = (Term::of(0, 4), Term::of(0, 4).negated());
+        assert_eq!(lin_add(&three, &[x4], &[x5]), Some(vec![]));
         assert_eq!(negate(&Val::Other), Val::Other);
         assert_eq!(negate(&Val::Itv(1, 3)), Val::Itv(-3, -1));
         assert_eq!(as_const(&Val::Lin(vec![x], 3)), None);

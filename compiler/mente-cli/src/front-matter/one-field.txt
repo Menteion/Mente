@@ -1,0 +1,7 @@
+fields key
+expect accepted
+value key value
+input
+---
+key: value
+---

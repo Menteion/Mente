@@ -376,6 +376,20 @@
 {"version":1,"diagnostics":[{"code":"E0202","severity":"error","message":"`x` is already declared in this function; Mente has no shadowing, so give this one a new name","primary":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"related":[{"message":"first declared here","span":{"file":"shadowing.mn","start":45,"end":46,"line":3,"column":10}}],"fixes":[{"message":"rename this `x` and its uses to `x2`","applicability":"suggestion","edits":[{"span":{"file":"shadowing.mn","start":66,"end":67,"line":4,"column":7},"replacement":"x2"},{"span":{"file":"shadowing.mn","start":74,"end":75,"line":5,"column":3},"replacement":"x2"}]}]}],"todos":[],"trusted":[]}
 == core-calculus/shift_right_past_the_width_a_value_is_kept_in.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/slots_of_branches_share_the_stack.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/slots_review_arrays.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/slots_review_fragments.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/slots_review_generated_35.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/slots_review_generated_9.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/slots_review_values.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== core-calculus/slots_review_variables.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == core-calculus/struct_beyond_4_gib.mn ==
 {"version":1,"diagnostics":[{"code":"E0223","severity":"error","message":"a struct of type `Huge` holds 4294967296 bytes, more than the 4294967295 a value, kept in one piece, may hold","primary":{"file":"struct_beyond_4_gib.mn","start":47,"end":51,"line":3,"column":12},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == core-calculus/struct_built_by_position.mn ==
@@ -468,6 +482,12 @@
 {"version":1,"diagnostics":[{"code":"E0503","severity":"error","message":"`requires x % 2 == 0` lies outside the Tier-1 fragment, since it uses `%`; mark `half` `@checked` to check it at run time, or `@prove` to make it a trusted axiom until `mn prove` runs","primary":{"file":"clause_outside_the_fragment.mn","start":72,"end":82,"line":4,"column":12},"related":[],"fixes":[{"message":"mark `half` `@checked`: the clause becomes a run-time check","applicability":"suggestion","edits":[{"span":{"file":"clause_outside_the_fragment.mn","start":36,"end":36,"line":3,"column":1},"replacement":"@checked\n"}]},{"message":"mark `half` `@prove`: the clause becomes a trusted axiom until `mn prove` runs","applicability":"suggestion","edits":[{"span":{"file":"clause_outside_the_fragment.mn","start":36,"end":36,"line":3,"column":1},"replacement":"@prove\n"}]}]}],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/clause_routed_by_checked.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[{"clause":"requires x != 0 of odd","span":{"file":"clause_routed_by_checked.mn","start":144,"end":150,"line":10,"column":12}}]}
+== ghost-contracts-and-totality/compound_remainder_by_a_site_value.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== ghost-contracts-and-totality/compound_remainder_in_a_branch.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== ghost-contracts-and-totality/compound_remainder_proves_only_what_holds.mn ==
+{"version":1,"diagnostics":[{"code":"E0502","severity":"error","message":"Tier 1 cannot rule out `x = 5, y = 5`, outside `u8[0..5]`, the type of the result of `f`","primary":{"file":"compound_remainder_proves_only_what_holds.mn","start":488,"end":489,"line":10,"column":3},"related":[],"fixes":[{"message":"insert `guard y < 5 else { todo(\"y < 5 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"compound_remainder_proves_only_what_holds.mn","start":486,"end":486,"line":10,"column":1},"replacement":"  guard y < 5 else { todo(\"y < 5 is false here\") }\n"}]}]}],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/decreases_negative_at_a_call.mn ==
 {"version":1,"diagnostics":[{"code":"E0507","severity":"error","message":"Tier 1 cannot rule out `k = -1`, where the measure `n` of `down` is negative at this call: a `decreases` measure is never negative","primary":{"file":"decreases_negative_at_a_call.mn","start":153,"end":160,"line":12,"column":29},"related":[],"fixes":[{"message":"insert `guard k >= 0 else { todo(\"k >= 0 is false here\") }`","applicability":"suggestion","edits":[{"span":{"file":"decreases_negative_at_a_call.mn","start":151,"end":160,"line":12,"column":27},"replacement":"{\n  guard k >= 0 else { todo(\"k >= 0 is false here\") }\n  down(k)\n}"}]}]}],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/decreases_not_smaller.mn ==
@@ -531,6 +551,8 @@
 == ghost-contracts-and-totality/loop_facts_from_its_text.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/loop_met_again_breaks_from_an_inner_condition.mn ==
+{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
+== ghost-contracts-and-totality/stale_fact_in_a_guard.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/total_while_without_decreases.mn ==
 {"version":1,"diagnostics":[{"code":"E0501","severity":"error","message":"function `countdown` is marked `@total` and loops with `while`, but gives no `decreases` measure","primary":{"file":"total_while_without_decreases.mn","start":50,"end":59,"line":4,"column":8},"related":[],"fixes":[]}],"todos":[],"trusted":[]}

@@ -3,7 +3,7 @@
 // bounds check at run time
 // Specs: spec/core-calculus.md, spec/refinement-and-fixed-point.md, spec/ghost-contracts-and-totality.md
 // It runs in full at the end of M2. Its units and generics, which later milestones bring, are in
-// example 05 (docs/design-review.md, example-01-m2).
+// example 05 (docs/design-review.md, example-binary-search-m2).
 // ============================================================================
 module examples.refinement_and_units
 

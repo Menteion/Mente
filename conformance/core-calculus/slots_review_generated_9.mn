@@ -1,0 +1,38 @@
+// expect: pass
+module conformance
+// A program of the review's generator, seed 9, whose slots took 288 bytes for a frame of 254 under
+// the layout that rounded each slot up to 16 bytes (the review of pull request 183, 2026-11-22).
+
+fn touch(mut xs: [16]u8, k: u8) -> u8 {
+  val t: [16]u8 = [k ^ xs[3]; 16]
+  xs[k % 16] = xs[(k + 1) % 16] ^ t[5]
+  xs[15] = xs[0] ^ k
+  xs[7]
+}
+
+fn peek(xs: [16]u8, ys: [16]u8) -> u8 = (xs[3] ^ ys[7]) ^ (xs[15] ^ ys[0])
+
+pub fn f(c: u8, x: u8) -> u8 {
+var acc: u8 = c
+if c > 210 {
+acc = acc ^ (x ^ 235)
+val a0: [16]u8 = [(x ^ 150); 16]
+var v1: [16]u8 = [186, 93, 229, a0[3], 85, 224, 134, 19, acc, 17, 79, 74, 245, 40, 83, 204]
+v1[9] = (x ^ 136)
+acc = acc ^ a0[10]
+acc = acc ^ v1[7]
+} else {
+acc = acc ^ (x ^ 164)
+}
+acc = acc ^ peek([234; 16], if acc > 24 { [188; 16] } else { [(x ^ 175); 16] })
+acc = acc ^ (x ^ 241)
+acc = acc ^ acc
+acc = acc ^ peek([(x ^ 183); 16], [149, 81, 72, 47, (x ^ 146), acc, 55, 175, 67, (x ^ 0), 23, 28, 49, 211, 218, 213])
+acc = acc ^ peek([243, (x ^ 64), 21, 88, (x ^ 107), acc, 211, 1, 234, 199, (x ^ 118), (x ^ 101), 133, (x ^ 130), 184, 170], [(x ^ 73); 16])
+acc = acc ^ peek(if x == 27 { [(x ^ 33); 16] } else { 
+val t2: [16]u8 = [118; 16]
+acc = acc ^ t2[7]
+t2
+ }, if acc > 243 { [33, 51, 179, 104, 211, 82, 76, (x ^ 152), 166, 188, 130, acc, 54, acc, (x ^ 42), 31] } else { [acc; 16] })
+acc
+}
