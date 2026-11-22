@@ -15,8 +15,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { PASSED, capped } from "./local-limits.mjs";
-import { ENTRIES, INTERFACE, NODE_ENGINES, blobId, bootstrapLine, filesOf, gateEnv, gitLocations, localMain, manifestText, mismatch, nodeMeetsFloor, nothingToRefresh, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
+import { PASSED, RUNNER_TARGET, RUNNER_VARIABLE, capped, runnerLine, workingTreeRunnerLine } from "./local-limits.mjs";
+import { ENTRIES, INTERFACE, NODE_ENGINES, blobId, bootstrapLine, filesOf, gateEnv, gitLocations, localMain, manifestText, mismatch, nodeMeetsFloor, nothingToRefresh, pendingCopy, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
 import { LOCK_FD_VARIABLE, TREE_RUNNER, lockHolder, takeLock } from "./gate-processes.mjs";
 import { GET_URL_MS, REFRESH_MS, REMEMBER_MS, REMOTE_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
@@ -1373,10 +1373,16 @@ test("the command hands the lock to the new set's refresher, in a process of its
   );
 });
 
+/// The kill points of a first install, in order: the bootstrap's lock, its early entries, the hook's
+/// first, its staged set, then the install's manifest, rename and entries.
+const FIRST_INSTALL = ["locked", ...ENTRIES.map((name) => `early:${name}`), "halfway", "staged", "manifest", "rename", ...ENTRIES.map((name) => `entry:${name}`)];
+/// Those after which a whole set stands, staged or renamed, for the next start to finish.
+const LEFT_PENDING = new Set(["staged", "manifest", "rename", ...ENTRIES.map((name) => `entry:${name}`)]);
+
 test("a first install killed at any step is finished by the next start's refresh entry, or by the bootstrap", async () => {
   await withGates(
     async ({ gates, seam, seamChild, current, entry, base }) => {
-      for (const step of ["halfway", "locked", "manifest", "rename", ...ENTRIES.map((name) => `entry:${name}`)]) {
+      for (const step of FIRST_INSTALL) {
         fs.rmSync(gates, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
         const killed = seamChild({ bootstrap: true, stopAt: step });
         assert.notEqual(killed.status, 0, `${step}: the install was not killed: ${killed.stderr}`);
@@ -1384,10 +1390,19 @@ test("a first install killed at any step is finished by the next start's refresh
         const lock = await takeLock(path.join(gates, "lock"), { waitMs: 3000, label: "after a kill" });
         assert.ok(lock, `${step}: the lock stayed taken after the kill`);
         lock.release();
-        if (fs.existsSync(path.join(gates, "entry", "refresh.mjs"))) {
+        // The entries written so far are the hook's first, each whole.
+        const written = ENTRIES.filter((name) => fs.existsSync(path.join(gates, "entry", ...name.split("/"))));
+        assert.deepEqual(written, ENTRIES.slice(0, written.length), `${step}: an entry was written before the hook's`);
+        assert.equal(pendingCopy(gates) !== null, LEFT_PENDING.has(step), `${step}: what the next start finishes`);
+        if (LEFT_PENDING.has(step)) {
           const r = entry("refresh.mjs");
           assert.equal(r.status, 0, `${step}: ${r.stderr}`);
         } else {
+          if (fs.existsSync(path.join(gates, "entry", "refresh.mjs"))) {
+            const r = entry("refresh.mjs");
+            assert.equal(r.status, 2, `${step}: ${r.stderr}`);
+            assert.match(r.stderr, /Norman runs the bootstrap/, step);
+          }
           assert.equal(await seam({ bootstrap: true }), 0, step);
         }
         assert.equal(current(), base, step);
@@ -1521,4 +1536,309 @@ test("no module the hooks or the settings' guard import has an effect at import"
   const top = gates.split("\n").filter((line) => /^[a-z]/.test(line) && !/^(import|export|const|let|function|async function|\}|\/\/)/.test(line));
   assert.deepEqual(top, ["if (import.meta.main) {"]);
   assert.doesNotMatch(fs.readFileSync(path.join(TREE, "tools", "push.mjs"), "utf8"), /from "\.\/gates\.mjs"/, "push.mjs imports the refresher's command");
+});
+
+// The rollout's transition matrix (briefs/gate-tools-from-main.md, "The rollout"): each state a
+// first install can be left in, under each of Norman's two lines old or new, cargo's runner (R) and
+// core.hooksPath (H); and what a start of quick, cargo or mn, a test binary cargo starts through
+// the runner line, and a raw push then do, with the remedy each names. The test refuses a matrix
+// that misses or doubles a cell, so that a state or an entry added later must be given its row.
+
+/// The states, in the order a first install passes them: nothing, each stable entry written in
+/// turn by the bootstrap, a set half staged, staged whole, renamed to its commit, and current.
+const COPY_STATES = ["absent", ...ENTRIES.map((name) => `early:${name}`), "halfway", "staged", "rename", "current"];
+
+/// What a start of quick, cargo or mn does.
+const START = {
+  fallback: { status: 0, out: "fallback", words: /WARNING: (no|a) copy of main's gates is installed[\s\S]*in this order/ },
+  copy: { status: 0, out: "copy", none: /WARNING/ },
+  bootstrap: { status: 2, words: /runs the bootstrap/ },
+  unwritten: { status: 2, words: /names the gates' runner entry, .* which no install has written yet[\s\S]*runs the bootstrap/ },
+  "runner-line": { status: 2, words: /cargo's runner on this laptop is .*the gates' capped one[\s\S]*mente-gates\/entry\/capped\.mjs/ },
+};
+/// What a test binary cargo starts through the runner line does: it runs, or is refused, naming the
+/// remedy, or dies on node's own error where the line names an entry no install has written, which
+/// the tools' start refuses first, naming the bootstrap.
+const BINARY = {
+  runs: { status: 7 },
+  bootstrap: { status: 2, words: /no copy of main's gates is installed[\s\S]*Norman runs the bootstrap/ },
+  refresh: { status: 2, words: /was left half done[\s\S]*run node tools\/quick\.mjs/ },
+  node: { notStatus: [0, 7], words: /Cannot find module/ },
+};
+/// What a raw push of a commit main does not hold does: refused by today's working-tree hook or by
+/// the copy's, both refusing a tree the quick checks have not passed; refused by the entry, naming
+/// the remedy; or, with core.hooksPath naming the entry before any install wrote it, sent, since git
+/// runs no hook it cannot find. The order Norman follows holds that cell: the bootstrap first, and
+/// only once it has succeeded core.hooksPath, which the tools' warning states.
+const PUSH = {
+  today: { refused: true, words: /matrix: the working tree's hook[\s\S]*the pre-push hook refused/ },
+  copy: { refused: true, words: /the pre-push hook refused/, none: /matrix: the working tree's hook/ },
+  sh: { refused: true, words: /the hook's entry stands, but (verify|hook)\.mjs beside it is not installed yet/ },
+  bootstrap: { refused: true, words: /no copy of main's gates is installed[\s\S]*Norman runs the bootstrap/ },
+  refresh: { refused: true, words: /was left half done[\s\S]*run node tools\/quick\.mjs/ },
+  unguarded: { refused: false },
+};
+
+// copy state, R, H: a start, a test binary, a raw push. Off Windows cargo reads no runner line, so a
+// start refused for its runner goes on to the mode it reached (the test says so where it checks).
+const MATRIX = [
+  ["absent", "old", "old", "fallback", "runs", "today"],
+  ["absent", "old", "new", "bootstrap", "runs", "unguarded"],
+  ["absent", "new", "old", "unwritten", "node", "today"],
+  ["absent", "new", "new", "bootstrap", "node", "unguarded"],
+  ["early:hooks/pre-push", "old", "old", "fallback", "runs", "today"],
+  ["early:hooks/pre-push", "old", "new", "bootstrap", "runs", "sh"],
+  ["early:hooks/pre-push", "new", "old", "unwritten", "node", "today"],
+  ["early:hooks/pre-push", "new", "new", "bootstrap", "node", "sh"],
+  ["early:verify.mjs", "old", "old", "fallback", "runs", "today"],
+  ["early:verify.mjs", "old", "new", "bootstrap", "runs", "sh"],
+  ["early:verify.mjs", "new", "old", "unwritten", "node", "today"],
+  ["early:verify.mjs", "new", "new", "bootstrap", "node", "sh"],
+  ["early:hook.mjs", "old", "old", "fallback", "runs", "today"],
+  ["early:hook.mjs", "old", "new", "bootstrap", "runs", "bootstrap"],
+  ["early:hook.mjs", "new", "old", "unwritten", "node", "today"],
+  ["early:hook.mjs", "new", "new", "bootstrap", "node", "bootstrap"],
+  ["early:refresh.mjs", "old", "old", "fallback", "runs", "today"],
+  ["early:refresh.mjs", "old", "new", "bootstrap", "runs", "bootstrap"],
+  ["early:refresh.mjs", "new", "old", "unwritten", "node", "today"],
+  ["early:refresh.mjs", "new", "new", "bootstrap", "node", "bootstrap"],
+  ["early:capped.mjs", "old", "old", "fallback", "runs", "today"],
+  ["early:capped.mjs", "old", "new", "bootstrap", "runs", "bootstrap"],
+  ["early:capped.mjs", "new", "old", "fallback", "bootstrap", "today"],
+  ["early:capped.mjs", "new", "new", "bootstrap", "bootstrap", "bootstrap"],
+  ["halfway", "old", "old", "fallback", "runs", "today"],
+  ["halfway", "old", "new", "bootstrap", "runs", "bootstrap"],
+  ["halfway", "new", "old", "fallback", "bootstrap", "today"],
+  ["halfway", "new", "new", "bootstrap", "bootstrap", "bootstrap"],
+  ["staged", "old", "old", "fallback", "runs", "today"],
+  ["staged", "old", "new", "runner-line", "runs", "refresh"],
+  ["staged", "new", "old", "fallback", "refresh", "today"],
+  ["staged", "new", "new", "copy", "refresh", "refresh"],
+  ["rename", "old", "old", "fallback", "runs", "today"],
+  ["rename", "old", "new", "runner-line", "runs", "refresh"],
+  ["rename", "new", "old", "fallback", "refresh", "today"],
+  ["rename", "new", "new", "copy", "refresh", "refresh"],
+  ["current", "old", "old", "fallback", "runs", "today"],
+  ["current", "old", "new", "runner-line", "runs", "copy"],
+  ["current", "new", "old", "fallback", "runs", "today"],
+  ["current", "new", "new", "copy", "runs", "copy"],
+];
+
+/// The start of quick, cargo and mn, the lines quick.mjs runs, which the policy test holds each of
+/// the three tools to.
+const START_LINES = [
+  "const gates = refreshGates({ cwd: process.cwd() });",
+  "if (!gates) process.exit(2);",
+  'const fallback = gates === "fallback";',
+  "if (!requireRunner({ fallback })) process.exit(2);",
+  "if (!requireHooks({ cwd: process.cwd(), fallback })) process.exit(2);",
+];
+
+test("the rollout's transition matrix: each copy state under Norman's lines old or new, for a start, a test binary and a raw push, with the remedy each names", async () => {
+  const keys = MATRIX.map(([state, r, h]) => `${state} R ${r} H ${h}`).sort();
+  const cells = COPY_STATES.flatMap((state) => ["old", "new"].flatMap((r) => ["old", "new"].map((h) => `${state} R ${r} H ${h}`))).sort();
+  assert.deepEqual(keys, cells, "the matrix misses or doubles a cell");
+  for (const [state, , , start, binary, push] of MATRIX) assert.ok(START[start] && BINARY[binary] && PUSH[push], `${state}: an outcome the matrix names is not defined`);
+  const quick = fs.readFileSync(path.join(TREE, "tools", "quick.mjs"), "utf8");
+  for (const line of START_LINES) assert.ok(quick.includes(`\n${line}\n`), `quick.mjs's start no longer holds: ${line}`);
+  const startCode = [`import { refreshGates, requireHooks, requireRunner } from ${JSON.stringify(new URL("./local-limits.mjs", import.meta.url).href)};`, ...START_LINES, "console.log(gates);"].join("\n");
+  await withGates(
+    async ({ dir, env, run, git, work, gates, seam, seamChild, commit }) => {
+      // A commit main does not hold, for the pushes; the checkout taken as this repository's, for
+      // the runner; today's working-tree hook marked, so that its refusal is told from the copy's.
+      commit("not on main", {}, { push: false });
+      fs.writeFileSync(path.join(work, "Cargo.toml"), "[workspace]\n");
+      const hookAt = path.join(work, "tools", "git-hooks", "pre-push");
+      const hookText = fs.readFileSync(hookAt, "utf8");
+      assert.match(hookText, /^#!\/bin\/sh\r?\n/);
+      fs.writeFileSync(hookAt, hookText.replace(/^#!\/bin\/sh\r?\n/, "#!/bin/sh\necho \"matrix: the working tree's hook\" >&2\n"));
+      const config = path.join(dir, ".cargo", "config.toml");
+      fs.mkdirSync(path.dirname(config), { recursive: true });
+      const runner = { old: path.join(work, "tools", "capped.mjs"), new: path.join(gates, "entry", "capped.mjs") };
+      const line = { old: workingTreeRunnerLine(work), new: runnerLine(gates) };
+      const hooks = { old: path.join(work, "tools", "git-hooks"), new: path.join(gates, "entry", "hooks") };
+      const startEnv = { ...Object.fromEntries(Object.entries(env).filter(([k]) => k !== RUNNER_VARIABLE)), CARGO_HOME: path.join(dir, "cargo-home") };
+      const kept = (state) => path.join(dir, "states", state.replace(/[^A-Za-z0-9.-]/g, "_"));
+      const clear = () => fs.rmSync(gates, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      // Each state made once, by a first install killed where it leaves it, and kept.
+      for (const state of COPY_STATES) {
+        clear();
+        if (state === "current") assert.equal(await seam({ bootstrap: true }), 0);
+        else if (state !== "absent") {
+          const killed = seamChild({ bootstrap: true, stopAt: state });
+          assert.notEqual(killed.status, 0, `${state}: the install was not killed: ${killed.stderr}`);
+        }
+        if (fs.existsSync(gates)) fs.cpSync(gates, kept(state), { recursive: true });
+      }
+      const check = (cell, actor, want, status, words, out = "") => {
+        const where = `${cell}: ${actor} ended with ${status}: ${words}`;
+        if (want.status !== undefined) assert.equal(status, want.status, where);
+        if (want.notStatus) assert.ok(!want.notStatus.includes(status), where);
+        if (want.refused !== undefined) assert.equal(status !== 0, want.refused, where);
+        if (want.words) assert.match(words, want.words, where);
+        if (want.none) assert.doesNotMatch(words, want.none, where);
+        if (want.out) assert.equal(out.trim(), want.out, where);
+      };
+      // A test binary does not depend on H, nor a push on R, and neither writes the gates: each is
+      // run once for its state and line.
+      const done = new Set();
+      let pushes = 0;
+      for (const [state, r, h, start, binary, push] of MATRIX) {
+        const cell = `${state}, R ${r}, H ${h}`;
+        clear();
+        if (fs.existsSync(kept(state))) fs.cpSync(kept(state), gates, { recursive: true });
+        git(work, "config", "core.hooksPath", hooks[h].replace(/\\/g, "/"));
+        fs.writeFileSync(config, `[target.${RUNNER_TARGET}]\n${line[r]}\n`);
+        if (!done.has(`binary ${state} ${r}`)) {
+          done.add(`binary ${state} ${r}`);
+          const b = spawnSync(process.execPath, [runner[r], "--mente-only", "--", process.execPath, "-e", "process.exit(7)"], { cwd: work, env, encoding: "utf8" });
+          check(cell, "a test binary", BINARY[binary], b.status, `${b.stdout}${b.stderr}`);
+        }
+        if (!done.has(`push ${state} ${h}`)) {
+          done.add(`push ${state} ${h}`);
+          pushes += 1;
+          const pushed = run(work, ["push", "origin", `HEAD:refs/heads/matrix-${pushes}`]);
+          check(cell, "a raw push", PUSH[push], pushed.status, `${pushed.stdout}${pushed.stderr}`);
+        }
+        const s = spawnSync(process.execPath, ["--input-type=module", "-e", startCode], { cwd: work, env: startEnv, encoding: "utf8" });
+        const reached = process.platform !== "win32" && (start === "unwritten" || start === "runner-line") ? (h === "old" ? "fallback" : "copy") : start;
+        check(cell, "a start", START[reached], s.status, s.stderr, s.stdout);
+      }
+    },
+    { patched: true },
+  );
+});
+
+test("a staging directory of a commit other than the local origin/main is no install to finish", async () => {
+  await withGates(async ({ work, gates, commit, base }) => {
+    const branch = commit("a branch's set", {}, { push: false });
+    fs.mkdirSync(gates, { recursive: true });
+    stageByHand(repo(work), branch, path.join(gates, `staging-${branch}-0a`));
+    assert.equal(pendingCopy(gates), null, "a branch's set left staged by a hand run was taken for main's");
+    stageByHand(repo(work), base, path.join(gates, `staging-${base}-0b`));
+    assert.equal(pendingCopy(gates)?.commit, base);
+  });
+});
+
+test("restoring the entries reads the copy again under the lock, where another refresh switched current", async () => {
+  await withGates(async ({ work, git, gates, seam, current, commit, base, blob }) => {
+    assert.equal(await seam(), 0);
+    const next = commit("entries of their own", { "tools/gate-entries/capped.mjs": (old) => Buffer.concat([old, Buffer.from("// the next commit's entry\n")]) });
+    assert.equal(await seam(), 0);
+    assert.equal(current(), next);
+    // current set back to base by hand, which origin/main names, so that a refresh only restores
+    // the entries, which are next's: it reads base's, then waits for the lock.
+    git(work, "update-ref", "refs/remotes/origin/main", base);
+    fs.writeFileSync(path.join(gates, "current"), `${base}\n`);
+    const lock = await takeLock(path.join(gates, "lock"), { waitMs: 3000, label: "the test" });
+    assert.ok(lock);
+    const restoring = seam({ waitMs: 20000 });
+    // Meanwhile another refresh switches current to next, then lets the lock go.
+    fs.writeFileSync(path.join(gates, "current"), `${next}\n`);
+    lock.release();
+    assert.equal(await restoring, 0);
+    assert.ok(fs.readFileSync(path.join(gates, "entry", "capped.mjs")).equals(blob(next, "tools/gate-entries/capped.mjs")), "the entries of the copy read before the lock were written");
+  });
+});
+
+test("a staged set the refresh entry finishes waits for the lock only a start's bound", async () => {
+  await withGates(
+    async ({ work, gates, base }) => {
+      fs.mkdirSync(gates, { recursive: true });
+      stageByHand(repo(work), base, path.join(gates, `staging-${base}-0c`));
+      // The refresh entry is written as the bootstrap writes it, before the set is staged.
+      const entryAt = path.join(gates, "entry", "refresh.mjs");
+      fs.mkdirSync(path.dirname(entryAt), { recursive: true });
+      for (const name of ["refresh.mjs", "verify.mjs"]) fs.copyFileSync(path.join(gates, `staging-${base}-0c`, "tools", "gate-entries", name), path.join(gates, "entry", name));
+      const lock = await takeLock(path.join(gates, "lock"), { waitMs: 3000, label: "the test" });
+      assert.ok(lock);
+      // The lock is let go after a start's bound and a margin: a staged set that waited longer would
+      // then install.
+      let held = true;
+      const letGo = () => {
+        if (held) lock.release();
+        held = false;
+      };
+      const release = setTimeout(letGo, WAIT_MS + 8000);
+      const started = Date.now();
+      const child = spawn(process.execPath, [entryAt], { cwd: work, stdio: ["ignore", "pipe", "pipe"] });
+      let words = "";
+      child.stderr.on("data", (d) => (words += d));
+      const status = await new Promise((resolve) => child.on("exit", resolve));
+      clearTimeout(release);
+      letGo();
+      assert.equal(status, 2, words);
+      assert.match(words, /the staged set waits for the next start and writes nothing: a refresh holds the lock/);
+      assert.ok(Date.now() - started < WAIT_MS + 8000, "the staged set waited past a start's bound");
+      assert.ok(!fs.existsSync(path.join(gates, "current")));
+    },
+    { patched: true },
+  );
+});
+
+test("the bootstrap takes the lock before it writes anything, writes the entries, the hook's first, and hands the lock to its staged refresher", async () => {
+  await withGates(
+    async ({ work, gates, blob, base, env, current }) => {
+      fs.mkdirSync(gates, { recursive: true });
+      const lock = await takeLock(path.join(gates, "lock"), { waitMs: 3000, label: "the test" });
+      assert.ok(lock);
+      const body = blob(base, "tools/gate-entries/bootstrap.mjs");
+      const child = spawn(process.execPath, ["--input-type=module", "-", base], { cwd: work, env, stdio: ["pipe", "pipe", "pipe"] });
+      let words = "";
+      child.stderr.on("data", (d) => (words += d));
+      child.stdout.on("data", (d) => (words += d));
+      child.stdin.end(body);
+      const ended = new Promise((resolve) => child.on("exit", resolve));
+      try {
+        // The bootstrap says it waits once it finds the lock held.
+        const waiting = await new Promise((resolve) => {
+          const until = Date.now() + 60000;
+          const poll = setInterval(() => {
+            if (/the bootstrap waits for it, at most \d+ s, before it writes anything/.test(words) || Date.now() > until || child.exitCode !== null) {
+              clearInterval(poll);
+              resolve(/the bootstrap waits for it/.test(words));
+            }
+          }, 100);
+        });
+        assert.ok(waiting, `the bootstrap did not wait for the lock: ${words}`);
+        // While it waits, nothing of mente-gates/ but the lock is written.
+        assert.deepEqual(fs.readdirSync(gates).filter((name) => !/^lock(\.who)?$/.test(name)), [], "the bootstrap wrote under mente-gates/ before it took the lock");
+      } catch (e) {
+        // The bootstrap is ended before the fixture is removed, so that this error stands.
+        child.kill();
+        await ended;
+        throw e;
+      } finally {
+        lock.release();
+      }
+      const status = await ended;
+      // The staged refresher installs with the lock handed down: one that took the lock itself
+      // would find the bootstrap holding it, wait a start's bound, and give up.
+      assert.equal(status, 0, words);
+      assert.equal(current(), base);
+      assert.doesNotMatch(words, /waits for the next start/);
+      for (const name of ENTRIES) assert.ok(fs.readFileSync(path.join(gates, "entry", ...name.split("/"))).equals(blob(base, `tools/gate-entries/${name}`)), `the entry ${name} is not the commit's`);
+    },
+    { patched: true },
+  );
+});
+
+test("a transient failure finishing a half install is not remembered, so the next start finishes it", async () => {
+  await withGates(
+    async ({ dir, remote, gates, seamChild, entry, current, base }) => {
+      const killed = seamChild({ bootstrap: true, stopAt: "rename" });
+      assert.notEqual(killed.status, 0);
+      // The remote cannot be reached: the copy installed but not current stays as it is.
+      const away = path.join(dir, "remote-away.git");
+      fs.renameSync(remote, away);
+      const failed = entry("refresh.mjs");
+      assert.equal(failed.status, 2, failed.stderr);
+      assert.ok(!fs.existsSync(path.join(gates, "kept")), "a failure with no copy current was remembered");
+      fs.renameSync(away, remote);
+      const finished = entry("refresh.mjs");
+      assert.equal(finished.status, 0, finished.stderr);
+      assert.equal(current(), base);
+    },
+    { patched: true },
+  );
 });

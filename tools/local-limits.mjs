@@ -122,10 +122,10 @@ function namesCopy(cwd, gates) {
 
 /// FALLBACK: what the tools say while Norman's lines name today's working-tree gates.
 function fallbackWords(gates, installed) {
-  const lines = `cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n\nand git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n`;
+  const lines = `git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n\nthen cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n`;
   const branches = "Before Norman's lines change, every open branch merges main: a branch from before this round asks for today's lines, and refuses once they change.";
-  if (installed) return `local-limits: WARNING: a copy of main's gates is installed in ${gates}, but Norman's lines still name today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change, so these tools run those. ${branches} Norman then points, in his own terminal, ${lines}`;
-  return `local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. ${branches} Norman, once, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nthen sets ${lines}`;
+  if (installed) return `local-limits: WARNING: a copy of main's gates is installed in ${gates}, but Norman's lines still name today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change, so these tools run those. ${branches} Norman then points, in his own terminal and in this order, ${lines}`;
+  return `local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. ${branches} Norman, in his own terminal and in this order, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nand once it has succeeded, points ${lines}`;
 }
 
 /**
@@ -352,8 +352,14 @@ export function cargoRunner(cwd = process.cwd(), env = process.env) {
 export function requireRunner({ cwd = process.cwd(), env = process.env, say = (line) => console.error(line), fallback = false } = {}) {
   if (!WINDOWS) return true;
   const words = cargoRunner(cwd, env);
-  const runner = fallback ? /[\\/]tools[\\/]capped\.mjs$/ : /[\\/]mente-gates[\\/]entry[\\/]capped\.mjs$/;
+  // FALLBACK: while Norman's lines name today's hooks, either runner holds, today's or the gates'
+  // stable entry, since his lines change one at a time; the entry checks its own copy and refuses,
+  // naming the remedy, while none is current.
+  const entryRunner = /[\\/]mente-gates[\\/]entry[\\/]capped\.mjs$/;
+  const runner = fallback ? /[\\/](tools|mente-gates[\\/]entry)[\\/]capped\.mjs$/ : entryRunner;
   const held = Array.isArray(words) && words.length === 4 && /^node(\.exe)?$/i.test(path.basename(words[0])) && runner.test(words[1]) && fs.existsSync(words[1]) && words[2] === "--mente-only" && words[3] === "--";
+  // The gates' runner entry, named before an install wrote it: cargo would die on node's own error.
+  const unwritten = Array.isArray(words) && words.length > 1 && entryRunner.test(words[1]) && !fs.existsSync(words[1]);
   let gates;
   try {
     gates = gatesDir(cwd);
@@ -363,6 +369,10 @@ export function requireRunner({ cwd = process.cwd(), env = process.env, say = (l
   const file = fallback ? path.join(mainCheckout(), "tools", "capped.mjs") : path.join(gates, "entry", "capped.mjs");
   const line = fallback ? workingTreeRunnerLine() : runnerLine(gates);
   if (held) return true;
+  if (unwritten) {
+    say(`local-limits: cargo's runner names the gates' runner entry, ${words[1]}, which no install has written yet, so a test binary cargo starts would die on node's own error, and nothing here runs until it stands. Norman runs the bootstrap from the main checkout, in his own terminal:\n\n${bootstrapWords()}\n`);
+    return false;
+  }
   // The variable cargo reads before every file: when it names the runner, it is what to change
   // (the review of PR 195's last round).
   if (env[RUNNER_VARIABLE]) {

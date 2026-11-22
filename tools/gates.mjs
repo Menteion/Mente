@@ -199,15 +199,17 @@ function lagWords(common, current) {
   return since ? `; ${MAIN_REF} has named another commit since ${since.toISOString()}` : "";
 }
 
-/// Replaces each entry that is not the file of `copy`'s tools/gate-entries/, each by a new file
-/// renamed over it; returns the entries Windows refused to replace, in use.
-function writeEntries(ctx, copy, files) {
+/// Replaces each entry that does not hold its file of the set `files`, in ENTRIES' order, the
+/// hook's first, each by a new file renamed over it; `bytesOf(file)` reads a file, from a copy or
+/// from git's objects, and `step` names the kill points the seam gives. Returns the entries Windows
+/// refused to replace, in use.
+function writeEntries(ctx, files, bytesOf, step = "entry") {
   const refused = [];
   for (const name of ENTRIES) {
     const rel = `tools/gate-entries/${name}`;
     const file = files.find((f) => f.path === rel);
     if (!file) throw new Error(`the set holds no ${rel}`);
-    const bytes = fs.readFileSync(path.join(copy, ...rel.split("/")));
+    const bytes = bytesOf(file);
     const to = path.join(ctx.gates, "entry", ...name.split("/"));
     if (!entryHolds(to, bytes, file.mode)) {
       fs.mkdirSync(path.dirname(to), { recursive: true });
@@ -218,7 +220,7 @@ function writeEntries(ctx, copy, files) {
         refused.push(name);
       }
     }
-    ctx.stopSync?.(`entry:${name}`);
+    ctx.stopSync?.(`${step}:${name}`);
   }
   return refused;
 }
@@ -248,8 +250,10 @@ async function refreshFrom(ctx) {
     ctx.say(`the current copy stays, as it did at the last ask for ${local.slice(0, 12)}: ${kept}${lag}`);
     return 0;
   }
+  // An answer that keeps the current copy is remembered; with no copy current, nothing is, so
+  // that a transient failure, the network or a file in use, never holds a half install unfinished.
   const keep = (why) => {
-    remember(gates, local, why);
+    if (current) remember(gates, local, why);
     ctx.say(`the current copy${current ? ` of ${current.slice(0, 12)}` : ""} stays: ${why}${lag}`);
     return 0;
   };
@@ -277,7 +281,7 @@ async function refreshFrom(ctx) {
     const status = await ctx.startNew(dir, lock);
     // A new main whose install fails is not tried again at every start: its answer is remembered
     // for that local commit, as one that keeps the copy, and its staging is swept by the next.
-    if (status !== 0 && readCurrent(gates) !== local) remember(gates, local, `the install of ${local.slice(0, 12)} failed`);
+    if (status !== 0 && current && readCurrent(gates) !== local) remember(gates, local, `the install of ${local.slice(0, 12)} failed`);
     return status;
   } finally {
     lock.release();
@@ -307,7 +311,7 @@ async function restoreEntries(ctx, current) {
     const held = now ? read(now) : null;
     if (!held) return 0;
     const { copy, files } = held;
-    const refused = writeEntries(ctx, copy, files);
+    const refused = writeEntries(ctx, files, (f) => fs.readFileSync(path.join(copy, ...f.path.split("/"))));
     ctx.say(refused.length > 0 ? `Windows refused to restore the entries ${refused.join(", ")}, in use; the next start tries again` : `restored the entries of the copy of ${now.slice(0, 12)}`);
     return 0;
   } finally {
@@ -381,7 +385,7 @@ async function installAt(ctx, dir) {
     }
   }
   await ctx.stop?.("rename");
-  const refused = writeEntries(ctx, installed, files);
+  const refused = writeEntries(ctx, files, (f) => fs.readFileSync(path.join(installed, ...f.path.split("/"))));
   if (refused.length > 0) {
     ctx.say(`the copy of ${commit.slice(0, 12)} is installed but not yet current: Windows refused to replace the entries ${refused.join(", ")}, in use; the next start of quick, cargo or mn tries again`);
     return 0;
@@ -395,13 +399,14 @@ async function installAt(ctx, dir) {
   return 0;
 }
 
-/// The bootstrap's staged refresher: it takes the lock itself, waiting at most a refresh's time
-/// limit, by which any holder has been killed, then installs; when the time runs out it gives up,
-/// writes nothing, and names the holder.
-async function bootstrapFrom(ctx, dir) {
-  const lock = await takeLock(ctx.lockFile, { waitMs: ctx.bootstrapWaitMs ?? REFRESH_MS, label: "the bootstrap" });
+/// A staged refresher started with no lock handed down: the refresh entry finishing a set an
+/// install left staged, since the bootstrap hands its lock down. It takes the lock itself, waiting
+/// at most as long as a refresh does, so that a start is held no longer for it, then installs; when
+/// the time runs out it gives up, writes nothing, and names the holder.
+async function stagedFrom(ctx, dir) {
+  const lock = await takeLock(ctx.lockFile, { waitMs: ctx.waitMs, label: `the staged set of ${commitOf(path.basename(dir)).slice(0, 12)}` });
   if (!lock) {
-    ctx.say(`the bootstrap gives up and writes nothing: a refresh holds the lock (${lockHolder(ctx.lockFile)})`);
+    ctx.say(`the staged set waits for the next start and writes nothing: a refresh holds the lock (${lockHolder(ctx.lockFile)})`);
     return 1;
   }
   try {
@@ -434,14 +439,13 @@ function commandContext() {
 /// The work of a refresh, in the child process the command starts under its time limit.
 export async function work() {
   const ctx = commandContext();
-  if (STAGING.test(path.basename(ctx.copy))) return bootstrapFrom(ctx, ctx.copy);
+  if (STAGING.test(path.basename(ctx.copy))) return stagedFrom(ctx, ctx.copy);
   return refreshFrom({ ...ctx, url: declaredUrl(ctx.copy) });
 }
 
 /// The command: refuses any argument and any place but a copy under mente-gates/; with a lock
 /// handed down, installs its own directory; otherwise runs the work in a child of its own, under a
-/// refresh's time limit (twice that for the bootstrap, which may first wait a whole one for the
-/// lock), its whole tree killed when the time passes.
+/// refresh's time limit, staged set or not, its whole tree killed when the time passes.
 async function command() {
   const say = (line) => console.error(`mente-gates: ${line}`);
   if (!nodeMeetsFloor(process.versions.node)) {
@@ -459,7 +463,7 @@ async function command() {
     return 2;
   }
   if (inheritedLock(ctx.lockFile)) return installAt(ctx, ctx.copy);
-  const limit = STAGING.test(name) ? 2 * REFRESH_MS : REFRESH_MS;
+  const limit = REFRESH_MS;
   const code = `import(${JSON.stringify(import.meta.url)}).then((m) => m.work()).then((code) => process.exit(code), (e) => { console.error("mente-gates: the refresh failed: " + (e && e.stack ? e.stack : e)); process.exit(1); });`;
   const r = inTime([process.execPath, "--input-type=module", "-e", code], limit, { env: gateEnv() });
   process.stdout.write(r.out);
@@ -512,7 +516,8 @@ function seamRefusal(repo) {
  * and the new set installed in this process instead of by its own refresher, since the command
  * admits only https. With no copy installed, or with `bootstrap`, it installs the commit the local
  * origin/main names, as the bootstrap would. `stopAt` names a step at which this process is killed,
- * as a kill would end it (halfway, locked, ready, manifest, rename, entry:<name>, current); `hang`
+ * as a kill would end it (halfway, locked, early:<name>, staged, ready, manifest, rename,
+ * entry:<name>, current); `hang`
  * makes it hang there. `remoteMs` and `getUrlMs` shorten the remote's times, and `noGit` stands for
  * a machine where no git of the list is found. Honoured only as seamRefusal says; resolves to the
  * status the command would end with.
@@ -564,9 +569,24 @@ export async function refresh(options = {}) {
     say(`this repository has no ${MAIN_REF}`);
     return 1;
   }
-  const staging = path.join(gates, `staging-${local}-${unique()}`);
-  writeSet(ctx, setOf(ctx, local).files, staging);
-  return bootstrapFrom(ctx, staging);
+  // As the bootstrap does: the lock first, then the entries, the hook's first, from the commit's
+  // objects, then the staged set, installed with the lock held.
+  const lock = await takeLock(ctx.lockFile, { waitMs: ctx.bootstrapWaitMs, label: "the bootstrap" });
+  if (!lock) {
+    say(`the bootstrap gives up and writes nothing: a refresh holds the lock (${lockHolder(ctx.lockFile)})`);
+    return 1;
+  }
+  try {
+    await ctx.stop?.("locked");
+    const files = setOf(ctx, local).files;
+    writeEntries(ctx, files, (f) => git(common, ["cat-file", "blob", f.id], { encoding: "buffer", bin: binOf(ctx) }), "early");
+    const staging = path.join(gates, `staging-${local}-${unique()}`);
+    writeSet(ctx, files, staging);
+    await ctx.stop?.("staged");
+    return await installAt(ctx, staging);
+  } finally {
+    lock.release();
+  }
 }
 
 // The command runs only when this file is node's entry point, never when the tests or the

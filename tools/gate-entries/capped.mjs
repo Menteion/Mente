@@ -22,7 +22,7 @@ if (argv[0] === "--mente-only" && argv[1] === "--" && argv.length > 2 && !inMent
   if (r.error) console.error(`mente-gates: ${argv[2]} did not start: ${r.error.message}`);
   process.exit(r.status ?? 1);
 }
-const checked = verifyCopy(GATES);
+const checked = verifyCopy(GATES, { pending: true });
 if (checked.refusal) {
   console.error(refusalWords(GATES, checked));
   process.exit(2);

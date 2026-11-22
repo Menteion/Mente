@@ -11,7 +11,7 @@ import { refusalWords, verifyCopy } from "./verify.mjs";
 
 const GATES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-const checked = verifyCopy(GATES);
+const checked = verifyCopy(GATES, { pending: true });
 if (checked.refusal) {
   console.error(refusalWords(GATES, checked));
   process.exit(1);

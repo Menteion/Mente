@@ -55,8 +55,10 @@ export const STAGING = /^staging-([0-9a-f]{40})-[0-9a-f]+$/;
 /// The commit a copy's directory name stands for: the commit itself, or a staging directory of it.
 export const commitOf = (name) => (COMMIT.test(name) ? name : (STAGING.exec(name)?.[1] ?? null));
 
-/// The stable entries, written from a copy's tools/gate-entries/ into mente-gates/entry/.
-export const ENTRIES = ["verify.mjs", "refresh.mjs", "capped.mjs", "hook.mjs", "hooks/pre-push"];
+/// The stable entries, written from a copy's tools/gate-entries/ into mente-gates/entry/, in this
+/// order: the hook's first, since git runs no hook it cannot find and a push would go through, and
+/// it refuses until the files beside it are written; then what it and the others import.
+export const ENTRIES = ["hooks/pre-push", "verify.mjs", "hook.mjs", "refresh.mjs", "capped.mjs"];
 
 /// Variables removed from every process the refresher starts and every git command of the entries'
 /// checks: git's own, node's (NODE_OPTIONS preloads code), and those that name certificate files.
@@ -256,6 +258,10 @@ export function verifyCopy(gates, options = {}) {
   try {
     commit = fs.readFileSync(path.join(gates, "current"), "utf8").trim();
   } catch {
+    // With `pending`, an install a kill or a refused rename left half done is named, since the
+    // next start's refresh entry finishes it, with no bootstrap: the hook's and the runner's words.
+    const pending = options.pending ? pendingCopy(gates, { bin: options.bin ?? systemGit() }) : null;
+    if (pending) return { refusal: `the install of main's gates at ${pending.commit.slice(0, 12)} was left half done in ${gates}`, command: "refresh", missing: true };
     return { refusal: `no copy of main's gates is installed in ${gates}`, command: "bootstrap", missing: true };
   }
   if (!COMMIT.test(commit)) return { refusal: `${path.join(gates, "current")} names no commit`, command: "bootstrap" };
@@ -344,8 +350,9 @@ export function nothingToRefresh(gates, checked) {
 
 /**
  * The copy an install left in `gates` but not yet current, for the refresh entry to finish it: a
- * directory named by a commit that verifyDir accepts, or a staging directory of a commit whose
- * files are exactly its tree's, the local origin/main's first; null when there is none, or no git.
+ * directory named by a commit that verifyDir accepts, which holds it to origin/main, or a staging
+ * directory of the local origin/main's own commit whose files are exactly its tree's, never a
+ * branch's set a hand run left there; null when there is none, or no git.
  */
 export function pendingCopy(gates, { bin = systemGit() } = {}) {
   if (!bin) return null;
@@ -364,6 +371,7 @@ export function pendingCopy(gates, { bin = systemGit() } = {}) {
       if (!verifyDir(gates, commit, { exempt: true, bin }).refusal) return { dir: path.join(gates, name), commit };
       continue;
     }
+    if (commit !== main) continue;
     try {
       const declared = JSON.parse(git(common, ["cat-file", "blob", `${commit}:tools/gate-set.json`], { bin }));
       const files = filesOf(git(common, ["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...declared.set], { bin }), declared.set);
@@ -403,7 +411,7 @@ export function refusalWords(gates, result) {
       const line = url ? `:\n\n${bootstrapLine(url)}\n` : ", the line of CLAUDE.md's Verification section";
       return `Norman runs the bootstrap, from the main checkout, in his own terminal${line}`;
     },
-    refresh: () => `run ${REFRESH}, which refreshes the copy`,
+    refresh: () => `run ${REFRESH}, whose start refreshes the copy and finishes an install left half done`,
     fetch: () => "fetch first (git fetch origin), then run the command again",
   }[result.command];
   return `mente-gates: ${result.refusal}; ${how()}`;

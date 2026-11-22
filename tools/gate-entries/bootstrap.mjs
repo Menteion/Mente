@@ -6,16 +6,21 @@
 //   node --input-type=module - <commit>
 //
 // It writes the commit's set, each file with the bytes `git cat-file blob` gives and the mode the
-// tree records, into a staging directory of the common git directory's mente-gates/, and starts the
-// staged refresher with no argument. That refresher takes the lock, confirms the commit with the
-// remote itself at the URL its own set declares, checks its whole directory against the commit's
-// tree, and installs; whatever this writes wrong, it refuses. Run from standard input, this imports
-// nothing but node's own modules. It runs in Norman's own terminal, with that terminal's git and
-// environment, a limit the brief names, and starts the refresher without git's and node's variables.
+// tree records, first into a directory of its own outside the common git directory, which no
+// refresh's sweep reaches. With that set's own modules, the commit's, it takes the lock of
+// mente-gates/ before writing anything there, writes the stable entries, the hook's first, so that
+// wherever Norman's lines point, git's hook and cargo's runner refuse with a remedy until the copy
+// is installed and never run nothing; then it stages the set and starts the staged refresher with
+// no argument and the lock handed down. That refresher confirms the commit with the remote itself,
+// at the URL its own set declares, checks its whole directory against the commit's tree, and
+// installs; whatever this writes wrong, it refuses. Run from standard input, this imports nothing but
+// node's own modules and the set it writes. It runs in Norman's own terminal, with that terminal's
+// git and environment, a limit the brief names.
 
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -37,23 +42,58 @@ if (!/^[0-9a-f]{40}$/.test(commit ?? "")) fail(`the remote named no commit (${JS
 const common = git(["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
 if (spawnSync("git", ["--no-replace-objects", "cat-file", "-e", `${commit}^{commit}`]).status !== 0) fail(`main's commit ${commit.slice(0, 12)} is not in this repository: fetch first (git fetch origin), then run the line again`);
 const declared = JSON.parse(git(["cat-file", "blob", `${commit}:tools/gate-set.json`]));
-const staging = path.join(common, "mente-gates", `staging-${commit}-${randomBytes(6).toString("hex")}`);
-fs.mkdirSync(staging, { recursive: true });
+
+// The set, written outside mente-gates/ first.
+const outside = fs.mkdtempSync(path.join(os.tmpdir(), "mente-gates-bootstrap-"));
+const modes = new Map();
 for (const entry of git(["ls-tree", "-r", "-z", "--full-tree", commit, "--", ...declared.set]).split("\0").filter(Boolean)) {
   const m = /^(100644|100755) blob ([0-9a-f]{40})\t(.+)$/s.exec(entry);
   if (!m) fail(`the set of ${commit.slice(0, 12)} holds an entry that is not a file of mode 100644 or 100755: ${entry}`);
   const [, mode, id, rel] = m;
   if (rel.split("/").some((part) => part === "" || part === "." || part === "..")) fail(`the set names a path outside it: ${rel}`);
-  const at = path.join(staging, ...rel.split("/"));
+  const at = path.join(outside, ...rel.split("/"));
   fs.mkdirSync(path.dirname(at), { recursive: true });
   const bits = mode === "100755" ? 0o755 : 0o644;
   fs.writeFileSync(at, git(["cat-file", "blob", id], "buffer"), { mode: bits });
   if (process.platform !== "win32") fs.chmodSync(at, bits);
+  modes.set(rel, bits);
 }
-// The staged refresher runs its command only as node's entry point, which a node outside the
-// staged set's NODE_ENGINES cannot tell it.
-const { NODE_ENGINES, nodeMeetsFloor } = await import(pathToFileURL(path.join(staging, "tools", "gate-entries", "verify.mjs")).href);
+
+// The set's own modules: node's floor, the stable entries, the lock and the refresh's time limit.
+const load = (rel) => import(pathToFileURL(path.join(outside, ...rel.split("/"))).href);
+const { ENTRIES, NODE_ENGINES, gateEnv, nodeMeetsFloor } = await load("tools/gate-entries/verify.mjs");
 if (!nodeMeetsFloor(process.versions.node)) fail(`the refresher needs node ${NODE_ENGINES}, not ${process.versions.node}`);
-const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GIT_|NODE_)/i.test(key)));
-const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { stdio: "inherit", env });
+const { handDown, lockHolder, takeLock } = await load("tools/gate-processes.mjs");
+const { REFRESH_MS } = await load("tools/gates.mjs");
+
+// The lock, before anything of mente-gates/ is written, waited for at most a refresh's time limit,
+// by which any holder has been killed; a wait is said, since Norman runs this in his terminal.
+const gates = path.join(common, "mente-gates");
+fs.mkdirSync(gates, { recursive: true });
+const lockFile = path.join(gates, "lock");
+let lock = await takeLock(lockFile, { waitMs: 0, label: "the bootstrap" });
+if (!lock) {
+  console.error(`mente-gates bootstrap: a refresh holds the lock (${lockHolder(lockFile)}), so the bootstrap waits for it, at most ${REFRESH_MS / 1000} s, before it writes anything`);
+  lock = await takeLock(lockFile, { waitMs: REFRESH_MS, label: "the bootstrap" });
+}
+if (!lock) fail(`a refresh holds the lock (${lockHolder(lockFile)}), so the bootstrap writes nothing; run the line again once it ends`);
+
+// The stable entries, the hook's first, each by a new file renamed over the old.
+for (const name of ENTRIES) {
+  const rel = `tools/gate-entries/${name}`;
+  const to = path.join(gates, "entry", ...name.split("/"));
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  const tmp = `${to}.tmp-${randomBytes(6).toString("hex")}`;
+  fs.copyFileSync(path.join(outside, ...rel.split("/")), tmp);
+  if (process.platform !== "win32") fs.chmodSync(tmp, modes.get(rel) ?? 0o644);
+  fs.renameSync(tmp, to);
+}
+
+// The set, staged under the lock, and its refresher, which installs it, started with the lock.
+const staging = path.join(gates, `staging-${commit}-${randomBytes(6).toString("hex")}`);
+fs.cpSync(outside, staging, { recursive: true });
+fs.rmSync(outside, { recursive: true, force: true });
+const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { ...handDown(lock, ["inherit", "inherit", "inherit"], gateEnv()), timeout: REFRESH_MS, windowsHide: true });
+lock.release();
+if (r.error) fail(`the staged refresher did not finish: ${r.error.message}`);
 process.exit(r.status ?? 1);

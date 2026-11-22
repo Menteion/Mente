@@ -88,7 +88,7 @@ No tool fetches. Nothing is installed from a commit the remote has not confirmed
 - `mente-gates/<commit>/manifest`: each file's path, mode and blob id, as that commit's tree gives them;
 - `mente-gates/current`: the commit in use, switched atomically, a new file renamed over the old;
 - `mente-gates/staging-<commit>-<unique>/`: a set being installed, named by the commit it holds, which no entry runs;
-- `mente-gates/entry/`: the stable entries `capped.mjs` and `hooks/pre-push`, and the refresher's entry `refresh.mjs`, written from the installed commit's `tools/gate-entries/`;
+- `mente-gates/entry/`: the stable entries `capped.mjs` and `hooks/pre-push`, and the refresher's entry `refresh.mjs`, written from the installed commit's `tools/gate-entries/`, the hook's first. git runs no hook it cannot find, so a push would go through; the hook's sh entry, once written, refuses a push, naming the bootstrap, until the files beside it are written;
 - `mente-gates/lock`: the lock every refresher takes before it writes.
 
 **What each entry checks.** Before importing or running anything:
@@ -128,11 +128,12 @@ The command admits only https however it is started, and a test holds that no ar
 
 **The bootstrap.** With nothing installed, or with a bad current copy, no copy holds a trusted URL, so the install is Norman's one command.
 - The command is written in CLAUDE.md's Verification section, Norman's file, with the URL in it literally. The tools print the same line. A test holds the printed line equal to CLAUDE.md's, and its URL equal to the URL in `gate-set.json`.
-- The command runs only `git ls-remote` at that URL. It writes the set of the commit the remote names, read from that commit's objects with `--no-replace-objects`, into a staging directory, and starts the staged refresher with no argument.
-- That refresher takes the lock and confirms the commit itself, at the URL its own `gate-set.json` declares, which must be https and which the test on main holds equal to CLAUDE.md's. It then installs as above, moving a bad `<commit>/` aside.
+- The command runs only `git ls-remote` at that URL. It writes the set of the commit the remote names, read from that commit's objects with `--no-replace-objects`, into a directory of its own outside `mente-gates/`, which no sweep reaches. With that set's own modules it takes the lock, waiting at most the refresh's time limit, then writes the stable entries, the hook's first, so that wherever Norman's lines point, git's hook and cargo's runner refuse with a remedy until the copy is installed and never run nothing. It then stages the set and starts the staged refresher with no argument and the lock handed down.
+- That refresher confirms the commit itself, at the URL its own `gate-set.json` declares, which must be https and which the test on main holds equal to CLAUDE.md's. It then installs as above, moving a bad `<commit>/` aside.
 
 **The rollout.** This round lands in two pull requests, so that a bootstrap that fails after the merge locks no session out.
-- The first lands everything but CLAUDE.md's change. The tools take their mode from what Norman's lines name, never from what `.git/mente-gates` holds, so that a copy any session installs early, or a kill leaves half installed, changes nothing until he points them at it. While `core.hooksPath` names today's working-tree hooks, quick, cargo and mn print the bootstrap line and Norman's two lines as a loud warning, refresh a copy if one is installed, and keep today's working-tree gates, which is exactly what main does before this round. Once it names the stable entry, they require the copy. Before Norman's lines change, every open branch merges main, since a branch from before this round asks for today's lines.
+- The first lands everything but CLAUDE.md's change. The tools take their mode from what Norman's lines name, never from what `.git/mente-gates` holds, so that a copy any session installs early, or a kill leaves half installed, changes nothing until he points them at it. While `core.hooksPath` names today's working-tree hooks, quick, cargo and mn print the bootstrap line and Norman's two lines as a loud warning, refresh a copy if one is installed, and keep today's working-tree gates, which is exactly what main does before this round. Once it names the stable entry, they require the copy. While the hooks are today's, cargo's runner may name either runner, today's or the stable entry, since his lines change one at a time; a runner line naming an entry no install has written is refused, naming the bootstrap, never left to node's own error. Before Norman's lines change, every open branch merges main, since a branch from before this round asks for today's lines.
+- The order of Norman's steps, which the tools' warning states: the bootstrap, and only once it has succeeded, `core.hooksPath`, then cargo's runner.
 - Norman then runs the bootstrap and writes his two lines, and a session builds, tests and pushes through the copy.
 - The second pull request, triggered by that, removes the fallback, so that no copy means refuse, and lands CLAUDE.md's change, so that CLAUDE.md never describes a state that is not live. The invariants below hold from it on.
 
@@ -140,7 +141,7 @@ The command admits only https however it is started, and a test holds that no ar
 - **The lock.** It is an open handle that the operating system releases when its holder ends, however it ends, so a kill, Ctrl-C or a reset leaves it free.
   - On Windows it is a lock file opened with no sharing, as local-limits' slots are (`UV_FS_O_EXLOCK`). On Linux, where the gates' tests run in CI, it is a socket in the abstract namespace named from the common git directory. Both are defined once, in `local-limits.mjs`.
   - The lock spans both refreshers. The old refresher takes it before it readies the new set, and hands its open handle to the new set's refresher, so it stays held, with no gap, until both have ended.
-  - The bootstrap's staged refresher inherits no handle, so it takes the lock itself.
+  - The bootstrap takes the lock before it writes anything of `mente-gates/`, and hands it to its staged refresher. A staged set started with no handle, which the refresh entry finishes after a kill, takes the lock itself, waiting at most a start's short bound.
 - **The time limit.** A refresh runs under a time limit with a tree kill, as `ls-remote` does.
   - `tools/gates.mjs` does its work in a child process of its own, started under the tree runner with fixed code and no argument, and that child holds the lock.
   - The new set's refresher is a descendant of that child, so the time covers both refreshers.
@@ -148,6 +149,7 @@ The command admits only https however it is started, and a test holds that no ar
 - **Waiting.** A writer without the lock would break the recovery from a kill, so whoever waits writes nothing.
   - A start of quick, cargo or mn that finds the lock held waits at most a short bound. It then writes nothing, runs the current verified copy, and says which process has held the lock, and since when.
   - The bootstrap waits at most the refresh's time limit, by which any holder has been killed. If that runs out, it gives up, writes nothing, and names the process that holds the lock.
+  - A staged set the refresh entry finishes waits only a start's bound, as a refresh does, so a start is held no longer for it.
 - **How the times relate.** These hold, and a test reads the constants:
   - the refresh's time limit exceeds the time of both `ls-remote` calls, the confirming refresher's and the new set's, plus the time to write a set, so a slow but legitimate refresh is not killed at every start;
   - a waiter's bound is shorter than the refresh's time limit.
@@ -258,6 +260,9 @@ They are the branch's own tools, which its own changes test. What judges every b
   - with the local `origin/main` naming `current`, a start asks no remote;
   - with it naming another commit, the first start waits out the time, and the next ones within ten minutes do not;
   - all run the last verified copy and print since when, from the reflog of `refs/remotes/origin/main`.
+- [ ] The rollout's transition matrix is one table test, which fails on a missing or doubled cell. It takes each state a first install can be left in: nothing, each entry written in turn, a set half staged, staged, renamed, and current. Under each of Norman's two lines, old or new, a start of quick, cargo or mn, a test binary through the runner line, and a raw push each give the outcome and the remedy the table states. One cell stays unguarded, `core.hooksPath` naming the entry before any bootstrap, since git runs no hook it cannot find. The order Norman follows holds it, and the tools' warning states that order.
+- [ ] The bootstrap writes nothing under `mente-gates/` before it holds the lock, writes the entries, the hook's first, before it stages the set, and hands the lock to its staged refresher, planted. While its files are not all written, the hook's entry refuses a push, naming the bootstrap, planted.
+- [ ] An install left half done is named by the hook's and the runner's entries as a start of quick, cargo or mn finishes it. Only a staging directory of the local `origin/main`'s own commit counts as one. A failure finishing it with no copy current is not remembered, so the next start tries again. Each is planted.
 - [ ] New tests go into `tools/quick.test.mjs` and `tools/push.test.mjs`, which CI's Documentation job runs. The quick map covers every new file, and each new gate file is in `GATE_FILES` and CODEOWNERS.
 - [ ] CLAUDE.md's line that the main checkout stays on main is removed, and its Verification section updated with the bootstrap line and the limits, with Norman's approval.
 - [ ] `node tools/quick.mjs` passes before the push.
