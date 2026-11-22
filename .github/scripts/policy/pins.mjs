@@ -36,7 +36,7 @@ export function jobDigest(doc, job) {
 export const PINNED_FILES = new Map([
   // The policy's list of its own files: a module dropped from it, or the total of checks lowered,
   // changes this digest too.
-  [".github/scripts/policy/modules.json", "d9273d06591457eb3a1bc6c2461aa3f4df6d0556f34df58d2a259fff17d9bec7"],
+  [".github/scripts/policy/modules.json", "86e134705dc41546d44b8583f47eab7caa3b538952ee4fe9e78ebbc8ddd2c63f"],
   [".github/scripts/limits.sh", "40747e4a7344895ce42dd902adb28dd669809d4dd6821d3c1e01921552669ed0"],
   [".github/scripts/memory-guard.sh", "c3c629010f58d39682fa06353305181cf7d1064d2b07abefd6885033045630d1"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
