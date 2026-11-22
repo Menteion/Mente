@@ -1,7 +1,7 @@
 # The nightly and dispatched runs of the generated programs and the conformance suite on the three
 # execution paths: the comparison of generated.yml over a new range of seeds each night, or over the
 # range a dispatch names. Its jobs are named apart from generated.yml's required checks, so that no
-# run with chosen inputs can report a check of their names (.github/scripts/policy.test.mjs).
+# run with chosen inputs can report a check of their names (.github/scripts/policy/).
 # Every run prints its range, and a failure names its seed, which replays with
 #   MENTE_GEN_FIRST_SEED=<seed> MENTE_GEN_PROGRAMS=1 cargo test --release -p mente-cli -- --ignored --nocapture generated_programs_run_alike
 # These runs never belong on a laptop.
@@ -135,7 +135,7 @@ jobs:
     # it or comments on it, and one that passes closes it (.github/scripts/nightly-alarm.mjs). A run
     # by hand, with inputs that can narrow it, reports nothing. It runs whatever the jobs it needs
     # ended in, a timeout or a cancellation included, and its token may write issues and read the
-    # run's jobs, nothing else; the workflow policy (.github/scripts/policy.test.mjs) pins this job
+    # run's jobs, nothing else; the workflow policy (.github/scripts/policy/) pins this job
     # and the script.
     name: Nightly alarm (Generated programs)
     needs: [paths]

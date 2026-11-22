@@ -49,7 +49,7 @@ This file is the switchboard, not the rulebook.
      <!-- @assert-count target="compiler/mente-cli/tests/gates.rs" symbol="fn test_the_lock_holds_only_approved_crates" min="1" reason="The lock holds only approved crates" -->
 3. **English-only repository text**:
    - Code, comments, documentation, examples, commit messages and pull request text are written in English, even when the conversation with Norman is in Chinese.
-     <!-- @assert-count target=".github/scripts/policy.test.mjs" symbol="the Commits check refuses unfinished subjects, CJK text and a changed base" min="1" reason="The Commits check refuses CJK text in commit messages and pull request text" -->
+     <!-- @assert-count target=".github/scripts/policy/commits.test.mjs" symbol="the Commits check refuses unfinished subjects, CJK text and a changed base" min="1" reason="The Commits check refuses CJK text in commit messages and pull request text" -->
    - `test_repository_text_is_english` in `compiler/mente-cli` fails on any CJK character in a file of the working tree (`.git`, `target` and `node_modules` aside). Commit messages and pull request text are outside its reach, and the Commits check refuses CJK text in them. A future fixture that must hold non-English text (a lexer test of Unicode string literals, say) goes in a directory the test is changed to skip, named in the test.
      <!-- @assert-count target="compiler/mente-cli/tests/gates.rs" symbol="fn test_repository_text_is_english" min="1" reason="No CJK character in a file of the working tree" -->
 4. **The design register and the documentation tools**:
@@ -73,7 +73,7 @@ This file is the switchboard, not the rulebook.
    - Define each fact about the language once, and read it everywhere. Test every special case the code makes. Held by review only.
    - A fix comes with a test seen to fail without it. Mutants shows each changed line tested; that the test fails without the fix is held by review only.
      <!-- @assert-count target=".github/required-checks.txt" symbol="Mutants in the diff" min="1" reason="Mutation testing of the lines a change touches is a required check" -->
-     <!-- @assert-count target=".github/scripts/policy.test.mjs" symbol="the Mutants floor counts what the diff changes, as cargo-mutants marks it" min="1" reason="The Mutants floor counts what the diff changes" -->
+     <!-- @assert-count target=".github/scripts/policy/mutation.test.mjs" symbol="the Mutants floor counts what the diff changes, as cargo-mutants marks it" min="1" reason="The Mutants floor counts what the diff changes" -->
    - Every problem found, a bug, a slow path or a slip in the process, is weighed for a guard against its whole class, strongest first: a required check of `main`, then a test or a lint, then a written rule. Memory alone is never the guard. The weighing is held by review only.
    - A bug that escaped the author's own checks (found by a review, by CI on a later change or by a user) comes with the change to the instrument that should have caught it, and the pull request names that instrument and what it lacked ([`guard-per-problem`](docs/design-review.md#guard-per-problem)). That every escape is recorded, and that its pull request names the instrument, is held by review only.
      <!-- @assert-count target="compiler/mente-cli/tests/escapes.rs" symbol="fn test_every_escape_has_a_key_an_area_and_a_guard" min="1" reason="Each recorded escape names the instrument that missed it and its guard" -->
@@ -81,7 +81,7 @@ This file is the switchboard, not the rulebook.
    - Instrument work for a feature (generator rules, coverage tables, oracles) is briefed to a session other than the feature's author where it can be, and a reviewer's reproduction becomes a conformance program and a rule of the program generator in the fix's pull request. Held by review only.
    - New syntax or a new rule extends the program generator in the same pull request; `test_generated_programs_reach_every_construct_of_the_grammar` fails on syntax no generated program reaches. A checkpoint closes only when the instruments scheduled for it run in CI and pass.
      <!-- @assert-count target="compiler/mente-cli/src/mir_run/coverage.rs" symbol="fn test_generated_programs_reach_every_construct_of_the_grammar" min="1" reason="Generated programs reach every construct of the grammar" -->
-     <!-- @assert-count target=".github/scripts/policy.test.mjs" symbol="every instrument scheduled for a finished milestone is a required check" min="1" reason="A finished milestone's instruments are required checks" -->
+     <!-- @assert-count target=".github/scripts/policy/required-checks.test.mjs" symbol="every instrument scheduled for a finished milestone is a required check" min="1" reason="A finished milestone's instruments are required checks" -->
 
 ---
 
