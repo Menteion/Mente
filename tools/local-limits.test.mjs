@@ -48,6 +48,23 @@ const alive = (pid) => {
   }
 };
 
+// Each test file of the tools that can take a build slot, by starting a process or through this
+// module, takes slots of its own before its first case, which every process it starts inherits:
+// the machine's two may both be held, one by the quick run running these tests, and a case held
+// there waits past its time. It struck the runner's proof on 2026-11-22, and quick's own-checkout
+// case on stack-budget's first quick.
+test("every test file of the tools that can take a build slot takes slots of its own before its first case", () => {
+  const files = fs.readdirSync(HERE).filter((name) => name.endsWith(".test.mjs"));
+  assert.ok(files.includes("quick.test.mjs") && files.includes("push.test.mjs"));
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(HERE, name), "utf8");
+    if (!/from "node:child_process"|from "\.\/local-limits\.mjs"/.test(text)) continue;
+    const own = text.search(/^process\.env\.MENTE_SLOTS_DIR = fs\.mkdtempSync\(/m);
+    const first = text.search(/^test\(/m);
+    assert.ok(own >= 0 && (first < 0 || own < first), `${name} takes no build slots of its own before its first case`);
+  }
+});
+
 test("a process that allocates without end dies alone at its limit, which the wrapper names", { skip }, () => {
   // The loop stops itself at 2 GB, so that a cap that holds nothing fails this proof without
   // taking the machine down (the first design's children were born outside the job: the desktop

@@ -21,6 +21,10 @@ import { LOCK_FD_VARIABLE, TREE_RUNNER, lockHolder, takeLock } from "./gate-proc
 import { GET_URL_MS, REFRESH_MS, REMEMBER_MS, REMOTE_MS, RETRY_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
+// Slots of their own for every case, which each process they start inherits, so that no case waits
+// for one of the machine's two (local-limits.test.mjs holds every test file of the tools to it).
+process.env.MENTE_SLOTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "push-slots-"));
+
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
 const GUARD = fileURLToPath(new URL("./push-guard.mjs", import.meta.url));
 
