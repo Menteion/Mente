@@ -6727,10 +6727,13 @@ const RELATED: usize = 30;
 const MAX_FULL_ARMS: usize = 16;
 
 /// The most expressions and statements a generated function holds, of every attempt the
-/// generator writes. Of the 11670 functions of seeds 0 to 2999 the largest holds 17414; while
-/// the arms of a match of 256 arms could hold another such match (`MAX_FULL_ARMS`), one held
-/// 201880, multiplied 256 times a level. Past the bound, a function's text multiplies again.
-pub const MAX_FUNCTION_NODES: usize = 50_000;
+/// generator writes. Over the 42,000 programs of seeds 0 to 15999, the range of 2026-11-22 and
+/// their checked sets, measured on runners, the largest function holds 5,815; the bound is four
+/// times that, rounded up to a thousand, room for the tail the nightlies meet. A match of 256 arms
+/// written full, the shape it guards against, gives functions of 74,654 to 195,554 over seeds 0
+/// to 299, and gave 201,880 nested and 57,532 unnested before its arms became leaves
+/// ([`MAX_FULL_ARMS`]). Past the bound, a function's text multiplies again.
+pub const MAX_FUNCTION_NODES: usize = 24_000;
 
 /// Each function of `program` that holds more expressions and statements than `most`, as a
 /// problem, and the most any of them holds, with which function that is.
