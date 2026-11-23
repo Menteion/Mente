@@ -26,6 +26,8 @@ Cargo.toml
 Cargo.lock
 rust-toolchain.toml
 .config/nextest.toml
+# The mutation run's settings: what it leaves out, which the floor reads from the base.
+.cargo/mutants.toml
 # The nextest every mutant runs, and the limits it runs under.
 .github/scripts/install-nextest.sh
 .github/scripts/limits.sh
