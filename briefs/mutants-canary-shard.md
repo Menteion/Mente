@@ -1,9 +1,9 @@
 ---
 id: mutants-canary-shard
 status: deferred
-trigger: when plan-outside-checkout's pull request (219) has merged
+trigger: when clean-tree-around-every-test-run's round has merged, which changes mutants.yml, the run tests and the gate commands before it
 type: chore
-affectedFiles: [.github/workflows/mutants.yml, .github/scripts/mutants-floor.mjs, .github/scripts/lib/mutants-floor.mjs, .github/scripts/policy/mutation.test.mjs, .github/scripts/policy-run.test.mjs, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .github/scripts/policy/modules.json, briefs/mutants-canary-shard.md, briefs/archive/mutants-canary-shard.md]
+affectedFiles: [.github/workflows/mutants.yml, .github/instrument-paths.txt, .github/scripts/mutants-floor.mjs, .github/scripts/lib/mutants-floor.mjs, .github/scripts/policy/mutation.test.mjs, .github/scripts/policy-run.test.mjs, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .github/scripts/policy/modules.json, briefs/mutants-canary-shard.md, briefs/archive/mutants-canary-shard.md]
 protectedFiles: [spec/**, CLAUDE.md, .cargo/mutants.toml]
 ---
 
@@ -17,7 +17,7 @@ A pull request that changes only the Mutants workflow, or the scripts its shards
 
 The run tests run the shards' steps with stand-ins for cargo, so they never run the baseline or a mutant. Only a real shard does.
 
-When this round is done, the plan deals a canary shard whenever the diff touches what a shard runs: `.github/workflows/mutants.yml`, `.github/scripts/mutants-floor.mjs`, `.github/scripts/lib/mutants-floor.mjs`, `.github/scripts/test-sandbox.sh`, `.github/scripts/test-sandbox-env.sh`, `.github/scripts/limits.sh`, `.github/scripts/tools.sh`, `.github/scripts/install-nextest.sh`, `.config/nextest.toml` and `.cargo/mutants.toml`, one list the policy holds. The canary is a shard like any other, dealt a small fixed set of real mutants of a function the plan names, so that its steps run end to end: the plan's download, cargo-mutants' install by its digest, the listing, the baseline of the whole workspace, the mutants, and the checks of their outcomes. The aggregate requires it as it requires every shard.
+When this round is done, the plan deals a canary shard whenever the Mutants watch matches the diff and the diff's own mutants deal no shard. **The canary's list and the watch's are one list, read from one place:** the section `[mutants.yml]` of `.github/instrument-paths.txt`, which names what a shard runs (the workflow, the floor, the sandbox's scripts and `test-sandbox.rs`, the limits and `memory-guard.sh`, the tools' record, `build-time-code.mjs` and its library, nextest's settings, `rust-toolchain.toml`, `.cargo/mutants.toml` since pull request 219) and the compiler's sources. So a change that runs the plan always runs a real shard: one to the shards' machinery, and one to the compiler that holds no mutant, as #217's tests did (the review of 62f8265). The canary is a shard like any other, dealt a small fixed set of real mutants of a function the plan names, so that its steps run end to end: the plan's download, cargo-mutants' install by its digest, the listing, the baseline of the whole workspace, the mutants, and the checks of their outcomes. The aggregate requires it as it requires every shard.
 
 ## Negative Scope
 
@@ -26,8 +26,8 @@ When this round is done, the plan deals a canary shard whenever the diff touches
 
 ## Invariants
 
-- [ ] A diff that touches any file of the list deals the canary shard, and one that touches none deals none beside the diff's own, each planted.
+- [ ] A diff the watch matches whose own mutants deal no shard deals the canary; one whose mutants deal shards, and one the watch does not match, deal none beside the diff's own; each planted.
 - [ ] The canary runs the same steps as every shard, and the aggregate fails when it fails.
-- [ ] The list is defined once, and the workflow policy refuses a file the shards run that the list leaves out.
+- [ ] The plan reads the canary's list from the watch's section of `.github/instrument-paths.txt`, written nowhere else, and the workflow policy refuses a file the shards run that the section leaves out.
 - [ ] The canary's mutants are caught by the workspace's tests, so a canary that passes has run them.
 - [ ] The `.github` changes go to Norman.

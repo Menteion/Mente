@@ -1,7 +1,7 @@
 ---
 id: records-every-file
 status: deferred
-trigger: when pressure-report, which also changes records.rs, test-isolation's rewrite of mutants.yml (#202), the quick checks' report of their tree (#203) and gate-tools-from-main, which shares files with this round, have merged
+trigger: when pressure-report, which also changes records.rs, test-isolation's rewrite of mutants.yml (#202), the quick checks' report of their tree (#203), gate-tools-from-main, and clean-tree-around-every-test-run then mutants-canary-shard, which share files with this round, have merged
 type: chore
 awaits: [docs/design-review.md#records-one-per-file]
 affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, tools/quick.mjs, tools/quick.test.mjs, tools/cargo.mjs, tools/local-limits.mjs, tools/quick-checks.json, .github/scripts/policy/local-tools.test.mjs, .github/workflows/ci.yml, .github/workflows/mutants.yml, .github/workflows/mutants-full.yml, .github/gate-commands.txt, .github/scripts/policy/pins.mjs, .gitignore, CLAUDE.md, docs/design-review.md, docs/escapes/undeclared-record-directory.md, docs/escapes/undeclared-record-other-markup.md, briefs/goldens-one-per-program.md, briefs/records-every-file.md, briefs/archive/records-every-file.md]
@@ -29,6 +29,8 @@ Over that list:
 Code, fixtures of code, benchmark runs and configuration in other formats stay out.
 
 Since any file can break the closure, a quick check for every file runs `cargo test -p mente-cli --test records --test escapes`, and a check of the workflow policy (`.github/scripts/policy/local-tools.test.mjs`) holds that entry, as it holds the gates' and the policy's own. That also closes a gap #175 leaves: there, `test_every_markdown_file_is_declared_once` runs in no quick check, so a change of documents alone that adds an undeclared `.md` passes quick and fails only on CI. That repeats the class of the recorded escape `quick-map-skipped-test-ci`, which the change names.
+
+**Re-weigh the CI list step first** (the Manager, 2026-11-23): `clean-tree-around-every-test-run`, which runs before this round, checks before and after every test run that the tree is the commit's, so in CI the disk then holds no tool's output when the tests read it, which removes the cause that made #175's walk of the disk fail. This round decides whether its list step is still needed in CI, or whether the walk of the disk, with the clean tree's check beside it, holds there; off CI, the list from the sanctioned routes still tells a record from a scratch file.
 
 ## Negative Scope
 

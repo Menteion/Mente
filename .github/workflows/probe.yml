@@ -110,7 +110,7 @@ jobs:
           # Outside the checkout, as every artifact a workflow downloads.
           path: ${{ runner.temp }}/probe-out
       - name: mn check reads every program
-        run: node benchmark/harness/probe.ts --check "$RUNNER_TEMP/probe-out" --mn target/release/mn
+        run: node benchmark/harness/probe.ts --check "$RUNNER_TEMP/probe-out/" --mn target/release/mn
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

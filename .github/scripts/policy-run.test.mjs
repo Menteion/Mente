@@ -1356,7 +1356,7 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
   const download = job.steps.find((s) => /download-artifact@/i.test(String(s.uses ?? "")) && s.with?.name === "mutants-plan");
   const RUNNER = "${{ runner.temp }}/";
   assert.ok(String(download?.with?.path).startsWith(RUNNER), "mutants.yml's shard downloads the plan elsewhere than under the runner's temporary directory");
-  const planUnder = String(download.with.path).slice(RUNNER.length);
+  const planUnder = String(download.with.path).slice(RUNNER.length).replace(/\/$/, "");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mutants-shard-"));
   try {
     const put = (file, text) => {

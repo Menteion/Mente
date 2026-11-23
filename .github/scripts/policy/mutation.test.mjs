@@ -671,7 +671,10 @@ check("the plan deals every mutant of the run to one shard, as many shards as th
   // The shards read the plan where their download puts it: one path, read from the download step,
   // not a second literal beside it (the review of 996aea6).
   assert.ok(String(download?.with?.path).startsWith("${{ runner.temp }}/"), "the shards download the plan elsewhere than under the runner's temporary directory");
-  const planRead = String(download.with.path).replace("${{ runner.temp }}", "$RUNNER_TEMP");
+  // One slash after it, which the download allows, is no part of the place the reads name.
+  const readOf = (where) => String(where).replace(/\/$/, "").replace("${{ runner.temp }}", "$RUNNER_TEMP");
+  assert.equal(readOf("${{ runner.temp }}/mutants-plan/"), readOf("${{ runner.temp }}/mutants-plan"), "a slash after the download's path changes the reads it requires");
+  const planRead = readOf(download.with.path);
   // Every run of cargo-mutants, the full run's too, is the build of the one commit the policy holds
   // (CARGO_MUTANTS_REV in build-and-toolchain.test.mjs), with its own lock.
   const installs = workflows().flatMap(({ file, doc: d }) => Object.values(d.jobs ?? {}).flatMap((j) => steps(j)).flatMap((s) => String(s.run ?? "").split("\n").filter((l) => /\bcargo\s+install\b[^\n]*\bmutants\b/.test(l)).map((l) => [file, l.trim()])));
