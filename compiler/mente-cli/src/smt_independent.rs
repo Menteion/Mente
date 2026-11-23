@@ -3078,7 +3078,10 @@ mod tests {
         let module = module_of(&checked);
         for name in ["huge", "call"] {
             let enc = mente_smt::encode(&module, checked.index(name).unwrap());
-            assert!(!enc.overflowed.is_empty(), "{name} lists no place past the budget");
+            assert!(
+                !enc.overflowed.is_empty(),
+                "{name} lists no place past the budget"
+            );
         }
         let runs = agreement(src, &[]);
         assert!(runs.wrong.is_empty(), "{:#?}", runs.wrong);
