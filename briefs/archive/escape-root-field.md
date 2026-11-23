@@ -4,14 +4,14 @@ status: archived
 trigger: when root-cause-first's pull request has merged
 type: chore
 awaits: [docs/design-review.md#root-cause-first]
-affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/src/escapes.rs, compiler/mente-cli/tests/escapes.rs, compiler/mente-cli/tests/evidence.rs, compiler/mente-cli/src/front-matter/**, docs/escapes.md, docs/escapes/**, docs/design-review.md, briefs/escape-root-field.md, briefs/archive/escape-root-field.md]
+affectedFiles: [compiler/mente-cli/src/records.rs, compiler/mente-cli/src/escapes.rs, compiler/mente-cli/tests/escapes.rs, compiler/mente-cli/tests/evidence.rs, compiler/mente-cli/src/front-matter/**, docs/escapes.md, docs/escapes/**, docs/design-review.md, compiler/mente-cli/src/main.rs, briefs/records-every-file.md, briefs/wildcard-arms-denied-in-every-walker.md, briefs/escape-root-field.md, briefs/archive/escape-root-field.md]
 protectedFiles: [spec/**, CLAUDE.md, .github/**]
-integrity: sha256-a004e9670a9af37f189601d8435ed374714a74d0aa1364d6fd0d3f0895ce08bd
+integrity: sha256-aed147a73e43714f4445a334404df36617ae3f112416e3a904da798c9030f988
 ---
 
 <!-- spec-brief:banner -->
-> **Archived 2026-11-22.**
-> Recorded at commit `badf65d`.
+> **Archived 2026-11-23.**
+> Recorded at commit `2e8e59d`.
 > Relative links were rewritten to resolve from `briefs/archive/` (1); no other word changed.
 > The body below describes the tree before execution and is not maintained.
 <!-- /spec-brief:banner -->
@@ -37,6 +37,6 @@ When this round is done, every record's front matter holds a sixth field, `root`
 
 - [x] `front_matter` in `compiler/mente-cli/src/records.rs` reads six fields, `root` last, and the front-matter cases in `compiler/mente-cli/src/front-matter/` hold the field's form.
 - [x] `test_every_escape_has_a_key_an_area_and_a_guard` fails on a record with no `root`, on one with `root` out of its place, and on one with any value but `removed` or `held`, each planted.
-- [x] Every record of `docs/escapes/` has its `root`, and the pull request lists each with the line of its fix's pull request that the value rests on.
+- [x] Every record of `docs/escapes/` has its `root`, and the pull request listed the line each value rests on: its fix's own declaration where that pull request carries one, and otherwise, for the fixes that predate the declaration form, most of the `held` records, the record's own guard.
 - [x] `docs/escapes.md` describes the field beside the other five.
 - [x] `mn escapes` prints the count of each value, and `mn escapes --check` checks the field as the test does.
