@@ -135,8 +135,8 @@ function fallbackWords(gates, installed) {
  * and the hooks name entries a first install writes. Where Norman's lines name the copy, returns
  * "copy" when a verified copy is in place, and false when none is, having said the one command that
  * clears it. Where they name today's working-tree gates, it still refreshes a copy if one is
- * installed, says loudly what is left to do, and returns "fallback": the tools then keep today's
- * gates (FALLBACK, until the round's second pull request).
+ * current, never finishing an install left half done, says loudly what is left to do, and returns
+ * "fallback": the tools then keep today's gates (FALLBACK, until the round's second pull request).
  */
 export function refreshGates({ cwd = process.cwd(), say = (line) => console.error(line) } = {}) {
   let gates;
@@ -147,21 +147,26 @@ export function refreshGates({ cwd = process.cwd(), say = (line) => console.erro
     return false;
   }
   const entry = path.join(gates, "entry", "refresh.mjs");
-  const installed = fs.existsSync(entry);
+  // A copy is installed once `current` names one: the entries alone, which a bootstrap writes
+  // before any copy is confirmed, are not one.
+  const installed = fs.existsSync(path.join(gates, "current"));
   const refreshed = () => {
     const r = spawnSync(process.execPath, [entry], { stdio: "inherit", env: gateEnv(), cwd, windowsHide: true });
     if (r.error) say(`local-limits: the refresh entry did not start: ${r.error.message}`);
     return !r.error && r.status === 0;
   };
   if (namesCopy(cwd, gates)) {
-    if (!installed) {
-      say(`local-limits: core.hooksPath names the gates' stable hook entry, but no copy of main's gates is installed in ${gates}, so nothing here runs until Norman, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n`);
+    // The refresh entry also finishes an install a kill left half done.
+    if (!fs.existsSync(entry)) {
+      say(`local-limits: core.hooksPath names the gates' stable hook entry, but ${installed ? `the refresh entry ${entry} is missing` : `no copy of main's gates is installed in ${gates}`}, so nothing here runs until Norman, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n`);
       return false;
     }
     return refreshed() ? "copy" : false;
   }
   say(fallbackWords(gates, installed));
-  if (installed && !refreshed()) say(`local-limits: the copy of main's gates in ${gates} was not refreshed, which changes nothing until Norman's lines name it`);
+  // FALLBACK: only a current copy is refreshed. An install left half done waits for the copy mode or
+  // the bootstrap, so that no start pays for a copy its tools do not run.
+  if (installed && fs.existsSync(entry) && !refreshed()) say(`local-limits: the copy of main's gates in ${gates} was not refreshed, which changes nothing until Norman's lines name it`);
   return "fallback";
 }
 

@@ -5,15 +5,19 @@
 //
 //   node --input-type=module - <commit>
 //
+// It refuses a commit the local origin/main does not name, before writing anything: fetch first.
 // It writes the commit's set, each file with the bytes `git cat-file blob` gives and the mode the
 // tree records, first into a directory of its own outside the common git directory, which no
 // refresh's sweep reaches. With that set's own modules, the commit's, it takes the lock of
-// mente-gates/ before writing anything there, writes the stable entries, the hook's first, so that
-// wherever Norman's lines point, git's hook and cargo's runner refuse with a remedy until the copy
-// is installed and never run nothing; then it stages the set and starts the staged refresher with
-// no argument and the lock handed down. That refresher confirms the commit with the remote itself,
-// at the URL its own set declares, checks its whole directory against the commit's tree, and
-// installs; whatever this writes wrong, it refuses. Run from standard input, this imports nothing but
+// mente-gates/ before writing anything there. While no copy is current, it writes each stable entry
+// that does not stand yet, the hook's first, so that wherever Norman's lines point, git's hook and
+// cargo's runner refuse with a remedy rather than run nothing; it never replaces an entry, since
+// nothing has confirmed the commit yet, and the install replaces them only once the remote has.
+// Then it stages the set and starts the staged refresher with no argument and the lock handed
+// down. That refresher confirms the commit with the remote itself, at the URL its own set declares,
+// checks its whole directory against the commit's tree, and installs; whatever this writes wrong,
+// it refuses, and this then removes the staged set, so that an install left half done only ever
+// means a kill. Run from standard input, this imports nothing but
 // node's own modules and the set it writes. It runs in Norman's own terminal, with that terminal's
 // git and environment, a limit the brief names.
 
@@ -41,6 +45,8 @@ function git(args, encoding = "utf8") {
 if (!/^[0-9a-f]{40}$/.test(commit ?? "")) fail(`the remote named no commit (${JSON.stringify(commit)}): check the line's URL and the network, then run it again`);
 const common = git(["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
 if (spawnSync("git", ["--no-replace-objects", "cat-file", "-e", `${commit}^{commit}`]).status !== 0) fail(`main's commit ${commit.slice(0, 12)} is not in this repository: fetch first (git fetch origin), then run the line again`);
+const local = spawnSync("git", ["--no-replace-objects", "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main"], { encoding: "utf8" }).stdout?.trim();
+if (local !== commit) fail(`main's commit ${commit.slice(0, 12)} is not what refs/remotes/origin/main names (${local ? local.slice(0, 12) : "nothing"}), so the bootstrap writes nothing: fetch first (git fetch origin), then run the line again`);
 const declared = JSON.parse(git(["cat-file", "blob", `${commit}:tools/gate-set.json`]));
 
 // The set, written outside mente-gates/ first.
@@ -78,10 +84,14 @@ if (!lock) {
 }
 if (!lock) fail(`a refresh holds the lock (${lockHolder(lockFile)}), so the bootstrap writes nothing; run the line again once it ends`);
 
-// The stable entries, the hook's first, each by a new file renamed over the old.
-for (const name of ENTRIES) {
+// The stable entries that do not stand yet, the hook's first, each by a new file renamed into
+// place, and only while no copy is current: an entry that stands is never replaced before the
+// remote has confirmed the commit.
+const current = fs.existsSync(path.join(gates, "current"));
+for (const name of current ? [] : ENTRIES) {
   const rel = `tools/gate-entries/${name}`;
   const to = path.join(gates, "entry", ...name.split("/"));
+  if (fs.existsSync(to)) continue;
   fs.mkdirSync(path.dirname(to), { recursive: true });
   const tmp = `${to}.tmp-${randomBytes(6).toString("hex")}`;
   fs.copyFileSync(path.join(outside, ...rel.split("/")), tmp);
@@ -95,5 +105,10 @@ fs.cpSync(outside, staging, { recursive: true });
 fs.rmSync(outside, { recursive: true, force: true });
 const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { ...handDown(lock, ["inherit", "inherit", "inherit"], gateEnv()), timeout: REFRESH_MS, windowsHide: true });
 lock.release();
+// A refused or unfinished install leaves no staged set, for no start to take it for a kill's.
+if (r.error || r.status !== 0) {
+  fs.rmSync(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  console.error("mente-gates bootstrap: the staged set is removed, since its refresher did not install it");
+}
 if (r.error) fail(`the staged refresher did not finish: ${r.error.message}`);
 process.exit(r.status ?? 1);

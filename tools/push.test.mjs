@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PASSED, RUNNER_TARGET, RUNNER_VARIABLE, capped, runnerLine, workingTreeRunnerLine } from "./local-limits.mjs";
 import { ENTRIES, INTERFACE, NODE_ENGINES, blobId, bootstrapLine, filesOf, gateEnv, gitLocations, localMain, manifestText, mismatch, nodeMeetsFloor, nothingToRefresh, pendingCopy, readManifest, systemGit, verifyCopy } from "./gate-entries/verify.mjs";
 import { LOCK_FD_VARIABLE, TREE_RUNNER, lockHolder, takeLock } from "./gate-processes.mjs";
-import { GET_URL_MS, REFRESH_MS, REMEMBER_MS, REMOTE_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
+import { GET_URL_MS, REFRESH_MS, REMEMBER_MS, REMOTE_MS, RETRY_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
@@ -1156,10 +1156,11 @@ test("a refresher that hangs holding the lock is killed at its time, and meanwhi
   });
 });
 
-test("a refresh's time limit covers both asks of the remote, the wait and the write, and a waiter's bound is shorter", () => {
+test("a refresh's time limit covers both asks of the remote, the wait and the write, a waiter's bound is shorter, and so is the memory without a copy", () => {
   assert.ok(REFRESH_MS >= 2 * (GET_URL_MS + REMOTE_MS) + WAIT_MS + WRITE_MS);
   assert.ok(REFRESH_MS > 2 * REMOTE_MS + WRITE_MS);
   assert.ok(WAIT_MS < REFRESH_MS);
+  assert.ok(RETRY_MS < REMEMBER_MS);
 });
 
 test("with no git of the list found, the current copy stays and says how to fix the list, and the entries hold it to its manifest", async () => {
@@ -1308,19 +1309,20 @@ test("the refresher's command reads no variable but the handoff's, so nothing bu
   assert.match(text, /lockFile: path\.join\(gates, "lock"\), say, allowLocal: false, seam: false/);
 });
 
-test("the bootstrap line stages exactly main's set from its objects and starts the staged refresher, which confirms it itself", async () => {
+test("the bootstrap line runs main's bootstrap from its objects, whose staged refresher confirms the commit itself, and a refused install leaves no staged set", async () => {
   await withGates(async ({ work, git, gates, remote, blob, base, env }) => {
     // The line's body, read from the commit's objects and run from standard input with the commit,
     // as the line runs it. In the fixture the staged refresher then refuses, since the remote's URL
-    // is a path and the command admits only https: it writes nothing, and says why.
+    // is a path and the command admits only https: it writes nothing, says why, and the bootstrap
+    // removes the staged set. The set it stages is the commit's: the installs of the tests that
+    // admit the fixture's remote check it.
     const body = blob(base, "tools/gate-entries/bootstrap.mjs");
     const ran = spawnSync(process.execPath, ["--input-type=module", "-", base], { cwd: work, env, input: body, encoding: "utf8" });
     assert.equal(ran.status, 1, ran.stderr);
     assert.match(ran.stderr, /the refresher of [0-9a-f]{12} writes nothing: the remote's URL .* is not https/);
-    const staged = fs.readdirSync(gates).filter((name) => name.startsWith(`staging-${base}-`));
-    assert.equal(staged.length, 1, "the line staged no set, or more than one");
-    const files = filesOf(execFileSync(systemGit(), ["--git-dir", repo(work), "ls-tree", "-r", "-z", "--full-tree", base, "--", ...SET.set], { env: gateEnv(), encoding: "utf8" }), SET.set);
-    assert.equal(mismatch(path.join(gates, staged[0]), files, []), null, "the staged set is not the commit's");
+    assert.match(ran.stderr, /the staged set is removed, since its refresher did not install it/);
+    assert.deepEqual(fs.readdirSync(gates).filter((name) => name.startsWith("staging-")), [], "a refused install left its staged set");
+    for (const name of ENTRIES) assert.ok(fs.existsSync(path.join(gates, "entry", ...name.split("/"))), `the entry ${name} was not written`);
     assert.ok(!fs.existsSync(path.join(gates, "current")), "a copy was installed from a URL that is not https");
     // A commit the repository does not hold: fetch first.
     const missing = spawnSync(process.execPath, ["--input-type=module", "-", "0".repeat(40)], { cwd: work, env, input: body, encoding: "utf8" });
@@ -1333,7 +1335,7 @@ test("the bootstrap line stages exactly main's set from its objects and starts t
       const shell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
       const r = spawnSync(shell, ["-NoProfile", "-NonInteractive", "-Command", line], { cwd: work, env, encoding: "utf8" });
       assert.match(`${r.stdout}${r.stderr}`, /writes nothing: the remote's URL .* is not https/, `the line did not reach the staged refresher: ${r.stdout}${r.stderr}`);
-      assert.equal(fs.readdirSync(gates).filter((name) => name.startsWith(`staging-${base}-`)).length, 1);
+      assert.deepEqual(fs.readdirSync(gates).filter((name) => name.startsWith("staging-")), []);
     }
     git(work, "status", "--short");
   });
@@ -1545,8 +1547,9 @@ test("no module the hooks or the settings' guard import has an effect at import"
 // that misses or doubles a cell, so that a state or an entry added later must be given its row.
 
 /// The states, in the order a first install passes them: nothing, each stable entry written in
-/// turn by the bootstrap, a set half staged, staged whole, renamed to its commit, and current.
-const COPY_STATES = ["absent", ...ENTRIES.map((name) => `early:${name}`), "halfway", "staged", "rename", "current"];
+/// turn by the bootstrap, a set half staged, staged whole, renamed to its commit; a bootstrap whose
+/// install was refused; and current.
+const COPY_STATES = ["absent", ...ENTRIES.map((name) => `early:${name}`), "halfway", "staged", "rename", "refused", "current"];
 
 /// What a start of quick, cargo or mn does.
 const START = {
@@ -1563,6 +1566,7 @@ const BINARY = {
   runs: { status: 7 },
   bootstrap: { status: 2, words: /no copy of main's gates is installed[\s\S]*Norman runs the bootstrap/ },
   refresh: { status: 2, words: /was left half done[\s\S]*run node tools\/quick\.mjs/ },
+  half: { status: 2, words: /was left half done[\s\S]*Norman runs the bootstrap/ },
   node: { notStatus: [0, 7], words: /Cannot find module/ },
 };
 /// What a raw push of a commit main does not hold does: refused by today's working-tree hook or by
@@ -1581,6 +1585,8 @@ const PUSH = {
 
 // copy state, R, H: a start, a test binary, a raw push. Off Windows cargo reads no runner line, so a
 // start refused for its runner goes on to the mode it reached (the test says so where it checks).
+// An install left half done is finished by a start only where H names the copy, and the entries
+// name that start there and the bootstrap elsewhere.
 const MATRIX = [
   ["absent", "old", "old", "fallback", "runs", "today"],
   ["absent", "old", "new", "bootstrap", "runs", "unguarded"],
@@ -1612,12 +1618,16 @@ const MATRIX = [
   ["halfway", "new", "new", "bootstrap", "bootstrap", "bootstrap"],
   ["staged", "old", "old", "fallback", "runs", "today"],
   ["staged", "old", "new", "runner-line", "runs", "refresh"],
-  ["staged", "new", "old", "fallback", "refresh", "today"],
+  ["staged", "new", "old", "fallback", "half", "today"],
   ["staged", "new", "new", "copy", "refresh", "refresh"],
   ["rename", "old", "old", "fallback", "runs", "today"],
   ["rename", "old", "new", "runner-line", "runs", "refresh"],
-  ["rename", "new", "old", "fallback", "refresh", "today"],
+  ["rename", "new", "old", "fallback", "half", "today"],
   ["rename", "new", "new", "copy", "refresh", "refresh"],
+  ["refused", "old", "old", "fallback", "runs", "today"],
+  ["refused", "old", "new", "bootstrap", "runs", "bootstrap"],
+  ["refused", "new", "old", "fallback", "bootstrap", "today"],
+  ["refused", "new", "new", "bootstrap", "bootstrap", "bootstrap"],
   ["current", "old", "old", "fallback", "runs", "today"],
   ["current", "old", "new", "runner-line", "runs", "copy"],
   ["current", "new", "old", "fallback", "runs", "today"],
@@ -1643,7 +1653,7 @@ test("the rollout's transition matrix: each copy state under Norman's lines old 
   for (const line of START_LINES) assert.ok(quick.includes(`\n${line}\n`), `quick.mjs's start no longer holds: ${line}`);
   const startCode = [`import { refreshGates, requireHooks, requireRunner } from ${JSON.stringify(new URL("./local-limits.mjs", import.meta.url).href)};`, ...START_LINES, "console.log(gates);"].join("\n");
   await withGates(
-    async ({ dir, env, run, git, work, gates, seam, seamChild, commit }) => {
+    async ({ dir, env, run, git, work, gates, remote, blob, base, seam, seamChild, commit }) => {
       // A commit main does not hold, for the pushes; the checkout taken as this repository's, for
       // the runner; today's working-tree hook marked, so that its refusal is told from the copy's.
       commit("not on main", {}, { push: false });
@@ -1664,7 +1674,14 @@ test("the rollout's transition matrix: each copy state under Norman's lines old 
       for (const state of COPY_STATES) {
         clear();
         if (state === "current") assert.equal(await seam({ bootstrap: true }), 0);
-        else if (state !== "absent") {
+        else if (state === "refused") {
+          // Norman's line, the remote away: its staged refresher refuses.
+          fs.renameSync(remote, `${remote}.away`);
+          const ran = spawnSync(process.execPath, ["--input-type=module", "-", base], { cwd: work, env, input: blob(base, "tools/gate-entries/bootstrap.mjs"), encoding: "utf8" });
+          fs.renameSync(`${remote}.away`, remote);
+          assert.equal(ran.status, 1, ran.stderr);
+          assert.deepEqual(fs.readdirSync(gates).filter((name) => /^staging-|^[0-9a-f]{40}$/.test(name)), [], `a refused bootstrap left a set: ${ran.stderr}`);
+        } else if (state !== "absent") {
           const killed = seamChild({ bootstrap: true, stopAt: state });
           assert.notEqual(killed.status, 0, `${state}: the install was not killed: ${killed.stderr}`);
         }
@@ -1679,8 +1696,9 @@ test("the rollout's transition matrix: each copy state under Norman's lines old 
         if (want.none) assert.doesNotMatch(words, want.none, where);
         if (want.out) assert.equal(out.trim(), want.out, where);
       };
-      // A test binary does not depend on H, nor a push on R, and neither writes the gates: each is
-      // run once for its state and line.
+      // A push does not depend on R, and neither it nor a test binary writes the gates: a push is
+      // run once for its state and H, a test binary once for its state, R and H.
+      const listing = (at) => (fs.existsSync(at) ? fs.readdirSync(at, { recursive: true }).map((name) => `${name} ${fs.statSync(path.join(at, name)).isFile() ? fs.statSync(path.join(at, name)).size : "dir"}`).sort() : []);
       const done = new Set();
       let pushes = 0;
       for (const [state, r, h, start, binary, push] of MATRIX) {
@@ -1689,8 +1707,8 @@ test("the rollout's transition matrix: each copy state under Norman's lines old 
         if (fs.existsSync(kept(state))) fs.cpSync(kept(state), gates, { recursive: true });
         git(work, "config", "core.hooksPath", hooks[h].replace(/\\/g, "/"));
         fs.writeFileSync(config, `[target.${RUNNER_TARGET}]\n${line[r]}\n`);
-        if (!done.has(`binary ${state} ${r}`)) {
-          done.add(`binary ${state} ${r}`);
+        if (!done.has(`binary ${state} ${r} ${h}`)) {
+          done.add(`binary ${state} ${r} ${h}`);
           const b = spawnSync(process.execPath, [runner[r], "--mente-only", "--", process.execPath, "-e", "process.exit(7)"], { cwd: work, env, encoding: "utf8" });
           check(cell, "a test binary", BINARY[binary], b.status, `${b.stdout}${b.stderr}`);
         }
@@ -1700,9 +1718,17 @@ test("the rollout's transition matrix: each copy state under Norman's lines old 
           const pushed = run(work, ["push", "origin", `HEAD:refs/heads/matrix-${pushes}`]);
           check(cell, "a raw push", PUSH[push], pushed.status, `${pushed.stdout}${pushed.stderr}`);
         }
+        const before = listing(gates);
         const s = spawnSync(process.execPath, ["--input-type=module", "-e", startCode], { cwd: work, env: startEnv, encoding: "utf8" });
         const reached = process.platform !== "win32" && (start === "unwritten" || start === "runner-line") ? (h === "old" ? "fallback" : "copy") : start;
         check(cell, "a start", START[reached], s.status, s.stderr, s.stdout);
+        if (h === "old") {
+          // While the hooks are today's, a start says a copy is installed only where one is
+          // current, and writes the gates only to refresh a current copy: an install left half
+          // done waits for the copy mode or the bootstrap.
+          assert.match(s.stderr, state === "current" ? /WARNING: a copy of main's gates is installed/ : /WARNING: no copy of main's gates is installed/, `${cell}: ${s.stderr}`);
+          if (state !== "current") assert.deepEqual(listing(gates), before, `${cell}: a start wrote the gates while no copy is current`);
+        }
       }
     },
     { patched: true },
@@ -1823,21 +1849,96 @@ test("the bootstrap takes the lock before it writes anything, writes the entries
   );
 });
 
-test("a transient failure finishing a half install is not remembered, so the next start finishes it", async () => {
+test("a failure finishing a half install is remembered only a short time, staged or renamed, so a silent remote costs few starts and the next one after finishes it", async () => {
   await withGates(
     async ({ dir, remote, gates, seamChild, entry, current, base }) => {
-      const killed = seamChild({ bootstrap: true, stopAt: "rename" });
-      assert.notEqual(killed.status, 0);
-      // The remote cannot be reached: the copy installed but not current stays as it is.
-      const away = path.join(dir, "remote-away.git");
-      fs.renameSync(remote, away);
-      const failed = entry("refresh.mjs");
-      assert.equal(failed.status, 2, failed.stderr);
-      assert.ok(!fs.existsSync(path.join(gates, "kept")), "a failure with no copy current was remembered");
-      fs.renameSync(away, remote);
-      const finished = entry("refresh.mjs");
-      assert.equal(finished.status, 0, finished.stderr);
+      for (const step of ["staged", "rename"]) {
+        fs.rmSync(gates, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+        const killed = seamChild({ bootstrap: true, stopAt: step });
+        assert.notEqual(killed.status, 0, step);
+        // The remote cannot be reached: the install left half done stays as it is.
+        const away = path.join(dir, "remote-away.git");
+        fs.renameSync(remote, away);
+        const failed = entry("refresh.mjs");
+        assert.equal(failed.status, 2, `${step}: ${failed.stderr}`);
+        const kept = path.join(gates, "kept");
+        const answer = JSON.parse(fs.readFileSync(kept, "utf8"));
+        assert.equal(answer.local, base, step);
+        assert.equal(answer.ms, RETRY_MS, `${step}: a failure with no copy current was remembered for longer than a retry's time`);
+        // Within that time a start asks no remote.
+        const again = entry("refresh.mjs");
+        assert.equal(again.status, 2, step);
+        assert.match(again.stderr, /as it did at the last (ask|start)/, step);
+        // After it, with the remote back, the next start finishes the install.
+        fs.renameSync(away, remote);
+        fs.writeFileSync(kept, JSON.stringify({ ...answer, at: Date.now() - RETRY_MS - 1000 }));
+        const finished = entry("refresh.mjs");
+        assert.equal(finished.status, 0, `${step}: ${finished.stderr}`);
+        assert.equal(current(), base, step);
+      }
+    },
+    { patched: true },
+  );
+});
+
+test("a bootstrap run by hand with a commit main does not hold writes no entry over one that stands, and its entries never outlive a confirmed install", async () => {
+  await withGates(
+    async ({ work, git, gates, remote, seam, entry, blob, base, env, current, commit }) => {
+      const mark = (old) => Buffer.concat([Buffer.from('console.error("mark: the branch\'s entry ran");\n'), old]);
+      const branch = commit("a branch's entries", { "tools/gate-entries/hook.mjs": mark, "tools/gate-entries/capped.mjs": mark }, { push: false });
+      const bootstrap = (sha) => spawnSync(process.execPath, ["--input-type=module", "-", sha], { cwd: work, env, input: blob(sha, "tools/gate-entries/bootstrap.mjs"), encoding: "utf8" });
+      const entriesOf = (sha) => ENTRIES.every((name) => fs.readFileSync(path.join(gates, "entry", ...name.split("/"))).equals(blob(sha, `tools/gate-entries/${name}`)));
+      fs.writeFileSync(path.join(work, "Cargo.toml"), "[workspace]\n");
+      // A healthy copy of main.
+      assert.equal(await seam(), 0);
+      assert.ok(entriesOf(base));
+      // The branch's commit, which the local origin/main does not name: refused before anything.
+      const refused = bootstrap(branch);
+      assert.equal(refused.status, 1, refused.stderr);
+      assert.match(refused.stderr, /is not what refs\/remotes\/origin\/main names .* so the bootstrap writes nothing: fetch first/);
+      // With the local origin/main moved to it by hand: the remote refuses it, and neither its
+      // entries nor its staged set stay.
+      git(work, "update-ref", "refs/remotes/origin/main", branch);
+      const moved = bootstrap(branch);
+      assert.equal(moved.status, 1, moved.stderr);
+      assert.match(moved.stderr, /the refresher of [0-9a-f]{12} writes nothing: the remote's main is/);
+      git(work, "update-ref", "refs/remotes/origin/main", base);
+      assert.ok(entriesOf(base), "a bootstrap of a commit the remote refused replaced the entries of the healthy copy");
       assert.equal(current(), base);
+      assert.deepEqual(fs.readdirSync(gates).filter((name) => name.startsWith("staging-")), []);
+      const ran = entry("capped.mjs", ["--mente-only", "--", process.execPath, "-e", "process.exit(7)"]);
+      assert.equal(ran.status, 7, ran.stderr);
+      assert.doesNotMatch(ran.stderr, /mark: the branch's entry ran/);
+      // An entry missing beside the current copy is not written from that commit either: the next
+      // refresh restores it from the copy.
+      fs.rmSync(path.join(gates, "entry", "capped.mjs"));
+      git(work, "update-ref", "refs/remotes/origin/main", branch);
+      assert.equal(bootstrap(branch).status, 1);
+      git(work, "update-ref", "refs/remotes/origin/main", base);
+      assert.ok(!fs.existsSync(path.join(gates, "entry", "capped.mjs")), "a bootstrap wrote an entry beside a current copy before the remote confirmed its commit");
+      assert.equal(await seam(), 0);
+      assert.ok(entriesOf(base));
+      // With no copy current, an entry that stands, here main's from a bootstrap the remote did not
+      // answer, is not replaced either.
+      fs.rmSync(gates, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      fs.renameSync(remote, `${remote}.away`);
+      assert.equal(bootstrap(base).status, 1);
+      fs.renameSync(`${remote}.away`, remote);
+      assert.ok(entriesOf(base));
+      git(work, "update-ref", "refs/remotes/origin/main", branch);
+      assert.equal(bootstrap(branch).status, 1);
+      git(work, "update-ref", "refs/remotes/origin/main", base);
+      assert.ok(entriesOf(base), "a bootstrap replaced an entry before the remote confirmed its commit");
+      // With nothing installed, the branch's entries stand where none did, inert until a confirmed
+      // install replaces them.
+      fs.rmSync(gates, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+      git(work, "update-ref", "refs/remotes/origin/main", branch);
+      assert.equal(bootstrap(branch).status, 1);
+      git(work, "update-ref", "refs/remotes/origin/main", base);
+      assert.ok(entriesOf(branch));
+      const confirmed = bootstrap(base);
+      assert.equal(confirmed.status, 0, confirmed.stderr);
+      assert.ok(entriesOf(base), "the entries of a commit the remote refused outlived the confirmed install");
     },
     { patched: true },
   );

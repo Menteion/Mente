@@ -47,6 +47,9 @@ export const WRITE_MS = 60000;
 export const REFRESH_MS = 2 * (GET_URL_MS + REMOTE_MS) + WAIT_MS + WRITE_MS;
 /// How long an answer that keeps the current copy is remembered for its local commit.
 export const REMEMBER_MS = 10 * 60000;
+/// How long an answer is remembered while no copy is current: an install left half done is tried
+/// again soon, and a remote that does not answer costs a start at most once in this time.
+export const RETRY_MS = 60000;
 
 const ASIDE = /^aside-([0-9a-f]{40})-[0-9a-f]+$/;
 const WINDOWS = process.platform === "win32";
@@ -135,18 +138,18 @@ function sweep(gates, keep) {
 function remembered(gates, local) {
   try {
     const kept = JSON.parse(fs.readFileSync(path.join(gates, "kept"), "utf8"));
-    if (kept.local === local && Date.now() - kept.at < REMEMBER_MS) return kept.why;
+    if (kept.local === local && Date.now() - kept.at < (kept.ms ?? REMEMBER_MS)) return kept.why;
   } catch {
     // Nothing remembered.
   }
   return null;
 }
 
-/// Remembers why the current copy stays while the local origin/main names `local`. What is
-/// remembered can only keep the current copy, never install one.
-function remember(gates, local, why) {
+/// Remembers why the current copy stays while the local origin/main names `local`, for `ms`. What
+/// is remembered can only keep the current copy, never install one.
+function remember(gates, local, why, ms) {
   try {
-    replaceFile(path.join(gates, "kept"), JSON.stringify({ local, at: Date.now(), why }));
+    replaceFile(path.join(gates, "kept"), JSON.stringify({ local, at: Date.now(), ms, why }));
   } catch {
     // Not remembered: the next start asks again.
   }
@@ -201,9 +204,10 @@ function lagWords(common, current) {
 
 /// Replaces each entry that does not hold its file of the set `files`, in ENTRIES' order, the
 /// hook's first, each by a new file renamed over it; `bytesOf(file)` reads a file, from a copy or
-/// from git's objects, and `step` names the kill points the seam gives. Returns the entries Windows
-/// refused to replace, in use.
-function writeEntries(ctx, files, bytesOf, step = "entry") {
+/// from git's objects, and `step` names the kill points the seam gives. With `absentOnly`, as
+/// before the remote has confirmed a commit, it writes only an entry that does not stand. Returns
+/// the entries Windows refused to replace, in use.
+function writeEntries(ctx, files, bytesOf, step = "entry", { absentOnly = false } = {}) {
   const refused = [];
   for (const name of ENTRIES) {
     const rel = `tools/gate-entries/${name}`;
@@ -211,7 +215,7 @@ function writeEntries(ctx, files, bytesOf, step = "entry") {
     if (!file) throw new Error(`the set holds no ${rel}`);
     const bytes = bytesOf(file);
     const to = path.join(ctx.gates, "entry", ...name.split("/"));
-    if (!entryHolds(to, bytes, file.mode)) {
+    if (!(absentOnly ? fs.existsSync(to) : entryHolds(to, bytes, file.mode))) {
       fs.mkdirSync(path.dirname(to), { recursive: true });
       try {
         replaceFile(to, bytes, file.mode === "100755" ? 0o755 : 0o644);
@@ -250,10 +254,12 @@ async function refreshFrom(ctx) {
     ctx.say(`the current copy stays, as it did at the last ask for ${local.slice(0, 12)}: ${kept}${lag}`);
     return 0;
   }
-  // An answer that keeps the current copy is remembered; with no copy current, nothing is, so
-  // that a transient failure, the network or a file in use, never holds a half install unfinished.
+  // An answer that keeps the current copy is remembered for REMEMBER_MS; with no copy current, for
+  // RETRY_MS only, so that a transient failure, the network or a file in use, holds a half install
+  // unfinished no longer, while a remote that does not answer still costs few starts.
+  const ms = current ? REMEMBER_MS : RETRY_MS;
   const keep = (why) => {
-    if (current) remember(gates, local, why);
+    remember(gates, local, why, ms);
     ctx.say(`the current copy${current ? ` of ${current.slice(0, 12)}` : ""} stays: ${why}${lag}`);
     return 0;
   };
@@ -281,7 +287,7 @@ async function refreshFrom(ctx) {
     const status = await ctx.startNew(dir, lock);
     // A new main whose install fails is not tried again at every start: its answer is remembered
     // for that local commit, as one that keeps the copy, and its staging is swept by the next.
-    if (status !== 0 && current && readCurrent(gates) !== local) remember(gates, local, `the install of ${local.slice(0, 12)} failed`);
+    if (status !== 0 && readCurrent(gates) !== local) remember(gates, local, `the install of ${local.slice(0, 12)} failed`, ms);
     return status;
   } finally {
     lock.release();
@@ -404,6 +410,12 @@ async function installAt(ctx, dir) {
 /// at most as long as a refresh does, so that a start is held no longer for it, then installs; when
 /// the time runs out it gives up, writes nothing, and names the holder.
 async function stagedFrom(ctx, dir) {
+  const commit = commitOf(path.basename(dir));
+  const kept = remembered(ctx.gates, commit);
+  if (kept) {
+    ctx.say(`the staged set of ${commit.slice(0, 12)} waits, as it did at the last start: ${kept}`);
+    return 1;
+  }
   const lock = await takeLock(ctx.lockFile, { waitMs: ctx.waitMs, label: `the staged set of ${commitOf(path.basename(dir)).slice(0, 12)}` });
   if (!lock) {
     ctx.say(`the staged set waits for the next start and writes nothing: a refresh holds the lock (${lockHolder(ctx.lockFile)})`);
@@ -411,7 +423,9 @@ async function stagedFrom(ctx, dir) {
   }
   try {
     await ctx.stop?.("locked");
-    return await installAt(ctx, dir);
+    const status = await installAt(ctx, dir);
+    if (status !== 0 && !readCurrent(ctx.gates)) remember(ctx.gates, commit, `the install of the staged set of ${commit.slice(0, 12)} failed`, RETRY_MS);
+    return status;
   } finally {
     lock.release();
   }
@@ -569,8 +583,9 @@ export async function refresh(options = {}) {
     say(`this repository has no ${MAIN_REF}`);
     return 1;
   }
-  // As the bootstrap does: the lock first, then the entries, the hook's first, from the commit's
-  // objects, then the staged set, installed with the lock held.
+  // As the bootstrap does: the lock first, then, while no copy is current, the entries that do not
+  // stand, the hook's first, from the commit's objects, then the staged set, installed with the
+  // lock held, and removed if its install fails.
   const lock = await takeLock(ctx.lockFile, { waitMs: ctx.bootstrapWaitMs, label: "the bootstrap" });
   if (!lock) {
     say(`the bootstrap gives up and writes nothing: a refresh holds the lock (${lockHolder(ctx.lockFile)})`);
@@ -579,11 +594,13 @@ export async function refresh(options = {}) {
   try {
     await ctx.stop?.("locked");
     const files = setOf(ctx, local).files;
-    writeEntries(ctx, files, (f) => git(common, ["cat-file", "blob", f.id], { encoding: "buffer", bin: binOf(ctx) }), "early");
+    if (!current) writeEntries(ctx, files, (f) => git(common, ["cat-file", "blob", f.id], { encoding: "buffer", bin: binOf(ctx) }), "early", { absentOnly: true });
     const staging = path.join(gates, `staging-${local}-${unique()}`);
     writeSet(ctx, files, staging);
     await ctx.stop?.("staged");
-    return await installAt(ctx, staging);
+    const status = await installAt(ctx, staging);
+    if (status !== 0) fs.rmSync(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    return status;
   } finally {
     lock.release();
   }

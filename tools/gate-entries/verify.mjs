@@ -260,8 +260,11 @@ export function verifyCopy(gates, options = {}) {
   } catch {
     // With `pending`, an install a kill or a refused rename left half done is named, since the
     // next start's refresh entry finishes it, with no bootstrap: the hook's and the runner's words.
-    const pending = options.pending ? pendingCopy(gates, { bin: options.bin ?? systemGit() }) : null;
-    if (pending) return { refusal: `the install of main's gates at ${pending.commit.slice(0, 12)} was left half done in ${gates}`, command: "refresh", missing: true };
+    const bin = options.bin ?? systemGit();
+    const pending = options.pending ? pendingCopy(gates, { bin }) : null;
+    // A start of quick, cargo or mn finishes it only where Norman's lines name the copy; otherwise
+    // the bootstrap does.
+    if (pending) return { refusal: `the install of main's gates at ${pending.commit.slice(0, 12)} was left half done in ${gates}`, command: hooksNamed(gates, { bin }) ? "refresh" : "bootstrap", missing: true };
     return { refusal: `no copy of main's gates is installed in ${gates}`, command: "bootstrap", missing: true };
   }
   if (!COMMIT.test(commit)) return { refusal: `${path.join(gates, "current")} names no commit`, command: "bootstrap" };
@@ -381,6 +384,21 @@ export function pendingCopy(gates, { bin = systemGit() } = {}) {
     }
   }
   return null;
+}
+
+/**
+ * Whether core.hooksPath, as the repository's own configuration holds it, which is where Norman's
+ * line writes it, names the stable hook entry of `gates`: the tools then require the copy, and a
+ * start of quick, cargo or mn finishes an install left half done. False where it cannot be read.
+ */
+export function hooksNamed(gates, { bin = systemGit() } = {}) {
+  try {
+    const value = git(path.dirname(gates), ["config", "--get", "core.hooksPath"], { bin }).trim();
+    const fold = (p) => (WINDOWS ? path.resolve(p).toLowerCase() : path.resolve(p));
+    return path.isAbsolute(value) && fold(value) === fold(path.join(gates, "entry", "hooks"));
+  } catch {
+    return false;
+  }
 }
 
 /// The URL the copies in `gates` declare, the current one first, for the bootstrap line an entry
