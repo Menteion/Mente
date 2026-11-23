@@ -19,12 +19,14 @@ pub const RECORD: &str = records::ESCAPES.dir;
 /// The fields of an escape's front matter, each once, in this order.
 pub const FIELDS: [&str; 6] = ["date", "fixed-by", "area", "missed-by", "guard", "root"];
 
-/// Whether an escape's fix removed its cause or holds its class at the guard (`docs/escapes.md`,
-/// `root-cause-first`): the distinction is cause versus effect.
+/// Whether an escape's cause is removed from `main` or its class is held at the guard, as `main`
+/// stands (`docs/escapes.md`, `root-cause-first`): the distinction is cause versus effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Root {
-    /// The fix made the cause's own form impossible to write or reach on `main`, through a hard
-    /// gate of `main` that refuses the whole form.
+    /// A fix made the cause's own form impossible to write or reach on `main`: one shared
+    /// definition, exhaustiveness the compiler enforces, or a check that refuses the form, a hard
+    /// gate of `main` (a compile error, a denied lint in the workspace's lint table or a required
+    /// check) that refuses the whole form, not just the instance found.
     Removed,
     /// The cause can still be written, and a test, an oracle or a check catches its effect.
     Held,

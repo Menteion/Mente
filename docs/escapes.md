@@ -15,9 +15,11 @@ A file starts with a front matter of six fields, each on one line `name: value`,
   - a check of the workflow policy, `policy check "name"`, that the policy's run ran;
   - a Node test, `node test "name"`, that a Node run ran;
   - a quick check before a push, `quick check "name"`, by its name in `tools/quick-checks.json`.
-- **root**: whether the fix removed the cause or holds its class at the guard ([`root-cause-first`](design-review.md#root-cause-first)), one of two words. The distinction is cause versus effect:
-  - `removed`: the fix made the cause's own form impossible to write or reach on `main`: one shared definition, exhaustiveness the compiler enforces, or a check that refuses the form. Such a check is a hard gate of `main`, a compile error, a denied lint in the workspace's lint table or a required check, and it refuses the whole form, not just the instance found. An advisory lint, a rule held only by review, or a test of one instance does not count;
+- **root**: whether the cause is removed from `main` or its class is held at the guard ([`root-cause-first`](design-review.md#root-cause-first)), one of two words. The distinction is cause versus effect:
+  - `removed`: a fix made the cause's own form impossible to write or reach on `main`: one shared definition, exhaustiveness the compiler enforces, or a check that refuses the form. Such a check is a hard gate of `main`, a compile error, a denied lint in the workspace's lint table or a required check, and it refuses the whole form, not just the instance found. An advisory lint, a rule held only by review, or a test of one instance does not count;
   - `held`: the cause can still be written, and a test, an oracle or a check catches its effect.
+
+  The root describes `main` as it stands, not the fix as it stood when it merged. A later pull request that removes a cause turns its record to `removed` and names itself in the record's prose, so that `mn escapes` counts the escapes whose class still stands: `plan-downloaded-into-the-checkout`, say, once the check of the tree around every test run has merged.
 
 `test_every_escape_has_a_key_an_area_and_a_guard`, in `compiler/mente-cli/tests/escapes.rs`, checks every file's form:
 

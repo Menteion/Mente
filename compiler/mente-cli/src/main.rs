@@ -17,7 +17,7 @@
 //! - `mn test [--mutate]`       : Runs `mn check`, then a hand-written demo MIR region and its mutation gate;
 //!   `@example` bodies are parsed as tokens but not executed.
 //! - `mn spec`                   : Checks `spec/*.md` front matter and runs their `@assert-*` directives.
-//! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes/` per week and per area;
+//! - `mn escapes [--check]`       : Counts the escaped bugs of `docs/escapes/` per week, per area and per root;
 //!   `--check` checks each escape as its test does.
 //! - `mn evidence --spec-guard F --nextest F... [--node F]...`: Checks every guard of the escaped bugs
 //!   and every test an `@assert-count` names as evidence against what the runners run.
@@ -125,7 +125,7 @@ fn print_help() {
     println!("  mn card                      Print the language card of this compiler's language version");
     println!("  mn test [--mutate] [path]    Run mn check, then the hand-written demo MIR region (and its mutation gate)");
     println!("  mn spec                      Check spec/*.md front matter and run their @assert-* directives");
-    println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes/ per week and per area; --check checks each escape");
+    println!("  mn escapes [--check]         Count the escaped bugs of docs/escapes/ per week, per area and per root; --check checks each escape");
     println!("  mn evidence --spec-guard F --nextest F... [--node F]...  Check each escape's guard and each test named as evidence against the tests the runners run");
     println!("  mn pressure [--since D] [--top N]  Rank the files by how many merged pull requests changed them, from git log on stdin");
     println!("  mn fuzz [--seed N] [--seconds N | --runs N] [--jobs N] [--corpus <path>]... [--out <dir>] | --replay <path>...");
@@ -1331,7 +1331,7 @@ fn strip_mn_comments(src: &str) -> String {
 }
 
 /// `mn escapes [--check]`: the record of escaped bugs, one file an escape in `docs/escapes/`, read
-/// from the current directory, counted per ISO week and per area; with `--check`, each escape checked against the tree
+/// from the current directory, counted per ISO week, per area and per root; with `--check`, each escape checked against the tree
 /// as `tests/escapes.rs` checks it. The counts are printed, never written into a document.
 fn cmd_escapes(args: &[String]) {
     let check = match args {
