@@ -665,9 +665,16 @@ check("the plan deals every mutant of the run to one shard, as many shards as th
   const planStep = steps(doc.jobs.plan).find((s) => s.id === "plan");
   assert.match(String(planStep?.run), /mutants-floor\.mjs plan diff-mutants\.json deleted-mutants\.json "\$\(cat baseline-seconds\.txt\)" plan >> "\$GITHUB_OUTPUT"\n/);
   const upload = steps(doc.jobs.plan).find((s) => String(s.uses ?? "").startsWith("actions/upload-artifact@") && s.with?.name === "mutants-plan");
-  const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@") && s.with?.path === "mutants-plan");
+  const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@") && s.with?.name === "mutants-plan");
   assert.equal(upload?.with?.name, download?.with?.name, "the shards download another artifact than the plan keeps");
-  assert.ok(String(upload.with.path).split("\n").includes("plan") && download.with.path === "mutants-plan", "the shards read the plan's files elsewhere than it keeps them");
+  assert.ok(String(upload.with.path).split("\n").includes("plan"), "the plan keeps no plan for the shards");
+  // The shards read the plan where their download puts it: one path, read from the download step,
+  // not a second literal beside it (the review of 996aea6).
+  assert.ok(String(download?.with?.path).startsWith("${{ runner.temp }}/"), "the shards download the plan elsewhere than under the runner's temporary directory");
+  // One slash after it, which the download allows, is no part of the place the reads name.
+  const readOf = (where) => String(where).replace(/\/$/, "").replace("${{ runner.temp }}", "$RUNNER_TEMP");
+  assert.equal(readOf("${{ runner.temp }}/mutants-plan/"), readOf("${{ runner.temp }}/mutants-plan"), "a slash after the download's path changes the reads it requires");
+  const planRead = readOf(download.with.path);
   // Every run of cargo-mutants, the full run's too, is the build of the one commit the policy holds
   // (CARGO_MUTANTS_REV in build-and-toolchain.test.mjs), with its own lock.
   const installs = workflows().flatMap(({ file, doc: d }) => Object.values(d.jobs ?? {}).flatMap((j) => steps(j)).flatMap((s) => String(s.run ?? "").split("\n").filter((l) => /\bcargo\s+install\b[^\n]*\bmutants\b/.test(l)).map((l) => [file, l.trim()])));
@@ -692,5 +699,6 @@ check("the plan deals every mutant of the run to one shard, as many shards as th
   }
   for (const [file, line] of installs) assert.equal(line, 'cargo install cargo-mutants --locked --git https://github.com/sourcefrog/cargo-mutants --rev "$CARGO_MUTANTS_REV"', `${file} installs cargo-mutants otherwise than from the commit the policy holds`);
   const shardScripts = steps(doc.jobs.shard).map((s) => String(s.run ?? "")).join("\n");
-  assert.equal(shardScripts.split('< "mutants-plan/plan/shard-$SHARD.re"').length, 3, "the shard's list and its run do not both read its regexes");
+  assert.equal(shardScripts.split(`< "${planRead}/plan/shard-$SHARD.re"`).length, 3, "the shard's list and its run do not both read its regexes where the plan is downloaded");
+  assert.equal(shardScripts.split(`assigned "${planRead}/plan/shard-$SHARD.json"`).length, 3, "the shard's list and its run do not both read its names where the plan is downloaded");
 });
