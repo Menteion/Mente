@@ -461,6 +461,9 @@ struct Report {
     claims: Vec<(u64, generate::AlwaysTraps)>,
     /// What no generated program may show (`generate::Checked::problems`).
     problems: Vec<String>,
+    /// The most expressions and statements a generated function held, and which function
+    /// (`generate::Checked::largest`).
+    largest: (usize, String),
 }
 
 impl Report {
@@ -528,6 +531,12 @@ impl Report {
         if self.regenerated > 0 {
             s.push('\n');
             s.push_str(&generate::claims_summary(self.regenerated, &self.claims));
+        }
+        if self.largest.0 > 0 {
+            s.push_str(&format!(
+                "\nthe largest generated function holds {} expressions and statements: {}",
+                self.largest.0, self.largest.1
+            ));
         }
         for p in &self.problems {
             s.push_str(&format!("\nproblem: {}", p));
@@ -610,22 +619,29 @@ fn check_generated(first: u64, count: u64) -> (String, Vec<String>) {
     let (mut accepted, mut regenerated) = (0, 0);
     let mut claims = Vec::new();
     let mut problems = Vec::new();
+    let mut largest = (0, String::new());
     for c in outcomes {
         let seed = c.program.seed;
         accepted += usize::from(c.module.is_some());
         regenerated += c.regenerated;
+        if c.largest.0 > largest.0 {
+            largest = c.largest.clone();
+        }
         problems.extend(c.problems);
         claims.extend(c.claims.into_iter().map(|a| (seed, a)));
     }
     problems.extend(generate::beyond_the_bars(count, regenerated, &claims));
     let line = format!(
         "{} more programs generated and checked, not run, seeds {} ..= {}: {} pass every check; \
-         {} functions generated again for a narrowing that always traps (E0508) or their depth",
+         {} functions generated again for a narrowing that always traps (E0508) or their depth; \
+         the largest function holds {} expressions and statements: {}",
         count,
         first,
         (first + count).saturating_sub(1),
         accepted,
-        regenerated
+        regenerated,
+        largest.0,
+        largest.1
     );
     (line, problems)
 }
@@ -661,6 +677,9 @@ fn run_generated(first: u64, count: u64, plan: CallPlan, natively: bool) -> Repo
         report.add(name, group(p.mode), &p.text, r);
         report.regenerated += c.regenerated;
         report.problems.extend(c.problems);
+        if c.largest.0 > report.largest.0 {
+            report.largest = c.largest.clone();
+        }
         report
             .claims
             .extend(c.claims.into_iter().map(|a| (p.seed, a)));
