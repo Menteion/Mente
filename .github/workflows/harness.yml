@@ -63,7 +63,10 @@ jobs:
           node .github/scripts/build-time-code.mjs
       - name: Overflow checks in this job's release build
         if: steps.watch.outputs.run != 'false'
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Build mn and put it outside the workspace
         if: steps.watch.outputs.run != 'false'
         # The sandbox hides the workspace from agent code, so mn runs from the runner's temp.
@@ -85,22 +88,32 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: >-
-          node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN"
-          --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/fixtures"
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node benchmark/harness/fixtures.ts --languages mente,rust,odin --mn "$RUNNER_TEMP/bin/mn" --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/fixtures"
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Check the Odin document's code blocks
         if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/document"
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node benchmark/harness/fixtures.ts --check document --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/document"
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Prove the sandbox denies the key and the network
         if: "!cancelled() && steps.watch.outputs.run != 'false'"
         env:
           ODIN: ${{ steps.toolchains.outputs.odin }}
-        run: node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node benchmark/harness/sandbox-check.ts --odin "$ODIN" --sandbox "$SANDBOX" --out "$RUNNER_TEMP/runs/sandbox-check"
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Test the harness
         if: steps.watch.outputs.run != 'false'
-        run: npm run test:harness
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          npm run test:harness
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Root is still out of the runner's user's reach
         # As benchmark/harness/lock-sudo.sh left it, whatever ran in between.
         if: "!cancelled() && steps.watch.outputs.run != 'false'"

@@ -90,9 +90,11 @@ jobs:
         # compiled out here, fails the job (.github/scripts/test-list.mjs).
         run: |
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo-nextest nextest list --locked --workspace --run-ignored all --message-format json > "$RUNNER_TEMP/tests.json"
           node .github/scripts/test-list.mjs nextest "$RUNNER_TEMP/tests.json"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Tests, through nextest under the ci profile's limits
         # Each test runs in a process of its own under the time limits of .config/nextest.toml: a
@@ -104,8 +106,10 @@ jobs:
         # On Linux each test runs in the sandbox, and the step fails if none did.
         run: |
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo-nextest nextest run --locked --workspace --profile ci
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: The tests' times, as shares of their stops
         # A report, which fails nothing on a time: each test's share of its stop goes into the
@@ -125,35 +129,45 @@ jobs:
         # each library must list none (.github/scripts/test-list.mjs). Listing compiles nothing.
         run: |
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo test --locked --workspace --doc -- --list > "$RUNNER_TEMP/doctests.txt" 2>&1
           node .github/scripts/test-list.mjs doctests "$RUNNER_TEMP/doctests.txt"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: The gate tests, by name
         # By name, so that a manifest that drops the target (autotests = false) fails here instead
         # of leaving the gates untested (compiler/mente-cli/tests/gates.rs).
         run: |
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo test --locked -p mente-cli --test gates
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn spec
         run: |
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo run --locked --bin mn -- spec
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn test --mutate
         run: |
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo run --locked --bin mn -- test --mutate
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: mn view --spec
         run: |
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo run --locked --bin mn -- view --spec examples/02_mechanical_sympathy_simd.mn
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/test-sandbox.sh bound
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
 
   coverage:
@@ -213,7 +227,10 @@ jobs:
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
       - name: Overflow checks in this job's release build
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Measure the base branch
         env:
           GROUP_BASE: ${{ github.event.merge_group.base_sha }}
@@ -236,7 +253,9 @@ jobs:
           cat "$RUNNER_TEMP/base-medians.txt"
       - name: Measure this change against it
         run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
           export MENTE_BENCH_BASELINE="$RUNNER_TEMP/base-medians.txt" MENTE_BENCH_ENFORCE=1
+          /usr/bin/bash .github/scripts/clean-tree.sh
           timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture view_projection_protocol
 
   execution-paths:
@@ -283,14 +302,18 @@ jobs:
       - name: Overflow checks in this job's release build
         run: |
           . .github/scripts/test-sandbox-env.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           bash .github/scripts/overflow-proof.sh
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Compare
         run: |
           . .github/scripts/test-sandbox-env.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           timeout 15m cargo test --release --locked -p mente-cli -- --ignored matches_the_reference_interpreter
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/test-sandbox.sh bound
+          /usr/bin/bash .github/scripts/clean-tree.sh
 
   debuggers:
     # Native code that `mn build` builds from a .mn program, stepped through by a scripted gdb
@@ -330,7 +353,10 @@ jobs:
       - name: Build mn
         run: cargo build --locked --bin mn
       - name: Step through
-        run: bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash compiler/mente-cli/tests/debuggers/check.sh target/debug/mn
+          /usr/bin/bash .github/scripts/clean-tree.sh
 
   tier1-latency:
     # The Tier-1 re-check protocol of ROADMAP.md, in release: 1,000 timed single-token edits to
@@ -353,9 +379,15 @@ jobs:
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
       - name: Measure
-        run: MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          MENTE_BENCH_ENFORCE=1 timeout 15m cargo test --release --locked -p mente-cli -- --ignored --nocapture tier1_recheck_protocol
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Overflow checks in this job's release build
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
 
   docs:
     name: Documentation
@@ -378,12 +410,17 @@ jobs:
       # test_the_documentation_job_runs_the_workflow_policy fails on any other key or order.
       - name: The workflow policy, its required checks, path lists, pins and milestone tags
         run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
           node .github/scripts/policy-collect.mjs
           node --test ".github/scripts/policy/*.test.mjs" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Every pinned action is the commit its release's tag names
         # The policy checks a pin's form; this asks each action's repository for the commit its
         # tag names (.github/scripts/action-pins.mjs).
-        run: node .github/scripts/action-pins.mjs
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node .github/scripts/action-pins.mjs
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: The toolchain rust-toolchain.toml pins, once nothing of the change can run where cargo builds
         # The step every required job but Commits runs first, under one rule of the policy
         # (TOOLCHAIN_STEP): rust-toolchain.toml names a release alone and no cargo configuration
@@ -405,14 +442,23 @@ jobs:
           HELD_OUT_LEAKED: ${{ secrets.MENTE_BENCH_HELDOUT_TOKEN != '' }}
         run: if [ "$KEY_LEAKED" != false ] || [ "$HELD_OUT_LEAKED" != false ]; then echo "::error::a secret of the benchmark is set outside the environment benchmark"; exit 1; fi
       - run: npm ci --ignore-scripts
-      - run: npm run verify:docs
+      - run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          npm run verify:docs
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: The quick checks' report of the tree they read
         # tools/quick.mjs, run in a repository the test makes, with shims for the checks' commands:
         # it says whether its checks read HEAD's tree, and writes the tree a passing run read.
-        run: node --test tools/quick.test.mjs
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node --test tools/quick.test.mjs
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: The push guard, which refuses a push of a tree the quick checks have not passed
         # tools/push.mjs, run against repositories the test makes (.claude/settings.json runs it).
-        run: node --test tools/push.test.mjs
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node --test tools/push.test.mjs
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Install actionlint and shellcheck, pinned and checksummed
         # From their releases, as the SMT job installs Z3; neither is a build dependency.
         env:
@@ -437,7 +483,18 @@ jobs:
           "$bin/shellcheck" --version
       - name: actionlint over every workflow, with shellcheck on every run script
         run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
           "$RUNNER_TEMP/lint/actionlint" -color -shellcheck "$RUNNER_TEMP/lint/shellcheck" -pyflakes ""
-      - run: npm run check:benchmark
-      - run: npm run test:benchmark
-      - run: npm run test:harness
+          /usr/bin/bash .github/scripts/clean-tree.sh
+      - run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          npm run check:benchmark
+          /usr/bin/bash .github/scripts/clean-tree.sh
+      - run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          npm run test:benchmark
+          /usr/bin/bash .github/scripts/clean-tree.sh
+      - run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          npm run test:harness
+          /usr/bin/bash .github/scripts/clean-tree.sh

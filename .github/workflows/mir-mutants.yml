@@ -49,7 +49,10 @@ jobs:
           node .github/scripts/build-time-code.mjs
       - name: Overflow checks in this job's release build
         if: steps.watch.outputs.run != 'false'
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Build mn
         if: steps.watch.outputs.run != 'false'
         run: cargo build --release --locked --bin mn
@@ -57,7 +60,9 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         run: |
           status=0
+          /usr/bin/bash .github/scripts/clean-tree.sh
           ./target/release/mn test --mutate --reported examples > "$RUNNER_TEMP/gate.txt" || status=$?
+          /usr/bin/bash .github/scripts/clean-tree.sh
           {
             echo '## MIR mutation gate on lowered code'
             echo '```text'

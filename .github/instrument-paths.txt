@@ -44,6 +44,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The check that the tree the gate commands judge is the commit's.
+.github/scripts/clean-tree.sh
 
 [generated.yml]
 compiler/**
@@ -62,6 +64,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The check that the tree the gate commands judge is the commit's.
+.github/scripts/clean-tree.sh
 
 [fuzz.yml]
 merge_group: skip
@@ -84,6 +88,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The check that the tree the gate commands judge is the commit's.
+.github/scripts/clean-tree.sh
 
 [smt.yml]
 compiler/**
@@ -103,6 +109,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The check that the tree the gate commands judge is the commit's.
+.github/scripts/clean-tree.sh
 
 [mir-mutants.yml]
 compiler/**
@@ -121,6 +129,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The check that the tree the gate commands judge is the commit's.
+.github/scripts/clean-tree.sh
 
 [perf.yml]
 compiler/**
@@ -135,6 +145,8 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The check that the tree the gate commands judge is the commit's.
+.github/scripts/clean-tree.sh
 
 [harness.yml]
 benchmark/**
@@ -150,3 +162,5 @@ rust-toolchain.toml
 # The check that nothing of the change can run where cargo builds, which runs first.
 .github/scripts/build-time-code.mjs
 .github/scripts/lib/build-time-code.mjs
+# The check that the tree the gate commands judge is the commit's.
+.github/scripts/clean-tree.sh

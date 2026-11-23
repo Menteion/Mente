@@ -4,14 +4,15 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { FACTS, read } from "./repo.mjs";
-import { SANDBOX_SOURCES, runnersOf } from "./sandbox.mjs";
+import { SANDBOX_SOURCES, TESTING_JOBS, runnersOf } from "./sandbox.mjs";
+import { CLEAN_TREE } from "./toolchain.mjs";
 import { REPORT_FORMS, REQUIRED_EVENTS, REQUIRED_FILE, WATCH_FORMS, WORKFLOWS, allJobs, hasWatch, isPlain, isReport, logicalLines, needsOf, normalize, requiredChecks, requiredJobs, scriptTexts, stepKey, steps, triggers, workflows } from "./workflows.mjs";
 
 /// Every check of this module counts itself when it runs, and the module fails when fewer ran than
 /// FLOOR, the number of checks below: a skip or a filter of the test runner cannot leave the
 /// policy passing with less of it checked. test_the_documentation_job_runs_the_workflow_policy keeps
 /// each module's FLOOR equal to the checks it declares.
-const FLOOR = 10;
+const FLOOR = 11;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -601,4 +602,96 @@ check("every instrument scheduled for a finished milestone is a required check",
     for (const check of entry[1]) assert.ok(required.has(check), `"${check}", which runs "${entry[0]}", is not in ${REQUIRED_FILE}`);
   }
   assert.ok(due > 0, "no instrument is due, though milestones are done");
+});
+
+/// The jobs that run the gate's own script alone, over no file of the tree, and so need no check of
+/// it: the Commits check reads commit and pull request text through git and the API.
+const CLEAN_TREE_EXEMPT = new Set(["commits.yml#commits"]);
+/// The test runs of the testing jobs that gate-commands.txt does not list (the Mutants plan's baseline,
+/// and mutants-full.yml, no required check): a run of the workspace's tests through nextest, and
+/// cargo-mutants mutating in place.
+const MUTATION_RUN = /^(cargo nextest run --workspace\b|cargo mutants .*--in-place\b)/;
+/// The gate commands of the gate's own setup, each with why a step of these alone needs no check of
+/// the tree: it runs before any code of the change, or reads only files outside the tree. A step
+/// that runs one beside another gate command is checked around them all.
+export const CLEAN_TREE_SETUP = new Map([
+  ["node .github/scripts/build-time-code.mjs --before-toolchain", "the toolchain's step, right after the checkout, before anything else has run in the tree"],
+  ["node .github/scripts/build-time-code.mjs", "the toolchain's step, right after the checkout, before anything else has run in the tree"],
+  ["/usr/bin/bash .github/scripts/tools.sh record", "it records the digests of the runner's tools, outside the tree"],
+  ["/usr/bin/bash .github/scripts/test-sandbox.sh setup", "it builds the sandbox under $RUNNER_TEMP"],
+  ["/usr/bin/bash .github/scripts/test-sandbox.sh check", "it proves the sandbox with its canary, under $RUNNER_TEMP"],
+  ['/usr/bin/sha256sum -c "$RUNNER_TEMP/cargo-mutants.sha256"', "it checks cargo-mutants' binary under $RUNNER_TEMP"],
+  ["node .github/scripts/test-times.mjs", "it reads nextest's report under target/, which every walk leaves out"],
+  ["bash .github/scripts/install-mdbook.sh", "it installs mdBook under $HOME"],
+]);
+
+/// Every step that runs a gate command of its job (`gate`, as gateCommands() reads it) other than
+/// the gate's own setup (CLEAN_TREE_SETUP) without the check of the tree right before its first gate
+/// command and right after its last, blank lines and comments aside; and every test run of a testing
+/// job (`testingJobs`, TESTING_JOBS) without it so. A step's tests then never judge a tree a step
+/// wrote into: before them, after them, or in a step between.
+export function cleanTreeProblems(docs, gate, testingJobs) {
+  const out = [];
+  for (const { file, doc } of docs) {
+    for (const [id, job] of Object.entries(doc.jobs ?? {})) {
+      const key = `${file}#${id}`;
+      if (CLEAN_TREE_EXEMPT.has(key)) continue;
+      const commands = gate.get(key) ?? [];
+      const runs = testingJobs.includes(key);
+      if (commands.length === 0 && !runs) continue;
+      for (const s of steps(job)) {
+        if (typeof s.run !== "string") continue;
+        const lines = logicalLines(s.run).map((l) => l.trim()).filter((l) => l !== "" && !l.startsWith("#"));
+        const isRun = (l) => runs && MUTATION_RUN.test(l);
+        const isGate = (l) => commands.some((c) => l === c || l === `${c} || status=$?`) || isRun(l);
+        const at = lines.flatMap((l, k) => (isGate(l) ? [k] : []));
+        if (!at.some((k) => isRun(lines[k]) || !CLEAN_TREE_SETUP.has(lines[k].replace(/ \|\| status=\$\?$/, "")))) continue;
+        const where = stepKey(file, id, s);
+        if (lines[at[0] - 1] !== CLEAN_TREE) out.push(`${where}: no check of the tree right before its first gate command, \`${lines[at[0]]}\`: put \`${CLEAN_TREE}\` there`);
+        if (lines[at[at.length - 1] + 1] !== CLEAN_TREE) out.push(`${where}: no check of the tree right after its last gate command, \`${lines[at[at.length - 1]]}\`: put \`${CLEAN_TREE}\` there`);
+      }
+    }
+  }
+  return out;
+}
+
+check("every step of a required job checks, around its gate commands, that the tree is the commit's", () => {
+  // The escape plan-downloaded-into-the-checkout: a shard's tests judged a tree a download had
+  // written into. Every step that runs a gate command, and every test run of a testing job, checks
+  // the tree right before and right after, so that no gate passes on a tree other than the commit's.
+  const gate = gateCommands();
+  assert.deepEqual(cleanTreeProblems(workflows(), gate, TESTING_JOBS), []);
+  // Planted, on a job of its own: the check missing before, missing after, set apart from the command
+  // by a writer, and kept only on a line before; a step of the exempt job; and a test run of a
+  // mutation job that gate-commands.txt does not list.
+  const job = (run) => [{ file: "x.yml", doc: { jobs: { j: { steps: [{ name: "s", run }] } } } }];
+  const g = new Map([["x.yml#j", ["cargo test --workspace", "node a.mjs"]]]);
+  const C = CLEAN_TREE;
+  assert.deepEqual(cleanTreeProblems(job(`${C}\ncargo test --workspace\n${C}\n`), g, []), []);
+  assert.deepEqual(cleanTreeProblems(job(`${C}\n# the tests\n\ncargo test --workspace || status=$?\n\n${C}\n`), g, []), [], "a comment or a blank line beside the command is refused");
+  assert.deepEqual(cleanTreeProblems(job(`${C}\ncargo test --workspace\necho x\nnode a.mjs\n${C}\n`), g, []), [], "a step of two gate commands bracketed whole is refused");
+  for (const [run, why] of [
+    ["cargo test --workspace\n" + C + "\n", "the check missing before"],
+    [C + "\ncargo test --workspace\n", "the check missing after"],
+    [C + "\necho x > a.md\ncargo test --workspace\n" + C + "\n", "a writer between the check and the command"],
+    [C + "\ncargo test --workspace\ntouch b.md\n" + C + "\n", "a writer between the command and the check after it"],
+    ["cargo test --workspace", "a one-line step with no check"],
+    [C + "\nnode a.mjs\n" + C + "\ncargo test --workspace\n", "the check around the first command alone"],
+  ]) {
+    assert.ok(cleanTreeProblems(job(run), g, []).length > 0, `${why} passes`);
+  }
+  const exempt = [{ file: "commits.yml", doc: { jobs: { commits: { steps: [{ run: "node .github/scripts/commits.mjs" }] } } } }];
+  assert.deepEqual(cleanTreeProblems(exempt, new Map([["commits.yml#commits", ["node .github/scripts/commits.mjs"]]]), []), [], "the Commits job is held to the check");
+  const full = [{ file: "f.yml", doc: { jobs: { full: { steps: [{ run: 'cargo nextest run --workspace 2>&1 | tee "$RUNNER_TEMP/b.log"' }, { run: `${C}\ncargo mutants --in-place --shard 0/16 || status=$?\n${C}\n` }] } } } }];
+  assert.equal(cleanTreeProblems(full, new Map(), ["f.yml#full"]).length, 2, "a mutation job's test run without the check passes");
+  assert.equal(cleanTreeProblems(full, new Map(), []).length, 0, "a job that is no mutation job is held to its test runs");
+  // The gate's own setup alone needs no check; beside another gate command, the step is checked
+  // around them all.
+  const setup = [...CLEAN_TREE_SETUP.keys()];
+  const withSetup = new Map([["x.yml#j", [...setup, "cargo test --workspace"]]]);
+  assert.deepEqual(cleanTreeProblems(job(`${setup[0]}\nrustup toolchain install\n${setup[1]}\n`), withSetup, []), [], "the toolchain's step is held to the check");
+  assert.equal(cleanTreeProblems(job(`${setup[2]}\ncargo test --workspace\n`), withSetup, []).length, 2, "a step of setup and a test with no check passes");
+  assert.equal(cleanTreeProblems(job(`${C}\n${setup[2]}\ncargo test --workspace\n${C}\n`), withSetup, []).length, 0, "a step of setup and a test checked around both is refused");
+  assert.equal(cleanTreeProblems(job(`${setup[2]}\n${C}\ncargo test --workspace\n${C}\n`), withSetup, []).length, 1, "a check after the step's setup, which is its first gate command, passes");
+  for (const [command, why] of CLEAN_TREE_SETUP) assert.ok(why.length > 0 && command.length > 0);
 });

@@ -113,7 +113,9 @@ jobs:
         run: |
           w=$RUNNER_TEMP/mutants-work
           mkdir -p "$w"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > "$w/pr.diff"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo mutants --list --json > "$w/all-mutants.json"
           cargo mutants --in-diff "$w/pr.diff" --list --json > "$w/diff-mutants.json"
           # cargo-mutants' diff filter marks only the lines next to a deleted line; every mutant of
@@ -149,7 +151,9 @@ jobs:
           count "$in_diff" "the mutants cargo-mutants lists for the diff"
           around=$(node .github/scripts/mutants-floor.mjs count "$w/deleted-mutants.json")
           count "$around" "the mutants around deleted lines"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           node .github/scripts/mutants-floor.mjs missing "$w/pr.diff" "$w/base-all-mutants.json" "$w/diff-mutants.json" "$w/deleted-mutants.json" > "$w/missing.txt"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           lost=$(grep -c . "$w/missing.txt" || true)
           count "$lost" "the expected mutants the run leaves out"
           echo "Mutants the diff changes, under the base's settings: $expected; listed for the run: $((in_diff + around)); left out: $lost" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -169,6 +173,7 @@ jobs:
           set -o pipefail
           # The change's tests, under the limits every test runs under.
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo nextest run --workspace --no-run
           start=$(date +%s)
           cargo nextest run --workspace 2>&1 | tee "$w/baseline.log"
@@ -178,6 +183,7 @@ jobs:
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/test-sandbox.sh bound
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Deal the mutants to the shards the baseline's time needs
         id: plan
@@ -186,7 +192,9 @@ jobs:
         # run lies in exactly one shard, and writes the shards' names and exact regexes.
         run: |
           w=$RUNNER_TEMP/mutants-work
+          /usr/bin/bash .github/scripts/clean-tree.sh
           node .github/scripts/mutants-floor.mjs plan "$w/diff-mutants.json" "$w/deleted-mutants.json" "$(cat "$w/baseline-seconds.txt")" "$w/plan" >> "$GITHUB_OUTPUT"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cat "$w/plan/summary.md" >> "$GITHUB_STEP_SUMMARY"
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Keep the plan for the shards
@@ -279,7 +287,9 @@ jobs:
           while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.re"
           if [ "${#shard[@]}" -eq 0 ]; then echo "::error::the plan dealt shard $SHARD no mutant"; exit 1; fi
           cargo mutants "${shard[@]}" --list --json > "$RUNNER_TEMP/shard-mutants.json"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$RUNNER_TEMP/shard-mutants.json" > "$RUNNER_TEMP/unlisted.txt"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           unlisted=$(grep -c . "$RUNNER_TEMP/unlisted.txt" || true)
           count "$unlisted" "the mutants listed otherwise than the plan dealt them"
           if [ "$unlisted" -gt 0 ]; then
@@ -297,8 +307,10 @@ jobs:
           set -o pipefail
           # The change's tests, under the limits every test runs under.
           . .github/scripts/limits.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo nextest run --workspace 2>&1 | tee "$RUNNER_TEMP/baseline.log"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Mutate this shard's mutants
         env:
@@ -319,6 +331,7 @@ jobs:
           # cargo-mutants writes its outcomes and logs outside the workspace: inside it a test
           # could read them, and tell which mutant it runs under.
           status=0
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo mutants "${shard[@]}" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
           case "$status" in 0|2|3) ;; *) exit "$status" ;; esac
           failed=0
@@ -359,6 +372,7 @@ jobs:
           count "$caught" "the mutants caught"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
           /usr/bin/bash .github/scripts/test-sandbox.sh bound
+          /usr/bin/bash .github/scripts/clean-tree.sh
           /usr/bin/bash .github/scripts/tools.sh verify
           exit "$failed"
       - name: Keep this shard's outcomes and logs

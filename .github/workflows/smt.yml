@@ -65,7 +65,10 @@ jobs:
           node .github/scripts/build-time-code.mjs
       - name: Overflow checks in this job's release build
         if: steps.watch.outputs.run != 'false'
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Install Z3 ${{ env.Z3_VERSION }}, checksummed
         if: steps.watch.outputs.run != 'false'
         run: |
@@ -101,8 +104,10 @@ jobs:
           done)
           mapfile -t agents < <(find benchmark/probe benchmark/prelim -name '*.mn' | sort)
           start=$(date +%s%N)
+          /usr/bin/bash .github/scripts/clean-tree.sh
           ./target/release/mn smt examples "${pass[@]}" "${agents[@]}" "$RUNNER_TEMP/constructs" perf/kernels \
             --out "$RUNNER_TEMP/smt" | tee "$RUNNER_TEMP/export.txt"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           printf 'EXPORT_SECONDS=%d.%03d\n' $((ms / 1000)) $((ms % 1000)) >> "$GITHUB_ENV"
       - name: Ask Z3 for each query
@@ -126,8 +131,10 @@ jobs:
           start=$(date +%s%N)
           # The $1 is the inner shell's argument, the query's path, so it stays in single quotes.
           # shellcheck disable=SC2016
+          /usr/bin/bash .github/scripts/clean-tree.sh
           xargs -a "$RUNNER_TEMP/queries.txt" -d '\n' -P "$(nproc)" -n 1 bash -c 'check "$1"' _ \
             > "$RUNNER_TEMP/answers.txt"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           ms=$(( ($(date +%s%N) - start) / 1000000 ))
           seconds=$(printf '%d.%03d' $((ms / 1000)) $((ms % 1000)))
           answered=$(wc -l < "$RUNNER_TEMP/answers.txt")

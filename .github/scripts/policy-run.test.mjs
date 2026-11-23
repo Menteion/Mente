@@ -1365,6 +1365,8 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
     };
     for (const f of [".github/scripts/mutants-floor.mjs", ".github/scripts/lib/mutants-floor.mjs"]) put(f, read(f));
     put(".github/scripts/tools.sh", "exit 0\n");
+    // The check of the tree around the shard's commands, which a run test of its own holds.
+    put(".github/scripts/clean-tree.sh", "exit 0\n");
     put(".github/scripts/test-sandbox.sh", 'echo "test-sandbox.sh $*" >> "$RUNNER_TEMP/sandbox.log"\n');
     put(".github/scripts/limits.sh", ": limits\n");
     // cargo lists what STUB_LIST holds, and a run of mutants writes STUB_RUN's outcomes into its
