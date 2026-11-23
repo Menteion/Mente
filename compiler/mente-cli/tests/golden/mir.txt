@@ -40114,7 +40114,7 @@ block1(v8: effect):
 t0: unreachable @24:3 ["unreachable reached: control left the code the checker allows"]
 }
 
-f2: fn quarter(u8, effect) -> u8 frame 71 {
+f2: fn quarter(u8, effect) -> u8 frame 69 {
 block0(v0: u8, v1: effect):
   v2: i64 = int 4 @29:7
   v3: i64 = cast v0 @29:3
@@ -40228,42 +40228,38 @@ block3(v9: effect):
   v18: bool = eq v16, v17 @22:21
   jump block1(v18, v15)
 block4(v25: effect):
-  v29: i64 = int 4 @28:28
-  v30: i64 = cast v0 @28:24
-  v31: i64 = int 0 @28:24
-  v32: bool = ne v29, v31 @28:24
-  v33: i64 = guard t4 nonzero v32, v29, v25 @28:24
-  v34: i64 = rem v30, v33 @28:24
-  v35: i64 = int 0 @28:33
-  v36: bool = eq v34, v35 @28:33
-  jump block6(v36, v33)
+  v29: i64 = int 1 @28:29
+  v30: i64 = cast v0 @28:29
+  v31: bool = ge v30, v29 @28:29
+  jump block6(v31, v25)
 block5(v26: effect):
-  v37: bool = bool true @28:44
-  jump block6(v37, v26)
+  v32: i64 = int 0 @28:45
+  v33: i64 = cast v0 @28:45
+  v34: bool = eq v33, v32 @28:45
+  jump block6(v34, v26)
 block6(v27: bool, v28: effect):
-  v38: unit = check t5 v27, v28 @35:7
-  v39: u8 = call f2 v0, v38 @35:7
-  v40: i64 = cast v20 @35:3
-  v41: i64 = cast v39 @35:3
-  v42: i64 = add v40, v41, v39 @35:3
-  v43: i64 = int 0 @35:3
-  v44: bool = ge v42, v43 @35:3
-  v45: i64 = int 255 @35:3
-  v46: bool = le v42, v45 @35:3
-  v47: bool = and v44, v46 @35:3
-  v48: i64 = guard t6 within 0..=255 v47, v42, v42, v39 @35:3
-  v49: u8 = cast v48 @35:3
-  return v49 after v48
-block7(v50: effect):
-  trap t7 after v50
+  v35: unit = check t4 v27, v28 @35:7
+  v36: u8 = call f2 v0, v35 @35:7
+  v37: i64 = cast v20 @35:3
+  v38: i64 = cast v36 @35:3
+  v39: i64 = add v37, v38, v36 @35:3
+  v40: i64 = int 0 @35:3
+  v41: bool = ge v39, v40 @35:3
+  v42: i64 = int 255 @35:3
+  v43: bool = le v39, v42 @35:3
+  v44: bool = and v41, v43 @35:3
+  v45: i64 = guard t5 within 0..=255 v44, v39, v39, v36 @35:3
+  v46: u8 = cast v45 @35:3
+  return v46 after v45
+block7(v47: effect):
+  trap t6 after v47
 t0: stack-overflow @34:15 ["the call stack ran out"]
 t1: division-by-zero @22:12 ["division by zero"]
 t2: requires @34:15 ["`requires (match x (=> 0 false) (=> _ {(== (% x 3) 0)}))` is false at this call"]
 t3: stack-overflow @35:7 ["the call stack ran out"]
-t4: division-by-zero @28:24 ["division by zero"]
-t5: requires @35:7 ["`requires (if (> x 0) {(== (% x 4) 0)} {true})` is false at this call"]
-t6: narrowing @35:3 ["", " does not fit in `u8`"]
-t7: unreachable @35:3 ["unreachable reached: control left the code the checker allows"]
+t4: requires @35:7 ["`requires (if (> x 0) {(>= x 1)} {(== x 0)})` is false at this call"]
+t5: narrowing @35:3 ["", " does not fit in `u8`"]
+t6: unreachable @35:3 ["unreachable reached: control left the code the checker allows"]
 }
 
 f5: fn enter half(u8, effect) -> u8 {
@@ -40336,26 +40332,22 @@ block0(v0: u8, v1: effect):
   v5: bool = gt v4, v3 @28:20
   branch v5, block1(v2), block2(v2)
 block1(v6: effect):
-  v10: i64 = int 4 @28:28
-  v11: i64 = cast v0 @28:24
-  v12: i64 = int 0 @28:24
-  v13: bool = ne v10, v12 @28:24
-  v14: i64 = guard t1 nonzero v13, v10, v6 @28:24
-  v15: i64 = rem v11, v14 @28:24
-  v16: i64 = int 0 @28:33
-  v17: bool = eq v15, v16 @28:33
-  jump block3(v17, v14)
+  v10: i64 = int 1 @28:29
+  v11: i64 = cast v0 @28:29
+  v12: bool = ge v11, v10 @28:29
+  jump block3(v12, v6)
 block2(v7: effect):
-  v18: bool = bool true @28:44
-  jump block3(v18, v7)
+  v13: i64 = int 0 @28:45
+  v14: i64 = cast v0 @28:45
+  v15: bool = eq v14, v13 @28:45
+  jump block3(v15, v7)
 block3(v8: bool, v9: effect):
-  v19: unit = check t2 v8, v9 @27:4
-  v20: u8 = call f2 v0, v19 @27:4
-  return v20 after v20
+  v16: unit = check t1 v8, v9 @27:4
+  v17: u8 = call f2 v0, v16 @27:4
+  return v17 after v17
 t0: stack-overflow @27:4 ["the call stack ran out"]
-t1: division-by-zero @28:24 ["division by zero"]
-t2: requires @27:4 ["`requires (if (> x 0) {(== (% x 4) 0)} {true})` is false at this call"]
-t3: unreachable @27:4 ["unreachable reached: control left the code the checker allows"]
+t1: requires @27:4 ["`requires (if (> x 0) {(>= x 1)} {(== x 0)})` is false at this call"]
+t2: unreachable @27:4 ["unreachable reached: control left the code the checker allows"]
 }
 
 f8: fn enter twice(u8, effect) -> u8 {

@@ -394,9 +394,13 @@ fn way_row(clause: &str, form: &str, way: &str) -> String {
 
 /// A `requires` of a `@checked` function that holds a block and that a call breaks, so that
 /// the run-time check such a function writes traps it: a lowering that dropped the check would
-/// run that call on where the reference interpreter traps.
+/// run that call on where the reference interpreter traps. At the entry of the routed function
+/// called from outside, and inside the program's call of the one the program calls, whose trap
+/// the caller passes back, each of which a lowering keeps apart.
 const TRAPPING_REQUIRES: &str =
-    "requires holding a block that traps a call, in a @checked function";
+    "requires holding a block that traps a call at its function's entry, in a @checked function";
+const TRAPPING_CALLED_REQUIRES: &str =
+    "requires holding a block that traps a call the program makes, in a @checked function";
 
 /// Every row the clauses of routed functions give: each kind, form and attribute, each way of
 /// each kind and form taken, and the `requires` that traps.
@@ -411,6 +415,7 @@ fn routed_rows() -> Vec<String> {
         }
     }
     rows.push(TRAPPING_REQUIRES.to_string());
+    rows.push(TRAPPING_CALLED_REQUIRES.to_string());
     rows
 }
 
@@ -865,15 +870,15 @@ const LATER_INVARIANT: &str = "invariant of a later loop of a routed function";
 /// The others are measured over seeds 0 to 2999, the most per hundred their share there rounded
 /// up, and the few more twice the standard deviation of the count at the coverage test's 300
 /// seeds, at that share, rounded up, so that only a change that takes ways away crosses it:
-/// - an `ensures` of the function called from outside: 130 of 526, 25 in a hundred, and 7 more for
-///   about 53 a run evaluates there: it holds at each return, and the calls on one side of its
+/// - an `ensures` of the function called from outside: 124 of 523, 24 in a hundred, and 7 more for
+///   about 52 a run evaluates there: it holds at each return, and the calls on one side of its
 ///   split may each trap in the body first;
-/// - a `requires` of the function the program calls: 6 of 686, 1 in a hundred, and 2 more for about
+/// - a `requires` of the function the program calls: 4 of 686, 1 in a hundred, and 2 more for about
 ///   69: its caller's call of every lowest value stops at the caller's own failing `requires` where
 ///   it has one, so the values below the split come from the random calls alone;
-/// - an `ensures` of the function the program calls: 86 of 607, 15 in a hundred, and 6 more for
+/// - an `ensures` of the function the program calls: 76 of 606, 13 in a hundred, and 6 more for
 ///   about 61, as for the other `ensures`;
-/// - an invariant of a later loop, which leaves, traps or returns where its body says: 127 of 251,
+/// - an invariant of a later loop, which leaves, traps or returns where its body says: 129 of 253,
 ///   51 in a hundred, and 5 more for about 25: a loop that goes round once takes both ways, and
 ///   one that leaves in its first round takes one; it cannot be made live by construction without
 ///   taking from its body what makes it a loop with a body.
@@ -883,9 +888,9 @@ pub(super) const UNTAKEN_BARS: &[(&str, usize, usize)] = &[
     (ENTRY_FIRST_MEASURE, 0, 0),
     (CALLED_FIRST_INVARIANT, 0, 0),
     (CALLED_FIRST_MEASURE, 0, 0),
-    (ENTRY_ENSURES, 25, 7),
+    (ENTRY_ENSURES, 24, 7),
     (CALLED_REQUIRES, 1, 2),
-    (CALLED_ENSURES, 15, 6),
+    (CALLED_ENSURES, 13, 6),
     (LATER_INVARIANT, 51, 5),
 ];
 
@@ -1158,7 +1163,15 @@ fn reached_routed_runs(
             }
         }
         if c.kind == "requires" && routings[*k].checked && run.broke > 0 {
-            seen.insert(TRAPPING_REQUIRES.to_string());
+            let entry = public.get(*k).copied().unwrap_or(false);
+            seen.insert(
+                if entry {
+                    TRAPPING_REQUIRES
+                } else {
+                    TRAPPING_CALLED_REQUIRES
+                }
+                .to_string(),
+            );
         }
     }
     Ok(runs)

@@ -1186,6 +1186,8 @@ struct Callee {
     params: Vec<IntT>,
     /// Whether it gives a result, which the call discards.
     returns: bool,
+    /// Whether its `requires` fails on a parameter's lowest value, which its caller then passes it.
+    fails: bool,
 }
 
 /// Where a routed clause over a name splits (`Gen::holding`): an `if` at `k`, the name above it one
@@ -5646,14 +5648,15 @@ impl Gen {
             });
         }
         // The routed function called from outside passes the one the program calls a parameter of
-        // its own for each of that one's, of its type and of no refinement, added where it has none,
-        // so that the callee's clauses see the values the calls from outside pass.
+        // its own for each of that one's, of its type and of no refinement, a distinct one for each,
+        // added where none is left, so that the callee's clauses see the values the calls from outside
+        // pass, each parameter's apart from the others'.
         let mut passed: Vec<usize> = Vec::new();
         if let (Role::Entry, Some(callee)) = (role, self.callee.clone()) {
             for want in callee.params {
                 let own = (0..params.len()).find(|&i| {
                     let p = &params[i];
-                    p.ty == Ty::Int(want) && !p.is_mut && p.refine.is_none()
+                    !passed.contains(&i) && p.ty == Ty::Int(want) && !p.is_mut && p.refine.is_none()
                 });
                 let i = own.unwrap_or_else(|| {
                     params.push(Param {
@@ -5752,8 +5755,15 @@ impl Gen {
                 // the one the program calls, inside the call, whose trap the caller passes back. An
                 // `@prove` clause holds on every value: `@prove` states that `mn prove` will prove it,
                 // which a clause that fails on a call refutes. The function called from outside fails on
-                // none of the parameters it passes on, so that the lowest reaches the callee.
-                let fails = attr == "checked" && !passed.contains(&i) && self.rng.chance(50);
+                // none of the parameters it passes on, and not at all where its callee's `requires`
+                // fails, so that its call of every lowest value reaches the callee with the value that
+                // one fails on, which traps inside the call by construction.
+                let callee_fails =
+                    role == Role::Entry && self.callee.as_ref().is_some_and(|c| c.fails);
+                let fails = attr == "checked"
+                    && !passed.contains(&i)
+                    && !callee_fails
+                    && self.rng.chance(50);
                 if fails {
                     fails_on = Some((i, r.lo));
                 }
@@ -5882,6 +5892,7 @@ impl Gen {
                         })
                         .collect(),
                     returns: ret.is_some(),
+                    fails: fails_on.is_some(),
                 })
             }
             Role::Entry => {}

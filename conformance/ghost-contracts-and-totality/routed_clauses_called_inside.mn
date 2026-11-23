@@ -2,9 +2,9 @@
 module conformance
 // Routed clauses that hold blocks, of functions the program calls: a call checks a `@checked`
 // function's `requires` where it is made and traps where the clause fails, and its caller passes
-// the trap back, while a call the clause lets through goes on. A run evaluates an `@prove`
-// function's clause all the same. MIR keeps each such check at each call site, since Tier 1
-// proves none of them.
+// the trap back, while a call the clause lets through goes on. An `@prove` function's clause
+// holds for every value its callers pass, as `mn prove` will prove, and a run evaluates it all the
+// same. MIR keeps each such check at each call site, since Tier 1 proves none of them.
 
 @checked
 fn half(x: u8) -> u8
@@ -25,7 +25,7 @@ fn third(x: u8) -> u8
 
 @prove
 fn quarter(x: u8) -> u8
-  requires (if x > 0 { x % 4 == 0 } else { true })
+  requires (if x > 0 { x >= 1 } else { x == 0 })
 = x / 4
 
 pub fn twice(y: u8) -> u8 = half(y) + half(y)

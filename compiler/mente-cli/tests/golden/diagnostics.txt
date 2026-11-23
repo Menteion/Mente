@@ -555,7 +555,7 @@
 == ghost-contracts-and-totality/loop_met_again_breaks_from_an_inner_condition.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == ghost-contracts-and-totality/routed_clauses_called_inside.mn ==
-{"version":1,"diagnostics":[],"todos":[],"trusted":[{"clause":"requires if x > 0 { ... } of quarter","span":{"file":"routed_clauses_called_inside.mn","start":748,"end":785,"line":28,"column":13}}]}
+{"version":1,"diagnostics":[],"todos":[],"trusted":[{"clause":"requires if x > 0 { ... } of quarter","span":{"file":"routed_clauses_called_inside.mn","start":821,"end":856,"line":28,"column":13}}]}
 == ghost-contracts-and-totality/routed_clauses_holding_blocks.mn ==
 {"version":1,"diagnostics":[],"todos":[],"trusted":[{"clause":"ensures match result { ... } of same","span":{"file":"routed_clauses_holding_blocks.mn","start":484,"end":540,"line":17,"column":12}}]}
 == ghost-contracts-and-totality/stale_fact_in_a_guard.mn ==
