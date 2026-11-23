@@ -578,8 +578,6 @@
 {"version":1,"diagnostics":[{"code":"E0111","severity":"error","message":"expected `=` and the binding's value, found `1`","primary":{"file":"binding_without_value.mn","start":64,"end":65,"line":4,"column":9},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
 == grammar/chain_beyond_256_levels.mn ==
 {"version":1,"diagnostics":[{"code":"E0127","severity":"error","message":"this code nests deeper than 256 levels of expressions, blocks and types; give a nested part a name with `val`, or a function of its own","primary":{"file":"chain_beyond_256_levels.mn","start":99,"end":1116,"line":4,"column":20},"related":[],"fixes":[]}],"todos":[],"trusted":[]}
-== grammar/chain_within_the_limit.mn ==
-{"version":1,"diagnostics":[],"todos":[],"trusted":[]}
 == grammar/chained_comparison.mn ==
 {"version":1,"diagnostics":[{"code":"E0113","severity":"error","message":"comparisons do not chain; write `... b and b ...`","primary":{"file":"chained_comparison.mn","start":85,"end":86,"line":3,"column":50},"related":[],"fixes":[{"message":"compare `b` twice, joined by `and`","applicability":"suggestion","edits":[{"span":{"file":"chained_comparison.mn","start":84,"end":84,"line":3,"column":49},"replacement":" and b"}]}]}],"todos":[],"trusted":[]}
 == grammar/char_literal.mn ==
