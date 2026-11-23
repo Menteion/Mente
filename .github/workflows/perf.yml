@@ -76,7 +76,10 @@ jobs:
           node .github/scripts/build-time-code.mjs
       - name: Overflow checks in this job's release build
         if: steps.watch.outputs.run != 'false'
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Install clang 18
         if: steps.watch.outputs.run != 'false'
         run: |
@@ -96,7 +99,10 @@ jobs:
           perf stat -e cycles,instructions,branches,branch-misses,cache-references,cache-misses -- true
       - name: Test the measuring script
         if: steps.watch.outputs.run != 'false'
-        run: node --test perf/run.test.mjs
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node --test perf/run.test.mjs
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Build the base branch's compiler
         if: steps.watch.outputs.run != 'false'
         env:
@@ -147,8 +153,10 @@ jobs:
         run: |
           counters=()
           if [ -n "$COUNTERS" ]; then counters=("$COUNTERS"); fi
+          /usr/bin/bash .github/scripts/clean-tree.sh
           node perf/run.mjs --mn "$RUNNER_TEMP/mn" --base-mn "$RUNNER_TEMP/mn-base" --base-tree ../base "${counters[@]}" \
             --out "$RUNNER_TEMP/perf-results.json" --work "$RUNNER_TEMP/perf-work"
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.watch.outputs.run != 'false'
         with:

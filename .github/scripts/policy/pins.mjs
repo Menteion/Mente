@@ -36,7 +36,7 @@ export function jobDigest(doc, job) {
 export const PINNED_FILES = new Map([
   // The policy's list of its own files: a module dropped from it, or the total of checks lowered,
   // changes this digest too.
-  [".github/scripts/policy/modules.json", "97cd476f4185e30fbfffa9dfc6277436ad8776172007475c36bdaa73d468462b"],
+  [".github/scripts/policy/modules.json", "bece218f9db12b016066007feb0eeb2d82c257b7f424329a4883e1bd9e8ad6b6"],
   [".github/scripts/limits.sh", "40747e4a7344895ce42dd902adb28dd669809d4dd6821d3c1e01921552669ed0"],
   [".github/scripts/memory-guard.sh", "c3c629010f58d39682fa06353305181cf7d1064d2b07abefd6885033045630d1"],
   [".github/scripts/job-limits.ps1", "6222b38ac2c9c5598a986c345afde016d55ae70e68138ed975f28ab15cdefc4e"],
@@ -59,10 +59,12 @@ export const PINNED_FILES = new Map([
   [".github/scripts/test-sandbox.rs", "8ce1084352c530f615812a052dcbf527f92dafc098d1310e8b64888a42e19b80"],
   [".github/scripts/test-sandbox-env.sh", "f78020328d4fed7700655d3cf5825d4cf9372c9931f168b39114cf3dd5f10d8a"],
   [".github/scripts/overflow-proof.sh", "b27d5bf8296337f43d188e5676cef4dde4586c2344882b6aee6b9e9ea0c66ece"],
+  // The check that the tree a job's gate commands judge is the commit's (clean-tree-around-every-test-run).
+  [".github/scripts/clean-tree.sh", "5bd3a7e5023548b1ef098d17600eabd30072a8652a6826273c88e344c3d6c6a9"],
   // The policy's collector, its run tests and the fixtures they run instead of a text handed to bash
   // (policy-runtime-judge): run by the Documentation job, pinned like every script it runs.
   [".github/scripts/policy-collect.mjs", "8594d53e73f3b014fff01ee9cc1014fa5575a9b3ee9b102fae33c03754b0f6af"],
-  [".github/scripts/policy-run.test.mjs", "0e12e92f47af98c5bea51930569b7fd9dbb78455bb66fff14733ae3b861cdd16"],
+  [".github/scripts/policy-run.test.mjs", "a13f3e265128b3a4bcc8cfae0cf0bbff6496be10292a2f916d966a45df2be37f"],
   [".github/scripts/fixtures/limits-flags.sh", "6ece2ca2338651617b501bea5c40bf666e497f49d962881c426e6db081c44e09"],
   [".github/scripts/fixtures/memory-guard-rounds.sh", "29cf23124f683670ac11dd3c5cf0bea04f670f077734fa51ff0c4b83aa62b364"],
   [".github/scripts/fixtures/sandbox-env.sh", "e600a29b7080e262ab08f4b7d0f552c193b035bc4db737c950a737d526540c0e"],
@@ -114,15 +116,15 @@ export const PINNED_FILES = new Map([
 /// the build-time check before anything else of the change, so that a step put before them, an
 /// input of its checkout, or a variable of the job is a change to a gate review sees.
 export const PINNED_JOBS = new Map([
-  ["ci.yml#rust", "3105565a83bb93bb4fbee08ec79b936931500637dc51afce73ddb51cc5dec303"],
-  ["mutants.yml#plan", "a13a733683622b5149435a55f9f7b5f334383df878d1006b0a4093ee06a5b3bc"],
-  ["mutants.yml#shard", "17c2d55473d78fad9ca5fa76de14a74417f0ce17b1ca7c534a57f69aba63c885"],
+  ["ci.yml#rust", "3cdf9362aeae838031514069281a03aed8455e276ae9a9353fcfa66e63cf4999"],
+  ["mutants.yml#plan", "0083c1e7bb32d407884147f1c7d8d8173343ca07184f06e50e1b06e4ac08156e"],
+  ["mutants.yml#shard", "4fee5dc2b20a5cef929034eb61943f189a71c563380c102538befdb3d0821b83"],
   ["mutants.yml#aggregate", "579f212be0eb40ba5b554285629ca1d61b5cc8f78d8e5aa56db6f8e26fa73ac4"],
   ["mutants-full.yml#build", "2c983a54519f8d1007516cc85819127a66bba1008c017d70a6fbf9bb5a4d437a"],
-  ["mutants-full.yml#full", "e1d21246b9c6b8e0bb849381d7f7a56fe717718ec3a0245f2fb13fb707aac996"],
-  ["ci.yml#execution-paths", "ffb9b1d7eb4ab57c72f6cb75d3ab6c181f52c749b3a9e6e078ab1475405099cb"],
-  ["generated.yml#paths", "e5da13151fa0b007ca0e8f1f226cc44edff46c76b7800d0e77951aae7d4050a4"],
-  ["ci.yml#docs", "9795712883409606684a0f16d9234792a40a76376018d594dc5596673dcae5ed"],
+  ["mutants-full.yml#full", "f8d764e68112ed97abd32c5832d2335ff8f76aa4f7413c56fb2e9a12836abd8a"],
+  ["ci.yml#execution-paths", "a243e80823b0f61a6e4ea8ab0392b0e67540b874df9ee061fd058a8e353927ee"],
+  ["generated.yml#paths", "3fc9e3171002a2d136d7f3cc76601081207bd7ac6a2f5196ad4322eb48efbcaf"],
+  ["ci.yml#docs", "847b75b1af5340d6fc502b39b1c822b820fa75dc746b0bd1d2888900da1dcae0"],
   ["commits.yml#commits", "c4e624153a4a97ce9e979f1d6bd3e8df4312ef3c2832b3c1ef64e7739ac98cd7"],
   ["benchmark.yml#bench", "5fe155416addc5eae5e51174842ae3bdf8e69ffdd1879ba691c482b60a03c971"],
   ["prelim.yml#prelim", "ac6eadf49ad0da4d645891fc15d16450c3dbd0905926e5c9c92b548ed7557bc7"],

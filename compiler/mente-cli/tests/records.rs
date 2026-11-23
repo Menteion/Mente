@@ -993,3 +993,41 @@ fn test_the_spec_layout_refuses_each_way_a_spec_breaks_it() {
     let arrows = planted("arrows", &[("README.md", "# A \u{2192} B, x \u{2264} y\n")]);
     assert_eq!(spec_layout(&arrows), Vec::<String>::new());
 }
+
+/// Every walk of the tree leaves out the directories of one list, `walk-skips.txt` (the brief
+/// clean-tree-around-every-test-run): the records' closed world, the English-text gate and the
+/// check of the tree a job's tests judge read it, so that none can leave out what another reads.
+/// A line of the list is a directory's name; a comment or a blank line is none.
+#[test]
+fn test_the_walks_leave_out_one_list_of_directories() {
+    for name in [".git", "target", "node_modules"] {
+        assert!(records::walk_skips(name), "{} is walked", name);
+    }
+    for name in [
+        "src",
+        "docs",
+        "",
+        "#",
+        "Target",
+        ".github",
+        "node_modules/x",
+    ] {
+        assert!(!records::walk_skips(name), "{:?} is left out", name);
+    }
+    // The list read as the walks read it: its names alone, none of its comments.
+    let names: Vec<&str> = records::walk_skip_names().collect();
+    assert_eq!(names, [".git", "target", "node_modules"]);
+    for comment in records::WALK_SKIPS.lines().filter(|l| l.starts_with('#')) {
+        assert!(
+            !records::walk_skips(comment),
+            "a comment is a name: {comment}"
+        );
+    }
+    for name in &names {
+        assert!(
+            !name.contains('/') && !name.contains('\\'),
+            "{} is no one directory's name",
+            name
+        );
+    }
+}

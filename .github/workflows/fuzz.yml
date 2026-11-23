@@ -59,20 +59,25 @@ jobs:
         run: cargo build --locked --release --bin mn
       - name: Overflow checks in this job's release build
         if: steps.watch.outputs.run != 'false'
-        run: bash .github/scripts/overflow-proof.sh
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          bash .github/scripts/overflow-proof.sh
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Fuzz
         if: steps.watch.outputs.run != 'false'
         run: |
           seed=1
           seconds=120
           status=0
-          target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out || status=$?
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out "$RUNNER_TEMP/fuzz-out" || status=$?
+          /usr/bin/bash .github/scripts/clean-tree.sh
           # Every part capped by lines and by bytes, the whole by bytes, each cut said: GitHub refuses a
           # step summary past 1024k (.github/scripts/fuzz-summary.mjs).
-          node .github/scripts/fuzz-summary.mjs fuzz-out "mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)" "$status" >> "$GITHUB_STEP_SUMMARY"
+          node .github/scripts/fuzz-summary.mjs "$RUNNER_TEMP/fuzz-out" "mn fuzz --seed $seed --seconds $seconds --jobs $(nproc)" "$status" >> "$GITHUB_STEP_SUMMARY"
           # The floor of work done: a campaign that ran no case found nothing because it looked
           # at nothing.
-          runs=$(sed -n -E 's/^runs: ([0-9]+)$/\1/p' fuzz-out/summary.txt 2>/dev/null || true)
+          runs=$(sed -n -E 's/^runs: ([0-9]+)$/\1/p' "$RUNNER_TEMP/fuzz-out/summary.txt" 2>/dev/null || true)
           if [ "$status" -eq 0 ] && { [ -z "$runs" ] || [ "$runs" -eq 0 ]; }; then
             echo "::error::mn fuzz ran ${runs:-no} cases"
             exit 1
@@ -82,5 +87,5 @@ jobs:
         if: always() && steps.watch.outputs.run != 'false'
         with:
           name: fuzz-failures
-          path: fuzz-out
+          path: ${{ runner.temp }}/fuzz-out
           if-no-files-found: ignore

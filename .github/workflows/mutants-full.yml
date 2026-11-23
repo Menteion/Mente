@@ -134,9 +134,11 @@ jobs:
           set -o pipefail
           # The tests, under the limits every test runs under.
           . .github/scripts/limits.sh
-          cargo nextest run --workspace 2>&1 | tee baseline.log
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          cargo nextest run --workspace 2>&1 | tee "$RUNNER_TEMP/baseline.log"
+          /usr/bin/bash .github/scripts/clean-tree.sh
           { echo "## Slowest tests without a mutant"; echo '```text'
-            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
+            sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/baseline.log" | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
@@ -153,7 +155,9 @@ jobs:
           # cargo-mutants writes its outcomes and logs outside the workspace: inside it a test
           # could read them, and tell which mutant it runs under.
           out=$RUNNER_TEMP/mutants/mutants.out
+          /usr/bin/bash .github/scripts/clean-tree.sh
           cargo mutants "${only[@]}" --shard "$SHARD/16" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants" || status=$?
+          /usr/bin/bash .github/scripts/clean-tree.sh
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
           # missed and 3 when one timed out. A mutant that loops without end fails the test
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
@@ -169,9 +173,9 @@ jobs:
           done
           # Every mutant counted caught or unviable shows it in its log, a caught one with nextest's
           # line that it handed the tests to the sandbox (.github/scripts/mutants-floor.mjs).
-          node .github/scripts/mutants-floor.mjs evidence "$out" > evidence.txt
-          if grep -q . evidence.txt; then
-            { echo "## Outcomes the logs do not show"; echo '```text'; cat evidence.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          node .github/scripts/mutants-floor.mjs evidence "$out" > "$RUNNER_TEMP/evidence.txt"
+          if grep -q . "$RUNNER_TEMP/evidence.txt"; then
+            { echo "## Outcomes the logs do not show"; echo '```text'; cat "$RUNNER_TEMP/evidence.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::mutants are counted caught or unviable without a failed test or a failed build in their logs"
             failed=1
           fi

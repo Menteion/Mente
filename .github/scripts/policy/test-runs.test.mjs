@@ -250,7 +250,7 @@ check("the tests run under the limits the policy holds, and every test given mor
 /// own binary under the ci profile, with nothing after either that could filter, retry or forgive a
 /// failure, then the check that the tests ran in the sandbox, and nothing on the step but its name
 /// and this script.
-const NEXTEST_STEP = ". .github/scripts/limits.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/test-sandbox.sh ran\n/usr/bin/bash .github/scripts/tools.sh verify\n";
+const NEXTEST_STEP = ". .github/scripts/limits.sh\n/usr/bin/bash .github/scripts/clean-tree.sh\ncargo-nextest nextest run --locked --workspace --profile ci\n/usr/bin/bash .github/scripts/test-sandbox.sh ran\n/usr/bin/bash .github/scripts/clean-tree.sh\n/usr/bin/bash .github/scripts/tools.sh verify\n";
 
 check("the tests run through the pinned nextest under the shared limits, which no setting can lift", () => {
   for (const key of TESTING_JOBS) {

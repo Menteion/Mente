@@ -48,18 +48,27 @@ jobs:
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
       - name: Test the site generator and its link check
-        run: npm run test:site
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          npm run test:site
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Install mdBook
         # Downloaded and checked against its digest on every run: no cache, which another job of the
         # same pull request could have written (.github/scripts/install-mdbook.sh).
         run: bash .github/scripts/install-mdbook.sh
       - name: Build mn, whose `mn explain` the error-code pages come from
-        run: cargo build --locked --bin mn
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          cargo build --locked --bin mn
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Build the site and check every link
         env:
           # The commit the site is built from, which an unreleased build names.
           SITE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: node site/build.mjs --mn target/debug/mn --mdbook "$HOME/.local/mdbook/mdbook"
+        run: |
+          /usr/bin/bash .github/scripts/clean-tree.sh
+          node site/build.mjs --mn target/debug/mn --mdbook "$HOME/.local/mdbook/mdbook"
+          /usr/bin/bash .github/scripts/clean-tree.sh
       - name: Keep the built site for review
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

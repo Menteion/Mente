@@ -1,11 +1,18 @@
 ---
 id: clean-tree-around-every-test-run
-status: deferred
+status: archived
 trigger: when plan-outside-checkout's pull request (219) has merged
 type: chore
-affectedFiles: [.github/scripts/clean-tree.sh, .github/scripts/test-sandbox-env.sh, .github/workflows/**, .github/gate-commands.txt, .github/scripts/policy/**, .github/scripts/policy-run.test.mjs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, compiler/mente-cli/tests/gates.rs, compiler/mente-cli/src/walk-skips.txt, briefs/clean-tree-around-every-test-run.md, briefs/archive/clean-tree-around-every-test-run.md]
+affectedFiles: [.github/scripts/clean-tree.sh, .github/instrument-paths.txt, .github/scripts/test-sandbox-env.sh, .github/workflows/**, .github/gate-commands.txt, .github/scripts/policy/**, .github/scripts/policy-run.test.mjs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, compiler/mente-cli/tests/gates.rs, compiler/mente-cli/src/walk-skips.txt, briefs/clean-tree-around-every-test-run.md, briefs/archive/clean-tree-around-every-test-run.md]
 protectedFiles: [spec/**, CLAUDE.md]
+integrity: sha256-cf04c69a210eec4e2824287b619a23b13d98e3e67f04636a6eb1e1b9ae733f29
 ---
+
+<!-- spec-brief:banner -->
+> **Archived 2026-11-23.**
+> Recorded at commit `d823663`.
+> The body below describes the tree before execution and is not maintained.
+<!-- /spec-brief:banner -->
 
 # Keep the tree the tests judge equal to the commit's, before and after every test run
 
@@ -31,7 +38,7 @@ None is Markdown, so no test fails on them today, but a test that walks the tree
 - an untracked file, a tracked file changed, and an ignored file the walks read. `.gitignore` hides `mutants.out/`, `prelim-out/`, `bench-out/`, `fixtures-out/` and `build/`, where the harness writes `*.reply.md`, so the check reads ignored files too (the review of 996aea6);
 - what it leaves out comes from the one definition the walks read (`records.rs:276` and `gates.rs:695` each spell `.git`, `target` and `node_modules` today): one list, read by both walks and by the script, or, if the shell cannot share it, a test that holds the copies equal.
 
-**Before and after each test run:** a test step runs it first, and again right after each test command, since `baseline.log` is written while the tests run. The steps that source `test-sandbox-env.sh` get both through it; the required jobs outside the sandbox (docs, pages, generated programs, execution paths, Z3, fuzz, the MIR gate, perf, the harness) run it as steps around their gate commands.
+**Before and after each test run:** every step that runs a gate command of its required job, and every test run of a testing job, runs it on the line right before its first such command and on the line right after its last, since `baseline.log` is written while the tests run. The lines stand in each step's script, where the policy reads them, not in `test-sandbox-env.sh`, where a check would run out of the policy's sight and in steps that run no gate command. A step of the gate's own setup alone, which runs before any code of the change or reads only files outside the tree (the toolchain's step, the tools' record, the sandbox's setup and proof, cargo-mutants' digest, the tests' times, mdBook's install), runs none; the policy names each with its reason (`CLEAN_TREE_SETUP`). The Commits job, which reads commit text alone, runs none either.
 
 **The in-place mutate step has its own form:** `cargo mutants --in-place` changes a tracked file, one mutant at a time, by design. The check runs before the step and after it, when every mutated file must be restored; during it the one mutated file is the change under test.
 
@@ -48,8 +55,8 @@ None is Markdown, so no test fails on them today, but a test that walks the tree
 
 ## Invariants
 
-- [ ] Every required job runs the check before its first command of `.github/gate-commands.txt` and after its last, each test step of a sandboxed job through `test-sandbox-env.sh`; the workflow policy refuses a job without it, and one with it after its first gate command, each planted.
-- [ ] The check's exclusions are the walks' own, from one definition or held equal by a test.
-- [ ] A run test of `clean-tree.sh` in repositories it makes: a clean tree and files under the excluded directories pass; an untracked file, a changed tracked file and a file in an ignored directory the walks read fail, each named; a name with a quote, a newline or `::` is printed escaped.
-- [ ] The Mutants plan's and shards' working files, and `mutants-full.yml`'s, live under `$RUNNER_TEMP`; the plan's artifact keeps its layout.
-- [ ] The `.github` changes go to Norman.
+- [x] Every step of a required job that runs a gate command other than the gate's own setup, and every test run of a testing job, runs the check right before its first such command and right after its last; the workflow policy refuses a step without it before, without it after, with a writer between, or with it after the step's first gate command, each planted.
+- [x] The check's exclusions are the walks' own, from one definition or held equal by a test.
+- [x] A run test of `clean-tree.sh` in repositories it makes: a clean tree and files under the excluded directories pass; an untracked file, a changed tracked file and a file in an ignored directory the walks read fail, each named; a name with a quote, a newline or `::` is printed escaped.
+- [x] The Mutants plan's and shards' working files, and `mutants-full.yml`'s, live under `$RUNNER_TEMP`; the plan's artifact keeps its layout.
+- [x] The `.github` changes go to Norman.

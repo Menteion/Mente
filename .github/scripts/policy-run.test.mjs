@@ -28,7 +28,7 @@ const workflowText = () =>
     .filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"))
     .map((f) => read(`${WORKFLOWS}/${f}`));
 
-const FLOOR = 22;
+const FLOOR = 23;
 let ran = 0;
 function check(name, fn) {
   test(name, (...args) => {
@@ -1365,6 +1365,8 @@ check("a shard's listing and its run hold it to the names the plan dealt, as mut
     };
     for (const f of [".github/scripts/mutants-floor.mjs", ".github/scripts/lib/mutants-floor.mjs"]) put(f, read(f));
     put(".github/scripts/tools.sh", "exit 0\n");
+    // The check of the tree around the shard's commands, which a run test of its own holds.
+    put(".github/scripts/clean-tree.sh", "exit 0\n");
     put(".github/scripts/test-sandbox.sh", 'echo "test-sandbox.sh $*" >> "$RUNNER_TEMP/sandbox.log"\n');
     put(".github/scripts/limits.sh", ": limits\n");
     // cargo lists what STUB_LIST holds, and a run of mutants writes STUB_RUN's outcomes into its
@@ -1495,6 +1497,89 @@ check("a shard installs cargo-mutants only as the binary its builder took the di
     const injected = run(`${digest}\n::warning::planted`);
     assert.equal(injected.status, 1);
     assert.doesNotMatch(injected.out, /^::warning::/m, "the digest reaches the log as a command");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+check("clean-tree.sh passes a tree that is the commit's, and names each path of one that is not", () => {
+  // .github/scripts/clean-tree.sh, which every required job runs around its gate commands (the brief
+  // clean-tree-around-every-test-run): in a repository the test makes, with the walks' own list of
+  // what they leave out, each kind of difference from the commit is refused and named, and what the
+  // walks leave out passes.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mente-clean-tree-"));
+  try {
+    const sh = testGit(dir);
+    sh("init", "-q", "-b", "main");
+    const put = (file, text = "x\n") => {
+      fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+      fs.writeFileSync(path.join(dir, file), text);
+    };
+    put("compiler/mente-cli/src/walk-skips.txt", read("compiler/mente-cli/src/walk-skips.txt"));
+    put("a.md", "# A\n");
+    put(".gitignore", "out/\n*.o\ntarget/\nnode_modules/\n");
+    sh("add", "-A");
+    sh("commit", "-q", "-m", "Base");
+    const script = posixPath(path.join(HERE, "clean-tree.sh"));
+    const run = () => spawnSync(bashPath(), [script], { cwd: dir, encoding: "utf8", env: GIT_TEST_ENV, timeout: 30000 });
+    const clean = run();
+    assert.equal(clean.status, 0, `the commit's own tree is refused: ${clean.stdout}${clean.stderr}`);
+    assert.equal(clean.stdout, "");
+    // What the walks leave out passes: target/, node_modules/, and a directory with a .git of its own.
+    put("target/debug/x.md");
+    put("node_modules/p/README.md");
+    put("nested/.git/HEAD", "ref: refs/heads/main\n");
+    put("nested/x.md");
+    const left = run();
+    assert.equal(left.status, 0, `what the walks leave out is refused: ${left.stdout}`);
+    // Each difference is refused, and named.
+    const refused = (what, make, undo, says) => {
+      make();
+      const r = run();
+      assert.equal(r.status, 1, `${what} passes`);
+      assert.match(r.stdout, says, `${what}: ${r.stdout}`);
+      undo();
+      assert.equal(run().status, 0, `the tree after ${what} is undone is refused`);
+    };
+    const rm = (file) => () => fs.rmSync(path.join(dir, file), { recursive: true, force: true });
+    refused("an untracked file", () => put("plan/summary.md"), rm("plan"), /^::error::the tree the gate commands judge is not the commit's: \?\? plan\/summary\.md$/m);
+    refused("a tracked file changed", () => put("a.md", "# Changed\n"), () => sh("checkout", "--", "a.md"), /^::error::.*: {2}M a\.md$/m);
+    refused("a file staged", () => { put("b.txt"); sh("add", "b.txt"); }, () => { sh("rm", "-q", "--cached", "b.txt"); rm("b.txt")(); }, /: A {2}b\.txt$/m);
+    refused("an ignored directory the walks read", () => put("out/x.reply.md"), rm("out"), /: !! out\/$/m);
+    refused("an ignored file the walks read", () => put("main.o"), rm("main.o"), /: !! main\.o$/m);
+    refused("a file deleted", rm("a.md"), () => sh("checkout", "--", "a.md"), /: {2}D a\.md$/m);
+    // The count of what differs ends the report.
+    put("one.txt");
+    put("two.txt");
+    const two = run();
+    assert.match(two.stdout, /^::error::2 path\(s\) of the tree differ from the commit/m);
+    rm("one.txt")();
+    rm("two.txt")();
+    // A name that would end the message or start a command is escaped, never echoed raw.
+    if (process.platform !== "win32") {
+      put("a%b\nc::error::x");
+      const hostile = run();
+      assert.equal(hostile.status, 1);
+      assert.match(hostile.stdout, /a%25b%0Ac::error::x/);
+      assert.doesNotMatch(hostile.stdout, /^c::error::x/m, "a file's name began a workflow command");
+      rm("a%b\nc::error::x")();
+    }
+    // It fails closed: a list that names nothing, and git that cannot read a repository.
+    put("compiler/mente-cli/src/walk-skips.txt", "# nothing\n\n");
+    sh("commit", "-q", "-am", "Empty list");
+    const empty = run();
+    assert.equal(empty.status, 1, "a list that names no directory passes");
+    assert.match(empty.stdout, /names no directory to leave out/);
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "mente-clean-tree-none-"));
+    try {
+      fs.mkdirSync(path.join(outside, "compiler", "mente-cli", "src"), { recursive: true });
+      fs.copyFileSync(path.join(ROOT, "compiler/mente-cli/src/walk-skips.txt"), path.join(outside, "compiler/mente-cli/src/walk-skips.txt"));
+      const none = spawnSync(bashPath(), [script], { cwd: outside, encoding: "utf8", env: { ...GIT_TEST_ENV, GIT_CEILING_DIRECTORIES: posixPath(path.dirname(outside)) }, timeout: 30000 });
+      assert.notEqual(none.status, 0, "a tree git cannot read passes");
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+    assertTestIdentity(sh);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

@@ -20,13 +20,17 @@ export const CHECKOUT_INPUTS = [{ "persist-credentials": false }, { "fetch-depth
 /// read here, and by the harness's test of the escapes.
 export const PERMISSION = JSON.parse(read("benchmark/harness/permission.json"));
 export const NODE_INPUTS = { "node-version": PERMISSION.node, "package-manager-cache": false };
+/// The check that the tree a job's gate commands judge is the commit's (.github/scripts/clean-tree.sh;
+/// the brief clean-tree-around-every-test-run), which every step of a gate command runs around it.
+export const CLEAN_TREE = "/usr/bin/bash .github/scripts/clean-tree.sh";
 /// The Documentation job's first run: the collector, then the policy, its run tests and the YAML
-/// reader's (policy-runtime-judge), as BEFORE_TOOLCHAIN reads a step's script, trimmed.
-export const POLICY_RUN = "node .github/scripts/policy-collect.mjs\nnode --test \".github/scripts/policy/*.test.mjs\" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs";
+/// reader's (policy-runtime-judge), checked around for the tree they read, as BEFORE_TOOLCHAIN reads
+/// a step's script, trimmed.
+export const POLICY_RUN = `${CLEAN_TREE}\nnode .github/scripts/policy-collect.mjs\nnode --test ".github/scripts/policy/*.test.mjs" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs\n${CLEAN_TREE}`;
 export const BEFORE_TOOLCHAIN = new Map([
   ["bash .github/scripts/publish-tag.sh", { job: "pages-publish.yml#build", env: { TAG: "${{ inputs.tag }}" }, why: "the milestone tag the run was given, checked out once its commit is proven in main's history, before anything of it runs" }],
   [POLICY_RUN, { job: "ci.yml#docs", why: "the policy, first in the Documentation job: its collector, then its tests" }],
-  ["node .github/scripts/action-pins.mjs", { job: "ci.yml#docs", why: "the check of the actions' pins against their releases" }],
+  [`${CLEAN_TREE}\nnode .github/scripts/action-pins.mjs\n${CLEAN_TREE}`, { job: "ci.yml#docs", why: "the check of the actions' pins against their releases" }],
   ['echo "RUSTUP_HOME=$RUNNER_TEMP/rustup" >> "$GITHUB_ENV"', { job: "harness.yml#fixtures", why: "the harness's toolchain, put outside the home its sandbox hides" }],
 ]);
 export const sameKeys = (o, keys) => isPlain(o) && JSON.stringify(Object.keys(o).sort()) === JSON.stringify([...keys].sort());

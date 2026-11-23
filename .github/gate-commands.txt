@@ -67,24 +67,24 @@ mutants.yml#plan: node .github/scripts/build-time-code.mjs --before-toolchain
 mutants.yml#plan: node .github/scripts/build-time-code.mjs
 mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh check
-mutants.yml#plan: git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
-mutants.yml#plan: node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
+mutants.yml#plan: git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > "$w/pr.diff"
+mutants.yml#plan: node .github/scripts/mutants-floor.mjs missing "$w/pr.diff" "$w/base-all-mutants.json" "$w/diff-mutants.json" "$w/deleted-mutants.json" > "$w/missing.txt"
 mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 mutants.yml#plan: /usr/bin/bash .github/scripts/test-sandbox.sh bound
-mutants.yml#plan: node .github/scripts/mutants-floor.mjs plan diff-mutants.json deleted-mutants.json "$(cat baseline-seconds.txt)" plan >> "$GITHUB_OUTPUT"
+mutants.yml#plan: node .github/scripts/mutants-floor.mjs plan "$w/diff-mutants.json" "$w/deleted-mutants.json" "$(cat "$w/baseline-seconds.txt")" "$w/plan" >> "$GITHUB_OUTPUT"
 
 mutants.yml#shard: node .github/scripts/build-time-code.mjs --before-toolchain
 mutants.yml#shard: node .github/scripts/build-time-code.mjs
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh setup
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh check
 mutants.yml#shard: /usr/bin/sha256sum -c "$RUNNER_TEMP/cargo-mutants.sha256"
-mutants.yml#shard: node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
+mutants.yml#shard: node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$RUNNER_TEMP/shard-mutants.json" > "$RUNNER_TEMP/unlisted.txt"
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh ran
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh ran "$caught"
 mutants.yml#shard: /usr/bin/bash .github/scripts/test-sandbox.sh bound
 mutants.yml#shard: cargo mutants "${shard[@]}" --in-place --no-shuffle --baseline=skip --cargo-arg=--cargo-message-format=json --timeout 600 --output "$RUNNER_TEMP/mutants"
-mutants.yml#shard: node .github/scripts/mutants-floor.mjs evidence "$out" > evidence.txt
-mutants.yml#shard: node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$out" > unrun.txt
+mutants.yml#shard: node .github/scripts/mutants-floor.mjs evidence "$out" > "$RUNNER_TEMP/evidence.txt"
+mutants.yml#shard: node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$out" > "$RUNNER_TEMP/unrun.txt"
 
 generated.yml#paths: node .github/scripts/build-time-code.mjs --before-toolchain
 generated.yml#paths: node .github/scripts/build-time-code.mjs
@@ -105,12 +105,12 @@ smt.yml#z3: xargs -a "$RUNNER_TEMP/queries.txt" -d '\n' -P "$(nproc)" -n 1 bash 
 fuzz.yml#fuzz: node .github/scripts/build-time-code.mjs --before-toolchain
 fuzz.yml#fuzz: node .github/scripts/build-time-code.mjs
 fuzz.yml#fuzz: bash .github/scripts/overflow-proof.sh
-fuzz.yml#fuzz: target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out fuzz-out
+fuzz.yml#fuzz: target/release/mn fuzz --seed "$seed" --seconds "$seconds" --jobs "$(nproc)" --out "$RUNNER_TEMP/fuzz-out"
 
 mir-mutants.yml#gate: node .github/scripts/build-time-code.mjs --before-toolchain
 mir-mutants.yml#gate: node .github/scripts/build-time-code.mjs
 mir-mutants.yml#gate: bash .github/scripts/overflow-proof.sh
-mir-mutants.yml#gate: ./target/release/mn test --mutate --reported examples > gate.txt
+mir-mutants.yml#gate: ./target/release/mn test --mutate --reported examples > "$RUNNER_TEMP/gate.txt"
 
 perf.yml#kernels: node .github/scripts/build-time-code.mjs --before-toolchain
 perf.yml#kernels: node .github/scripts/build-time-code.mjs

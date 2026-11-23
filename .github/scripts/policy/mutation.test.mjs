@@ -468,7 +468,7 @@ check("the Mutants floor counts what the diff changes, as cargo-mutants marks it
   const mutantsJob = ["plan", "shard"].flatMap((id) => steps(mutantsDoc.jobs[id])).map((s) => String(s.run ?? "")).join("\n");
   // With quotePath off, git quotes only a path holding a quote, a backslash or a control character,
   // which the floor refuses; a path in any other script stays as it is (the fourth review).
-  assert.match(mutantsJob, /^\s*git -c core\.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > pr\.diff$/m, "the Mutants job reads the diff in a form .gitattributes or the path's characters can change");
+  assert.match(mutantsJob, /^\s*git -c core\.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin\/\$\{GITHUB_BASE_REF\}\.\.\.HEAD" > "\$w\/pr\.diff"$/m, "the Mutants job reads the diff in a form .gitattributes or the path's characters can change");
   assert.doesNotMatch(mutantsJob.replace(/git (?:-c core\.quotePath=false )?(diff|show) --(text --no-ext-diff --)?no-textconv /g, ""), /\bgit (?:-c \S+ )*(diff|show|log -p)\b/, "the Mutants job reads a diff or a file without --no-textconv");
   const diff = [
     "diff --git a/compiler/a/src/lib.rs b/compiler/a/src/lib.rs",
@@ -663,11 +663,14 @@ check("the plan deals every mutant of the run to one shard, as many shards as th
   assert.ok(doc.jobs.shard["timeout-minutes"] >= 2 * SHARD_MINUTES, "a shard's time limit is less than twice the plan's time for it");
   assert.ok(doc.jobs.shard.strategy?.matrix?.shard === "${{ fromJSON(needs.plan.outputs.shards) }}", "the shards are not those the plan made");
   const planStep = steps(doc.jobs.plan).find((s) => s.id === "plan");
-  assert.match(String(planStep?.run), /mutants-floor\.mjs plan diff-mutants\.json deleted-mutants\.json "\$\(cat baseline-seconds\.txt\)" plan >> "\$GITHUB_OUTPUT"\n/);
+  // The plan's files live in the job's working directory outside the checkout (the brief
+  // clean-tree-around-every-test-run), which the artifact keeps with its layout.
+  assert.match(String(planStep?.run), /^w=\$RUNNER_TEMP\/mutants-work\n/);
+  assert.match(String(planStep?.run), /mutants-floor\.mjs plan "\$w\/diff-mutants\.json" "\$w\/deleted-mutants\.json" "\$\(cat "\$w\/baseline-seconds\.txt"\)" "\$w\/plan" >> "\$GITHUB_OUTPUT"\n/);
   const upload = steps(doc.jobs.plan).find((s) => String(s.uses ?? "").startsWith("actions/upload-artifact@") && s.with?.name === "mutants-plan");
   const download = steps(doc.jobs.shard).find((s) => String(s.uses ?? "").startsWith("actions/download-artifact@") && s.with?.name === "mutants-plan");
   assert.equal(upload?.with?.name, download?.with?.name, "the shards download another artifact than the plan keeps");
-  assert.ok(String(upload.with.path).split("\n").includes("plan"), "the plan keeps no plan for the shards");
+  assert.ok(String(upload.with.path).split("\n").includes("${{ runner.temp }}/mutants-work/plan"), "the plan keeps no plan for the shards");
   // The shards read the plan where their download puts it: one path, read from the download step,
   // not a second literal beside it (the review of 996aea6).
   assert.ok(String(download?.with?.path).startsWith("${{ runner.temp }}/"), "the shards download the plan elsewhere than under the runner's temporary directory");
