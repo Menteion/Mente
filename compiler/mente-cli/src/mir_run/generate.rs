@@ -1383,9 +1383,6 @@ struct Gen {
     helpers: Vec<String>,
     /// The bindings those conjuncts declare so far, which name each.
     helper_bindings: usize,
-    /// Whether what is being generated stands in an arm of a match of more arms than
-    /// [`MAX_FULL_ARMS`], where no such match is written again ([`Gen::wide_arms`]).
-    wide_arm: bool,
     /// Whether the function being generated routes its clauses outside the Tier-1 fragment, by
     /// `@checked` or `@prove`, so that its loops may write such an invariant and measure
     /// ([`Gen::holding`], [`Gen::measure`]).
@@ -1428,7 +1425,6 @@ impl Gen {
             no_candidates: Rng::new(seed),
             helpers: Vec::new(),
             helper_bindings: 0,
-            wide_arm: false,
             routed: false,
             callee: None,
         }
@@ -1740,7 +1736,7 @@ impl Gen {
                 // A small range covered by its literals alone, now and then, and an 8-bit type
                 // too, which a scrutinee is narrowed into ([`match-scrutinee-narrowing`]).
                 if (span < 4 && self.rng.chance(60))
-                    || (span == 255 && !self.relates() && !self.wide_arm && self.rng.chance(whole))
+                    || (span == 255 && !self.relates() && self.rng.chance(whole))
                 {
                     let mut out = Vec::new();
                     let mut n = r.lo;
@@ -2095,12 +2091,11 @@ impl Gen {
     /// value needs a `guard` on a name its pattern binds, which only a block could hold, gives
     /// a default value instead. `None` when no such `match` comes of it.
     fn match_value(&mut self, ty: &Ty, depth: u32) -> Option<(E, Option<R>)> {
-        // Now and then an 8-bit type, which literals alone can cover: here each arm is one
-        // value, where a statement's 256 arms would each be a block. Its arms no longer hold
-        // such a match again (`Gen::wide_arms`), so a value writes one where those did. Half the
-        // time it reads an arithmetic value, which it narrows into its type and covers whole
-        // without `_` ([`match-scrutinee-narrowing`]), as the matches nested in arms mostly did.
-        let eight = self.rng.chance(25);
+        // Now and then an 8-bit type, which literals alone can cover, each arm a leaf
+        // ([`MAX_FULL_ARMS`]). Half the time it reads an arithmetic value, which it narrows into
+        // its type and covers whole without `_` ([`match-scrutinee-narrowing`]), as the matches
+        // nested in the arms of such a match mostly did.
+        let eight = self.rng.chance(12);
         let read = if eight {
             Ty::Int(*self.rng.pick(&[INTS[0], INTS[6]]))
         } else {
@@ -2120,7 +2115,7 @@ impl Gen {
         let root = self.root(&s);
         let mut arms = Vec::new();
         let mut hull: Option<R> = None;
-        let wide = self.wide_arms(&s, pats.len());
+        let leaves = pats.len() > MAX_FULL_ARMS;
         for p in &pats {
             self.scopes.push(Vec::new());
             let ids = self.bind_pattern(p);
@@ -2135,6 +2130,11 @@ impl Gen {
                 .collect();
             let m = self.mark();
             let (mut v, mut r) = match ty {
+                Ty::Int(t) if leaves => {
+                    let n = self.value_in(t.range());
+                    (self.literal(n, None), Some(R::point(n)))
+                }
+                _ if leaves => (self.default_of(ty, None), None),
                 // An integer arm whose static range the generator knows, for the hull.
                 Ty::Int(t) => {
                     let (e, r) = self.narrowed_range(*t, depth + 1);
@@ -2160,40 +2160,10 @@ impl Gen {
             }
             arms.push((self.pattern_text(p, &ids), v));
         }
-        self.end_wide_arms(wide);
         if hull.is_some_and(|h| !h.fits()) {
             return None;
         }
         Some((E::Match(Box::new(s), arms), hull))
-    }
-
-    /// Before the arms of a match on `s` of `arms` arms: past [`MAX_FULL_ARMS`], as only a match that
-    /// covers an 8-bit type by its literals has, its arms read no binding `s` reads, and hold no such
-    /// match again. Such an arm is one of 256 that a call takes one of: a binding the scrutinee reads,
-    /// which the arm's pattern bounds, narrowed in an arm, is a narrowing Tier 1 proves always traps
-    /// where few calls reach, and a match of 256 arms in each of 256 multiplies a function's text.
-    /// What [`Gen::end_wide_arms`] is given back.
-    fn wide_arms(&mut self, s: &E, arms: usize) -> Option<(bool, usize)> {
-        if arms <= MAX_FULL_ARMS {
-            return None;
-        }
-        let read: Vec<usize> = self
-            .visible()
-            .into_iter()
-            .filter(|&id| names(s, &|n| n == self.binds[id].name))
-            .collect();
-        let saved = (self.wide_arm, self.exclude.len());
-        self.wide_arm = true;
-        self.exclude.extend(read);
-        Some(saved)
-    }
-
-    /// After the arms [`Gen::wide_arms`] began.
-    fn end_wide_arms(&mut self, saved: Option<(bool, usize)>) {
-        if let Some((wide, excluded)) = saved {
-            self.wide_arm = wide;
-            self.exclude.truncate(excluded);
-        }
     }
 
     /// A binding of a small refined range, `val q: u8[0..k] = x % k` for a name `x` that is never
@@ -2237,7 +2207,6 @@ impl Gen {
         out.extend(first);
         let root = self.root(&s);
         let mut arms = Vec::new();
-        let wide = self.wide_arms(&s, pats.len());
         for p in &pats {
             self.scopes.push(Vec::new());
             let ids = self.bind_pattern(p);
@@ -2245,12 +2214,23 @@ impl Gen {
             if let Some(r) = root {
                 self.frozen.push(r);
             }
-            let body = self.block(depth + 1, None, Vec::new(), None);
+            let body = if pats.len() > MAX_FULL_ARMS {
+                // A leaf ([`MAX_FULL_ARMS`]): a discard of a literal.
+                let n = self.value_in(R {
+                    lo: Num::ZERO,
+                    hi: Num::small(255),
+                });
+                Block {
+                    stmts: vec![S::Discard(self.literal(n, None))],
+                    tail: None,
+                }
+            } else {
+                self.block(depth + 1, None, Vec::new(), None)
+            };
             self.frozen.truncate(frozen);
             self.scopes.pop();
             arms.push((self.pattern_text(p, &ids), body));
         }
-        self.end_wide_arms(wide);
         out.push(S::Match(s, arms));
         out
     }
@@ -4672,7 +4652,7 @@ impl Gen {
         let Some(Ty::Array(n, elem)) = self.current.as_ref().and_then(|s| s.ret.clone()) else {
             return None;
         };
-        if n == 0 || !self.rng.chance(40) {
+        if n == 0 || !self.rng.chance(70) {
             return None;
         }
         Some(S::Return(Some(self.no_type_array(n, &elem)?)))
@@ -5552,7 +5532,6 @@ impl Gen {
         let routed = role != Role::Own;
         self.binds.clear();
         self.exclude.clear();
-        self.wide_arm = false;
         self.pending.clear();
         self.scopes = vec![Vec::new()];
         self.names = 0;
@@ -6734,13 +6713,17 @@ const EDGE_OPERAND: u128 = 1 << 61;
 /// variables Tier 1 relates.
 const RELATED: usize = 30;
 
-/// The most arms a `match` writes with no rule of its own. Past them, as only a match that covers
-/// an 8-bit type by its literals has, 256, its arms read no binding its scrutinee reads and hold no
-/// such match again ([`Gen::wide_arms`]): arms that held one multiplied a function's text 256 times
-/// a level, to 201880 expressions and statements over seeds 0 to 2999, and an arm that narrowed a
-/// binding of the scrutinee, which its pattern bounds, held a narrowing Tier 1 proves always traps
+/// The most arms a `match` writes each with an expression or a block of its own. Past them, as only a
+/// match that covers an 8-bit type by its literals has, 256, each arm is a leaf, a literal or a
+/// discard of one. A call takes one arm of 256, so the rest are text that no call runs: arms that
+/// held expressions and blocks, and matches of 256 arms again, multiplied a function's text 256
+/// times a level, to 201,880 expressions and statements over seeds 0 to 2999; arms that narrowed a
+/// binding of the scrutinee, which their pattern bounds, held narrowings Tier 1 proves always trap
 /// where no call of a few hundred reaches (the nightly of 2026-11-22, whose claims never reached sat
-/// in four such functions, 1219 of them in one).
+/// in four such functions, 1219 of them in one); and arms that called a function of refined
+/// parameters, each with a guard of each argument before the statement, held a function of 57,532
+/// over seeds 4000 to 7999 with no match nested at all. A match of fewer arms, every other one,
+/// keeps them.
 const MAX_FULL_ARMS: usize = 16;
 
 /// The most expressions and statements a generated function holds, of every attempt the
