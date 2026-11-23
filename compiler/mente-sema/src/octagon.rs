@@ -3,8 +3,10 @@
 //! the M0b spike (`spikes/tier1-latency/src/octagon.rs`).
 //!
 //! Entry `m[i][j]` bounds `V_j - V_i`, where `V_2k = +x_k` and `V_2k+1 = -x_k`. Adding one
-//! constraint costs O(n^2): a shortest-path relaxation for the new edge and its coherent twin,
-//! then tightening and strengthening (Mine; Bagnara, Hill and Zaffanella for integers).
+//! constraint costs O(n^2) at most: a shortest-path relaxation for the new edge and its coherent
+//! twin, then tightening and strengthening (Mine; Bagnara, Hill and Zaffanella for integers),
+//! each visiting only the entries the edge can change, so that bounding a variable no other is
+//! related to costs time linear in the variables.
 //!
 //! The matrix keeps constants up to [`BIG`]; the 128-bit types' ranges reach past it. A bound of
 //! one variable beyond it, from such a type, a refinement or a `guard`, is kept exactly beside
@@ -431,30 +433,52 @@ impl Octagon {
         self.empty = true;
     }
 
-    /// Adds `V_j - V_i <= c` and its coherent twin, then restores tight closure.
-    fn add_edge(&mut self, i: usize, j: usize, c: i128) {
+    /// Adds `V_j - V_i <= c` and its coherent twin, then restores tight closure, visiting only
+    /// the entries the new edge can change; the entries it visits.
+    ///
+    /// Every state is strongly closed: each entry is at most the half-sum of its two unary
+    /// bounds, which [`Octagon::new`], a join (the larger of two entries is at most the larger
+    /// half-sum) and a forget (no bound) keep, and this keeps. So after the relaxation only the
+    /// rows and columns of a unary bound it changed can need strengthening, and the result is
+    /// the one strengthening every entry gives (`test_the_closure_visits_only_what_an_edge_can_
+    /// change`).
+    fn add_edge(&mut self, i: usize, j: usize, c: i128) -> u64 {
         if self.empty {
-            return;
+            return 0;
         }
-        self.relax(i, j, c);
-        self.relax(j ^ 1, i ^ 1, c);
-        self.tighten_and_strengthen();
+        let d = self.d();
+        let unary: Vec<i128> = (0..d).map(|k| self.at(k, k ^ 1)).collect();
+        let relaxed = self.relax(i, j, c) + self.relax(j ^ 1, i ^ 1, c);
+        relaxed + self.tighten_and_strengthen(&unary)
     }
 
-    fn relax(&mut self, i: usize, j: usize, c: i128) {
+    /// Relaxes every path through the edge `V_j - V_i <= c`: only a pair with a bound into `i`
+    /// and one out of `j` has one, so only those are visited; the entries it visits.
+    fn relax(&mut self, i: usize, j: usize, c: i128) -> u64 {
         let d = self.d();
-        let into_i: Vec<i128> = (0..d).map(|k| self.at(k, i)).collect();
-        let from_j: Vec<i128> = (0..d).map(|l| self.at(j, l)).collect();
-        for (k, ki) in into_i.iter().enumerate() {
-            let a = add(self.inf, *ki, c);
-            for (l, jl) in from_j.iter().enumerate() {
-                let v = add(self.inf, a, *jl).min(self.at(k, l));
-                self.put(k, l, v);
+        let inf = self.inf;
+        let into_i: Vec<(usize, i128)> = (0..d)
+            .map(|k| (k, add(inf, self.at(k, i), c)))
+            .filter(|(_, a)| *a < inf)
+            .collect();
+        let from_j: Vec<(usize, i128)> = (0..d)
+            .map(|l| (l, self.at(j, l)))
+            .filter(|(_, b)| *b < inf)
+            .collect();
+        for &(k, a) in &into_i {
+            for &(l, b) in &from_j {
+                let v = add(inf, a, b);
+                let kept = self.at(k, l);
+                self.put(k, l, v.min(kept));
             }
         }
+        // The two scans, and each pair.
+        2 * d as u64 + (into_i.len() * from_j.len()) as u64
     }
 
-    fn tighten_and_strengthen(&mut self) {
+    /// Makes every unary bound even and strengthens each entry by its two unary bounds, given
+    /// the unary bounds before the edge; the entries it visits.
+    fn tighten_and_strengthen(&mut self, before: &[i128]) -> u64 {
         let d = self.d();
         for k in 0..d {
             let v = self.at(k, k ^ 1);
@@ -462,25 +486,35 @@ impl Octagon {
                 self.put(k, k ^ 1, (2 * floor_half(v)).max(-self.inf));
             }
         }
-        for i in 0..d {
-            let ci = self.at(i, i ^ 1);
-            if ci >= self.inf {
-                continue;
-            }
+        // Entry `(i, j)` is strengthened by `m[i][i ^ 1]` and `m[j ^ 1][j]`: the row of each
+        // node whose unary bound changed, and the column of its twin.
+        let changed: Vec<usize> = (0..d).filter(|&k| self.at(k, k ^ 1) != before[k]).collect();
+        for &k in &changed {
             for j in 0..d {
-                let cj = self.at(j ^ 1, j);
-                if cj >= self.inf {
-                    continue;
-                }
-                // Both are below `INF` and at or above `-INF`, so their sum fits; it is not
-                // saturated, since half of it is the bound.
-                let s = floor_half(ci + cj).min(self.at(i, j));
-                self.put(i, j, s);
+                self.strengthen(k, j);
+            }
+            for i in 0..d {
+                self.strengthen(i, k ^ 1);
             }
         }
         if (0..d).any(|k| self.at(k, k) < 0) {
             self.empty = true;
         }
+        // The two scans of the diagonals, and each row and column.
+        3 * d as u64 + (changed.len() * 2 * d) as u64
+    }
+
+    /// Strengthens entry `(i, j)` by half the sum of `m[i][i ^ 1]` and `m[j ^ 1][j]`.
+    fn strengthen(&mut self, i: usize, j: usize) {
+        let (ci, cj) = (self.at(i, i ^ 1), self.at(j ^ 1, j));
+        if ci >= self.inf || cj >= self.inf {
+            return;
+        }
+        // Both are below `INF` and at or above `-INF`, so their sum fits; it is not saturated,
+        // since half of it is the bound.
+        let s = floor_half(ci + cj);
+        let kept = self.at(i, j);
+        self.put(i, j, s.min(kept));
     }
 
     /// Adds `terms <= c`, for at most two terms; a longer sum is ignored, which is sound. A
@@ -1289,6 +1323,252 @@ mod tests {
             let nearest = points.iter().map(|p| p[0].abs()).min().unwrap();
             assert_eq!(picked[0].abs(), nearest, "{picked:?} {cs:?}");
         }
+    }
+
+    /// The closure as it was before it visited only what an edge can change: every pair
+    /// relaxed through the edge, then every entry strengthened.
+    fn dense_edge(o: &mut Octagon, i: usize, j: usize, c: i128) {
+        if o.empty {
+            return;
+        }
+        let d = o.d();
+        for (i, j) in [(i, j), (j ^ 1, i ^ 1)] {
+            let into_i: Vec<i128> = (0..d).map(|k| o.at(k, i)).collect();
+            let from_j: Vec<i128> = (0..d).map(|l| o.at(j, l)).collect();
+            for (k, ki) in into_i.iter().enumerate() {
+                let a = add(o.inf, *ki, c);
+                for (l, jl) in from_j.iter().enumerate() {
+                    let v = add(o.inf, a, *jl).min(o.at(k, l));
+                    o.put(k, l, v);
+                }
+            }
+        }
+        for k in 0..d {
+            let v = o.at(k, k ^ 1);
+            if v < o.inf {
+                o.put(k, k ^ 1, (2 * floor_half(v)).max(-o.inf));
+            }
+        }
+        for i in 0..d {
+            for j in 0..d {
+                let (ci, cj) = (o.at(i, i ^ 1), o.at(j ^ 1, j));
+                if ci < o.inf && cj < o.inf {
+                    let s = floor_half(ci + cj).min(o.at(i, j));
+                    o.put(i, j, s);
+                }
+            }
+        }
+        if (0..d).any(|k| o.at(k, k) < 0) {
+            o.empty = true;
+        }
+    }
+
+    /// [`Octagon::add_lin`] of a matrix through [`dense_edge`].
+    fn dense_add(o: &mut Octagon, terms: &[Term], c: i128) {
+        if c >= o.inf / 2 || o.empty {
+            return;
+        }
+        let c = c.max(-(o.inf / 2));
+        match terms {
+            [] => o.empty |= c < 0,
+            [t] => dense_edge(o, t.node() ^ 1, t.node(), 2 * c),
+            [s, t] => dense_edge(o, t.node() ^ 1, s.node(), c),
+            _ => {}
+        }
+    }
+
+    /// The closure visits only the pairs an edge can relax and the rows and columns of the unary
+    /// bounds it changes, and gives the matrix the dense closure gives, entry for entry, and the
+    /// same emptiness, after any sequence of constraints, forgets, joins and copies, over 3,000
+    /// random runs of one to six variables and 124 of seven to forty and of RELATIONAL_LIMIT, the
+    /// most a matrix holds, each size drawing the same operations around the full limit and a small
+    /// one in turn. The runs reach what the claim rests on, each counted and held to a floor for the
+    /// small states and for the wide: constraints that empty a state (a negative cycle, the
+    /// octagon's bottom), constraints that change a unary bound and so call for strengthening,
+    /// constants at the matrix's limit, where a path's weight passes 2^64, and joins, forgets and
+    /// copies between constraints. About half of each run's constraints hold of a point hidden in
+    /// the run, so that its states live long, and a floor holds the constraints that meet a live
+    /// state already relating its variables, where a strengthening of the wrong rows shows. Tier 1 has no widening, whose loop heads are candidate facts (Houdini), so
+    /// none is drawn. Bounding a variable that no other relates to visits a number of entries
+    /// linear in the variables, where the dense closure visited their square.
+    #[test]
+    fn test_the_closure_visits_only_what_an_edge_can_change() {
+        let mut r = Rng(0x6a09_e667_f3bc_c908);
+        // What the runs reached: [one to six variables, seven or more] of each.
+        let (mut bottoms, mut unary, mut extreme, mut joins, mut forgets, mut copies) =
+            ([0; 2], [0; 2], [0; 2], [0; 2], [0; 2], [0; 2]);
+        let (mut related, mut mirrored) = ([0; 2], [0; 2]);
+        // Whether a state relates two of its variables: an entry between their nodes is bounded.
+        let relates = |o: &Octagon| {
+            let d = o.d();
+            (0..d).any(|i| (0..d).any(|j| i / 2 != j / 2 && o.at(i, j) < o.inf))
+        };
+        for round in 0..3124 {
+            // Most runs of one to six variables, then seven to forty, then RELATIONAL_LIMIT, each
+            // drawing the same operations, around the full limit and a small one in turn.
+            let n = match round {
+                0..3000 => 1 + r.below(6) as usize,
+                3000..3120 => 7 + r.below(34) as usize,
+                _ => RELATIONAL_LIMIT,
+            };
+            let wide = usize::from(n > 6);
+            let inf = if round % 2 == 0 { INF } else { 40 };
+            // A point of the run's own, which about half its constraints hold of, so that its
+            // states live long and gather relations, where the rest may empty them.
+            let point: Vec<i128> = (0..n).map(|_| r.below(11) as i128 - 5).collect();
+            // Two states, each kept by both closures, so that their joins are compared too.
+            let mut fast = [Octagon::within(n, inf), Octagon::within(n, inf)];
+            let mut dense = [Octagon::within(n, inf), Octagon::within(n, inf)];
+            // A third of the runs below RELATIONAL_LIMIT start typed, as Tier 1's states do: every
+            // variable within a range around the point, on both sides. The runs of RELATIONAL_LIMIT
+            // stay untyped, since the dense closure takes long to type a matrix that wide.
+            if round % 3 == 0 && n < RELATIONAL_LIMIT {
+                for (v, p) in point.iter().enumerate() {
+                    let bounds = [
+                        (x(v), p + 1 + r.below(6) as i128),
+                        (nx(v), 1 + r.below(6) as i128 - p),
+                    ];
+                    for (t, c) in bounds {
+                        for s in 0..2 {
+                            fast[s].add_lin(&[t], c);
+                            dense_add(&mut dense[s], &[t], c);
+                        }
+                    }
+                }
+            }
+            for _ in 0..(4 + r.below(28) + 16 * wide as u64) {
+                let s = r.below(2) as usize;
+                match r.below(10) {
+                    0 => {
+                        let v = r.below(n as u64) as usize;
+                        fast[s].forget(v);
+                        dense[s].forget(v);
+                        forgets[wide] += 1;
+                    }
+                    1 => {
+                        fast[s] = fast[0].join(&fast[1]);
+                        dense[s] = dense[0].join(&dense[1]);
+                        joins[wide] += 1;
+                    }
+                    2 => {
+                        fast[s] = fast[1 - s].clone();
+                        dense[s] = dense[1 - s].clone();
+                        copies[wide] += 1;
+                    }
+                    k => {
+                        let (t, c) = random_constraint(&mut r, n);
+                        let at_point: i128 = t
+                            .iter()
+                            .map(|t| if t.neg { -point[t.var] } else { point[t.var] })
+                            .sum();
+                        // Constants that hold of the point, with a little room; constants a few
+                        // times wider than the variables' bounds around the small limit; and now
+                        // and then constants at the limit itself, where sums saturate.
+                        let c = match (k, inf == INF) {
+                            (6.., _) => at_point + r.below(3) as i128,
+                            (3, _) => {
+                                extreme[wide] += 1;
+                                let edge = inf / 2 - 1 - r.below(3) as i128;
+                                if c < 0 {
+                                    -edge
+                                } else {
+                                    edge
+                                }
+                            }
+                            (_, true) => c,
+                            (_, false) => 3 * c,
+                        };
+                        // Now and then an upper bound tightened to the negation of the lower, so
+                        // that a node's new bound equals its twin's old one, which a set of the
+                        // changed bounds read against the wrong node would miss.
+                        // The variable is the first from a random one with both bounds and an
+                        // upper one past the lower's negation.
+                        let start = r.below(n as u64) as usize;
+                        let bounded = (0..n).map(|i| (start + i) % n).find_map(|v| {
+                            let (lo, hi) = fast[s].bounds(v);
+                            (lo > -inf / 2 && hi < inf / 2 && -lo < hi).then_some((v, lo))
+                        });
+                        let (t, c) = match bounded {
+                            Some((v, lo)) if (k == 4 || k == 5) && !fast[s].empty => {
+                                mirrored[wide] += 1;
+                                (vec![x(v)], -lo)
+                            }
+                            _ => (t, c),
+                        };
+                        let was = (fast[s].empty, fast[s].clone());
+                        if !was.0 && relates(&was.1) {
+                            related[wide] += 1;
+                        }
+                        fast[s].add_lin(&t, c);
+                        dense_add(&mut dense[s], &t, c);
+                        if !was.0 && fast[s].empty {
+                            bottoms[wide] += 1;
+                        }
+                        let d = 2 * n;
+                        if !fast[s].empty
+                            && (0..d).any(|k| fast[s].at(k, k ^ 1) != was.1.at(k, k ^ 1))
+                        {
+                            unary[wide] += 1;
+                        }
+                    }
+                }
+                for s in 0..2 {
+                    assert_eq!(
+                        fast[s].empty, dense[s].empty,
+                        "{n} variables, round {round}"
+                    );
+                    if !fast[s].empty {
+                        assert_eq!(fast[s].m, dense[s].m, "{n} variables, round {round}");
+                    }
+                }
+            }
+        }
+        let floors = [
+            ("emptied a state", bottoms, [1000, 20]),
+            (
+                "met a live state that relates its variables",
+                related,
+                [10_000, 1000],
+            ),
+            ("mirrored a lower bound in an upper", mirrored, [200, 20]),
+            ("changed a unary bound", unary, [10_000, 500]),
+            ("set a constant at the matrix's limit", extreme, [5000, 200]),
+            ("joined two states", joins, [5000, 200]),
+            ("forgot a variable", forgets, [5000, 200]),
+            ("copied a state", copies, [5000, 200]),
+        ];
+        for (what, reached, floor) in floors {
+            for (size, (got, want)) in ["one to six", "seven or more"]
+                .iter()
+                .zip(reached.iter().zip(floor))
+            {
+                assert!(
+                    *got > want,
+                    "{got} operations of {size} variables {what}, at most {want}"
+                );
+            }
+        }
+        // A hundred variables, each bounded, none related: bounding one more, forgotten first,
+        // visits entries linear in them.
+        let n = 100;
+        let mut o = Octagon::new(n);
+        for v in 0..n {
+            o.add_lin(&[x(v)], 255);
+            o.add_lin(&[nx(v)], 0);
+        }
+        o.forget(50);
+        let d = 2 * n as u64;
+        let visited = o.add_edge(2 * 50 + 1, 2 * 50, 2 * 7);
+        assert!(
+            visited <= 16 * d,
+            "{visited} entries visited to bound one variable of {n}"
+        );
+        // Its other bound then relaxes through the relations strengthening gave it, to the
+        // dense closure's matrix.
+        let mut dense = o.clone();
+        dense_edge(&mut dense, 2 * 50, 2 * 50 + 1, 0);
+        o.add_edge(2 * 50, 2 * 50 + 1, 0);
+        assert_eq!(o.m, dense.m);
     }
 
     /// The constraints an octagon lists hold exactly its points, so that a solver given them is
