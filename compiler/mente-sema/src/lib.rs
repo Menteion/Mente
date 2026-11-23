@@ -233,6 +233,9 @@ pub struct CheckedFn {
     /// How many variables Tier 1 gave the function (`tier1::Report`); 0 when the module was
     /// checked without it.
     pub variables: usize,
+    /// The work Tier 1 did on its states for the function, in the octagon's entries visited
+    /// (`octagon::Steps`), the same on every machine; 0 when the module was checked without it.
+    pub steps: u64,
 }
 
 /// A module that passed every check, with its functions in order: those with a body checked,
@@ -436,6 +439,7 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, ask: tier1::Ask) -> 
                 found.extend(wide::check(syntax, &resolution, &typing, src));
                 let mut obligations = Vec::new();
                 let mut variables = 0;
+                let mut steps = 0;
                 if prove && types_hold && found.is_empty() && tier1::proves(&names, &p.name) {
                     let f = tier1::Function {
                         syntax,
@@ -448,11 +452,12 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, ask: tier1::Ask) -> 
                     found.extend(report.diagnostics.iter().cloned());
                     obligations = report.obligations.clone();
                     variables = report.variables;
+                    steps = report.steps;
                     reports.push((p.name.clone(), report));
                     discharged.push(written);
                 }
                 errors.extend(found);
-                Some((resolution, typing, obligations, variables))
+                Some((resolution, typing, obligations, variables, steps))
             }
             _ => None,
         };
@@ -463,13 +468,16 @@ fn bodies_with(src: &str, module: &ModuleFile, prove: bool, ask: tier1::Ask) -> 
         .into_iter()
         .zip(checked)
         .map(|(p, done)| match (p.syntax, done) {
-            (Some(syntax), Some((resolution, typing, obligations, variables))) => Some(CheckedFn {
-                syntax,
-                resolution,
-                typing,
-                obligations,
-                variables,
-            }),
+            (Some(syntax), Some((resolution, typing, obligations, variables, steps))) => {
+                Some(CheckedFn {
+                    syntax,
+                    resolution,
+                    typing,
+                    obligations,
+                    variables,
+                    steps,
+                })
+            }
             _ => None,
         })
         .collect();
