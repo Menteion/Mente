@@ -35,12 +35,22 @@ use super::containment;
 use super::generate::{self, CallPlan, Mode};
 use super::{native_within, reference_within, run_lowered, CallArgs, Printed};
 
-/// The reference interpreter's limits in a comparison: a generated call does a few thousand
-/// steps at most, far below MIR's own limit. The stack is no limit of these: item 25's budget
-/// bounds every run alike.
-const STEPS: Limits = Limits {
+/// The reference interpreter's limits in a comparison, and in the coverage test's runs of the
+/// calls the comparison makes (`coverage::reached_routed_runs`): a generated call does a few
+/// thousand steps at most, far below MIR's own limit. The stack is no limit of these: item
+/// 25's budget bounds every run alike.
+pub(super) const STEPS: Limits = Limits {
     max_steps: 1_000_000,
     max_array: 1 << 24,
+};
+
+/// The calls a comparison makes of each public function unless `MENTE_GEN_CALLS` and
+/// `MENTE_GEN_EXHAUSTIVE` say otherwise, and the coverage test's runs of routed clauses make
+/// (`coverage::reached_routed_runs`): every combination of arguments where at most 256 exist, and
+/// otherwise 12 calls, the extremes first.
+pub(super) const PLAN: CallPlan = CallPlan {
+    random: 12,
+    exhaustive: 256,
 };
 
 /// How long native code may take on a call the reference interpreter finished within [`STEPS`],
@@ -809,6 +819,14 @@ fn reduce(src: &str, interesting: impl Fn(&str) -> bool) -> String {
     join(&lines)
 }
 
+/// [`PLAN`], or the calls `MENTE_GEN_CALLS` and `MENTE_GEN_EXHAUSTIVE` ask for.
+fn plan_from_env() -> CallPlan {
+    CallPlan {
+        random: env_or("MENTE_GEN_CALLS", PLAN.random as u64) as usize,
+        exhaustive: u128::from(env_or("MENTE_GEN_EXHAUSTIVE", PLAN.exhaustive as u64)),
+    }
+}
+
 fn env_or(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -1376,10 +1394,7 @@ mod tests {
         }
         let first = env_or("MENTE_GEN_FIRST_SEED", 0);
         let count = env_or("MENTE_GEN_PROGRAMS", 300);
-        let plan = CallPlan {
-            random: env_or("MENTE_GEN_CALLS", 12) as usize,
-            exhaustive: u128::from(env_or("MENTE_GEN_EXHAUSTIVE", 256)),
-        };
+        let plan = plan_from_env();
         let natively = env_or("MENTE_GEN_NATIVE", 1) != 0;
         println!(
             "seeds {} ..= {}, {} random calls a function, exhaustive up to {}, native code {}",
@@ -1439,10 +1454,7 @@ mod tests {
             return;
         };
         let src = fs::read_to_string(&path).unwrap();
-        let plan = CallPlan {
-            random: env_or("MENTE_GEN_CALLS", 12) as usize,
-            exhaustive: u128::from(env_or("MENTE_GEN_EXHAUSTIVE", 256)),
-        };
+        let plan = plan_from_env();
         let dir = (env_or("MENTE_GEN_NATIVE", 1) != 0).then(|| scratch("file"));
         let seed = env_or("MENTE_GEN_FIRST_SEED", 0);
         let mut report = Report::default();
@@ -1493,10 +1505,7 @@ mod tests {
             Ok(path) => fs::read_to_string(path).unwrap(),
             Err(_) => generate::checked(seed).program.text,
         };
-        let plan = CallPlan {
-            random: env_or("MENTE_GEN_CALLS", 12) as usize,
-            exhaustive: u128::from(env_or("MENTE_GEN_EXHAUSTIVE", 256)),
-        };
+        let plan = plan_from_env();
         let dir = scratch("reduce");
         let kinds = |src: &str, natively: bool| -> Vec<Kind> {
             match compare_source(src, seed, plan, natively.then_some(dir.as_path())) {
