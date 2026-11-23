@@ -385,14 +385,16 @@ pub fn encode_within<'m>(module: &'m Module<'m>, entry: usize, terms: usize) -> 
             finals: Vec::new(),
         };
     }
+    // A call from outside the program counts the function's own frame against an empty stack
+    // first, as a call inside it does, before any check of its entry: a frame past the budget
+    // traps at the function's name, whatever the arguments (item 25), so the checks of its entry
+    // and body are sites that hold of no input, and no input is admitted.
+    x.recording = true;
+    x.overflows(entry, false, f.syntax.name_span);
     // The entry: the inputs lie in their types and refinements, and the `requires` and the
     // measure hold, as Tier 1 takes them.
-    x.recording = true;
     x.enter(values, None, entry);
     let admitted = x.active;
-    // A call from outside the program counts the function's own frame against an empty stack:
-    // a frame past the budget traps at the function's name, whatever the arguments (item 25).
-    x.overflows(entry, false, f.syntax.name_span);
     x.run_body();
     let mut cuts = x.cut.clone();
     cuts.extend(x.lacked.iter().copied());
@@ -1101,24 +1103,27 @@ impl<'m> Exec<'m> {
                 places.push(None);
             }
         }
-        // The call is counted against the stack budget before its arguments are narrowed. Where it
-        // runs out, the path ends there; the checks of the callee's entry, the caller's
-        // obligations, are still encoded, each a site that holds of no input, as an entry past the
-        // budget encodes its body, and the body is not entered.
-        if self.overflows(func, true, span) {
-            self.enter(values, Some((e, args)), func);
-            self.frame = match self.callers.pop() {
-                Some(f) => f,
-                None => empty_frame(self.frame.f),
-            };
-            return self.default(&shape);
-        }
         let depth = self
             .callers
             .iter()
             .chain(std::iter::once(&self.frame))
             .filter(|fr| fr.func == func)
             .count();
+        // The call is counted against the stack budget before its arguments are narrowed. Where it
+        // runs out, the path ends there; the checks of the callee's entry, the caller's
+        // obligations, are still encoded, each a site that holds of no input, as an entry past the
+        // budget encodes its body, and the body is not entered. A clause of the callee may call it
+        // again, past the budget too, so its entry is entered within the rounds every call has.
+        if self.overflows(func, true, span) {
+            if depth < ROUNDS {
+                self.enter(values, Some((e, args)), func);
+                self.frame = match self.callers.pop() {
+                    Some(f) => f,
+                    None => empty_frame(self.frame.f),
+                };
+            }
+            return self.default(&shape);
+        }
         if depth >= ROUNDS {
             self.bound();
             return self.default(&shape);

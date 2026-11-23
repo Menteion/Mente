@@ -333,7 +333,8 @@ pub struct Encoding {
     /// lists each place, so that a wrong count shows.
     pub overflowed: Vec<Span>,
     /// The inputs lie in their parameters' types and refinements, and the function's `requires`
-    /// and measures hold of them.
+    /// and measures hold of them, as the run reaches those checks: for a function whose own frame
+    /// passes the stack budget, no input, since the run traps at its name first.
     pub admitted: T,
     /// Some path of the inputs is cut off: by a loop or a call past the bounds, or by a
     /// construct the encoding lacks.

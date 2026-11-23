@@ -3068,6 +3068,49 @@ mod tests {
         assert_eq!(w.overflowed, 3);
     }
 
+    /// A `requires` may call its own function. Where that function's frame passes the stack
+    /// budget, each call of it, the clause's own among them, runs out of stack, and its entry is
+    /// still encoded, within the rounds every call has, so that the encoding ends.
+    #[test]
+    fn test_a_clause_calling_its_function_past_the_budget_is_entered_within_the_rounds() {
+        let src = "module m\nfn huge(k: u8) -> u8\n  requires huge(k) == k\n{\n  _ = [[0_u8; 1]; 4294967295]\n  k\n}\npub fn call(c: bool, k: u8) -> u8 = if c { huge(k) } else { k }\n";
+        let checked = mente_sema::check_program_without_proofs(src).unwrap();
+        let module = module_of(&checked);
+        for name in ["huge", "call"] {
+            let enc = mente_smt::encode(&module, checked.index(name).unwrap());
+            assert!(!enc.overflowed.is_empty(), "{name} lists no place past the budget");
+        }
+        let runs = agreement(src, &[]);
+        assert!(runs.wrong.is_empty(), "{:#?}", runs.wrong);
+        assert!(runs.compared > 0, "no input was compared");
+    }
+
+    /// A call from outside the program counts the function's own frame first, as a call inside
+    /// it does: where the frame passes the budget, the run traps at its name before any check of
+    /// its entry, so a check in its `requires` holds of no input, and no input is admitted.
+    #[test]
+    fn test_an_entry_past_the_budget_is_counted_before_its_checks() {
+        let src = "module m\npub fn past(k: u8) -> u8\n  requires 10 / k > 0\n{\n  _ = [[0_u8; 1]; 4294967295]\n  k\n}\n";
+        let checked = mente_sema::check_program_without_proofs(src).unwrap();
+        let module = module_of(&checked);
+        let enc = mente_smt::encode(&module, checked.index("past").unwrap());
+        assert_eq!(enc.overflowed.len(), 1);
+        assert!(
+            enc.sites.iter().any(|s| s.span.line == 3),
+            "the divisor in the requires has no site"
+        );
+        for s in &enc.sites {
+            assert_eq!(
+                enc.terms.as_bool(s.fails),
+                Some(false),
+                "the site at {}:{} holds of some input",
+                s.span.line,
+                s.span.col
+            );
+        }
+        assert_eq!(enc.terms.as_bool(enc.admitted), Some(false));
+    }
+
     /// A check none of whose sites fails is unreachable only where no path of its function is
     /// cut off: a loop cut past the bound after the check's last round may fail it in a later
     /// one, so the check is cut off by the bound, though no cut came before any of its sites.
