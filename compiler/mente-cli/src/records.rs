@@ -213,14 +213,18 @@ pub const DOCUMENTS: &[Documents] = &[
 /// one list this walk, the English-text gate's and `.github/scripts/clean-tree.sh` read.
 pub const WALK_SKIPS: &str = include_str!("walk-skips.txt");
 
-/// Whether a walk of the tree leaves out a directory of name `name` (`WALK_SKIPS`): a line of the
-/// list, comments and blank lines aside.
-pub fn walk_skips(name: &str) -> bool {
+/// The names `WALK_SKIPS` lists, in its order: each line of the list, trimmed, comments and blank
+/// lines aside.
+pub fn walk_skip_names() -> impl Iterator<Item = &'static str> {
     WALK_SKIPS
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .any(|l| l == name)
+}
+
+/// Whether a walk of the tree leaves out a directory of name `name`: one of `walk_skip_names`.
+pub fn walk_skips(name: &str) -> bool {
+    walk_skip_names().any(|l| l == name)
 }
 
 /// Every Markdown file under `root`, its path from there with `/` between names, that no kind,

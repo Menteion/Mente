@@ -629,12 +629,22 @@ export const CLEAN_TREE_SETUP = new Map([
 /// the gate's own setup (CLEAN_TREE_SETUP) without the check of the tree right before its first gate
 /// command and right after its last, blank lines and comments aside; and every test run of a testing
 /// job (`testingJobs`, TESTING_JOBS) without it so. A step's tests then never judge a tree a step
-/// wrote into: before them, after them, or in a step between.
+/// wrote into: before them, after them, or in a step between. And every check right after a
+/// shellcheck directive, which then covers the check in place of the command it was written for
+/// (pull request 223's first round: actionlint refused smt.yml's `bash -c 'check "$1"'` once the
+/// check stood between it and its `# shellcheck disable=SC2016`).
 export function cleanTreeProblems(docs, gate, testingJobs) {
   const out = [];
   for (const { file, doc } of docs) {
     for (const [id, job] of Object.entries(doc.jobs ?? {})) {
       const key = `${file}#${id}`;
+      for (const s of steps(job)) {
+        if (typeof s.run !== "string") continue;
+        const raw = logicalLines(s.run).map((l) => l.trim()).filter((l) => l !== "");
+        for (const [k, l] of raw.entries()) {
+          if (l === CLEAN_TREE && /^#\s*shellcheck\b/.test(raw[k - 1] ?? "")) out.push(`${stepKey(file, id, s)}: the check of the tree stands right after \`${raw[k - 1]}\`, which then covers the check in place of its command: put the check above the directive and its comments`);
+        }
+      }
       if (CLEAN_TREE_EXEMPT.has(key)) continue;
       const commands = gate.get(key) ?? [];
       const runs = testingJobs.includes(key);
@@ -670,6 +680,9 @@ check("every step of a required job checks, around its gate commands, that the t
   assert.deepEqual(cleanTreeProblems(job(`${C}\ncargo test --workspace\n${C}\n`), g, []), []);
   assert.deepEqual(cleanTreeProblems(job(`${C}\n# the tests\n\ncargo test --workspace || status=$?\n\n${C}\n`), g, []), [], "a comment or a blank line beside the command is refused");
   assert.deepEqual(cleanTreeProblems(job(`${C}\ncargo test --workspace\necho x\nnode a.mjs\n${C}\n`), g, []), [], "a step of two gate commands bracketed whole is refused");
+  assert.deepEqual(cleanTreeProblems(job(`${C}\n# why\n# shellcheck disable=SC2016\ncargo test --workspace\n${C}\n`), g, []), [], "a shellcheck directive right before its command is refused");
+  assert.equal(cleanTreeProblems(job(`# why\n# shellcheck disable=SC2016\n\n${C}\ncargo test --workspace\n${C}\n`), g, []).length, 1, "a check between a shellcheck directive and its command passes");
+  assert.equal(cleanTreeProblems([{ file: "y.yml", doc: { jobs: { k: { steps: [{ run: `#shellcheck disable=SC2086\n${C}\necho $x\n` }] } } } }], new Map(), []).length, 1, "a check after a directive in a job with no gate command passes");
   for (const [run, why] of [
     ["cargo test --workspace\n" + C + "\n", "the check missing before"],
     [C + "\ncargo test --workspace\n", "the check missing after"],

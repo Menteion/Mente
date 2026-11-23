@@ -1014,12 +1014,15 @@ fn test_the_walks_leave_out_one_list_of_directories() {
     ] {
         assert!(!records::walk_skips(name), "{:?} is left out", name);
     }
-    let names: Vec<&str> = records::WALK_SKIPS
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .collect();
+    // The list read as the walks read it: its names alone, none of its comments.
+    let names: Vec<&str> = records::walk_skip_names().collect();
     assert_eq!(names, [".git", "target", "node_modules"]);
+    for comment in records::WALK_SKIPS.lines().filter(|l| l.starts_with('#')) {
+        assert!(
+            !records::walk_skips(comment),
+            "a comment is a name: {comment}"
+        );
+    }
     for name in &names {
         assert!(
             !name.contains('/') && !name.contains('\\'),

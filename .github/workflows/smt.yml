@@ -129,9 +129,9 @@ jobs:
           }
           export -f check
           start=$(date +%s%N)
+          /usr/bin/bash .github/scripts/clean-tree.sh
           # The $1 is the inner shell's argument, the query's path, so it stays in single quotes.
           # shellcheck disable=SC2016
-          /usr/bin/bash .github/scripts/clean-tree.sh
           xargs -a "$RUNNER_TEMP/queries.txt" -d '\n' -P "$(nproc)" -n 1 bash -c 'check "$1"' _ \
             > "$RUNNER_TEMP/answers.txt"
           /usr/bin/bash .github/scripts/clean-tree.sh
