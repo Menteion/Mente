@@ -821,13 +821,16 @@ fn package_scripts(text: &str) -> Result<Vec<(String, String)>, String> {
         .collect()
 }
 
-/// The step of ci.yml's Documentation job that runs the workflow policy, exactly: a name and a
-/// command, with no shell, environment, directory or condition of its own, run through node itself.
-const POLICY_STEP: [&str; 4] = [
+/// The step of ci.yml's Documentation job that runs the workflow policy, exactly: a name and its
+/// commands, with no shell, environment, directory or condition of its own, run through node
+/// itself, checked before and after for a tree that is the commit's (.github/scripts/clean-tree.sh).
+const POLICY_STEP: [&str; 6] = [
     "      - name: The workflow policy, its required checks, path lists, pins and milestone tags",
     "        run: |",
+    "          /usr/bin/bash .github/scripts/clean-tree.sh",
     "          node .github/scripts/policy-collect.mjs",
     "          node --test \".github/scripts/policy/*.test.mjs\" .github/scripts/policy-run.test.mjs .github/scripts/yaml.test.mjs",
+    "          /usr/bin/bash .github/scripts/clean-tree.sh",
 ];
 
 /// The steps before it, exactly: the checkout and node. Nothing has run when the policy does.

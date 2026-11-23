@@ -1003,7 +1003,15 @@ fn test_the_walks_leave_out_one_list_of_directories() {
     for name in [".git", "target", "node_modules"] {
         assert!(records::walk_skips(name), "{} is walked", name);
     }
-    for name in ["src", "docs", "", "#", "Target", ".github", "node_modules/x"] {
+    for name in [
+        "src",
+        "docs",
+        "",
+        "#",
+        "Target",
+        ".github",
+        "node_modules/x",
+    ] {
         assert!(!records::walk_skips(name), "{:?} is left out", name);
     }
     let names: Vec<&str> = records::WALK_SKIPS
