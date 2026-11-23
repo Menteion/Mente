@@ -632,6 +632,11 @@ impl<'m> Machine<'m> {
         }
     }
 
+    /// The statements and loop rounds this machine has run, which [`Limits::max_steps`] bounds.
+    pub(crate) fn steps(&self) -> u64 {
+        self.steps
+    }
+
     /// The largest step of the host stack between two checks this machine has taken.
     #[cfg(test)]
     pub(crate) fn deepest_step(&self) -> usize {

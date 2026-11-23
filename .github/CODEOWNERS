@@ -74,6 +74,11 @@
 /compiler/*/src/overflow_traps.rs @Dancraft3746
 /compiler/mente-threads/ @Dancraft3746
 
+# The counts of the compiler's work on each conformance program and the rules that hold them: a
+# count past its band changes the golden file, whose owner reads why.
+/compiler/mente-cli/src/mir_run/work.rs @Dancraft3746
+/compiler/mente-cli/tests/golden/work.txt @Dancraft3746
+
 # Each crate's manifest, which decides what its tests are: one could drop the gate tests' target.
 /compiler/*/Cargo.toml @Dancraft3746
 /spikes/*/Cargo.toml @Dancraft3746

@@ -428,6 +428,39 @@ fn run<'m>(
     })
 }
 
+/// Runs `name` on `args` like [`call_leaving`], and gives beside its outcome the statements and
+/// loop rounds it ran, the steps [`Limits::max_steps`] bounds: the same on every machine, so that
+/// a change that makes a program's run longer shows in it (`mente-cli`, `work`). A run that
+/// could not start ran none.
+pub fn call_counted(
+    module: &CheckedModule,
+    name: &str,
+    args: Vec<Value>,
+    limits: Limits,
+) -> (Result<(Value, Vec<Value>), Stop>, u64) {
+    let ran = mente_threads::alone(None, Some(host::SEGMENT), || {
+        let mut m = eval::Machine::new(module, limits, None);
+        let outcome = m.enter(name, args);
+        (outcome, m.steps())
+    });
+    match ran {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => (
+            Err(Stop::BadArguments(
+                "the interpreter stopped unexpectedly".to_string(),
+            )),
+            0,
+        ),
+        Err(e) => (
+            Err(Stop::BadArguments(format!(
+                "the interpreter could not start: {}",
+                e
+            ))),
+            0,
+        ),
+    }
+}
+
 /// Runs `name` on `args` like [`call_leaving`], and gives beside its outcome the largest step of
 /// the host stack between two checks of the run (`host`), which a test holds to `host::STEP`.
 #[cfg(test)]
