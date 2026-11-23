@@ -1101,8 +1101,16 @@ impl<'m> Exec<'m> {
                 places.push(None);
             }
         }
-        // The call is counted against the stack budget before its arguments are narrowed.
+        // The call is counted against the stack budget before its arguments are narrowed. Where it
+        // runs out, the path ends there; the checks of the callee's entry, the caller's
+        // obligations, are still encoded, each a site that holds of no input, as an entry past the
+        // budget encodes its body, and the body is not entered.
         if self.overflows(func, true, span) {
+            self.enter(values, Some((e, args)), func);
+            self.frame = match self.callers.pop() {
+                Some(f) => f,
+                None => empty_frame(self.frame.f),
+            };
             return self.default(&shape);
         }
         let depth = self

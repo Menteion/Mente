@@ -3039,6 +3039,18 @@ mod tests {
         let places =
             |name: &str| mente_smt::encode(&module, checked.index(name).unwrap()).overflowed;
         assert_eq!(places("call").len(), 1);
+        // The checks of huge's entry at that call, call's own obligations, are sites still, each
+        // holding of no input: the call traps before them.
+        let proved = mente_sema::check_program(src).unwrap();
+        let at = proved.index("call").unwrap();
+        let obligations = &proved.functions[at].as_ref().unwrap().obligations;
+        assert!(obligations.iter().any(|o| o.span.line == 6));
+        let enc = mente_smt::encode(&module_of(&proved), at);
+        assert!(
+            unmatched(obligations, &enc).is_empty(),
+            "{:#?}",
+            unmatched(obligations, &enc)
+        );
         assert_eq!(
             places("past"),
             vec![
