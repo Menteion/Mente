@@ -1,0 +1,36 @@
+// expect: pass
+module conformance
+// Routed clauses that hold blocks, of functions the program calls: a call checks a `@checked`
+// function's `requires` where it is made and traps where the clause fails, and its caller passes
+// the trap back, while a call the clause lets through goes on. An `@prove` function's clause
+// holds for every value its callers pass, as `mn prove` will prove, and a run evaluates it all the
+// same. MIR keeps each such check at each call site, since Tier 1 proves none of them.
+
+@checked
+fn half(x: u8) -> u8
+  requires (if x > 3 { x % 2 == 0 } else { x != 1 })
+  ensures (match result {
+    0 => true
+    _ => { result > 0 }
+  })
+= x / 2
+
+@checked
+fn third(x: u8) -> u8
+  requires (match x {
+    0 => false
+    _ => { x % 3 == 0 }
+  })
+= x / 3
+
+@prove
+fn quarter(x: u8) -> u8
+  requires (if x > 0 { x >= 1 } else { x == 0 })
+= x / 4
+
+pub fn twice(y: u8) -> u8 = half(y) + half(y)
+
+pub fn mixed(y: u8) -> u8 {
+  val a: u8 = third(y)
+  a + quarter(y)
+}
