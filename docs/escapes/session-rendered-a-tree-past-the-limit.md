@@ -1,6 +1,6 @@
 ---
 date: 2026-11-23
-fixed-by: https://github.com/Menteion/Mente/pull/224
+fixed-by: https://github.com/Menteion/Mente/pull/225
 area: checker
 missed-by: The nesting tests and the fuzz tests' deep shapes held only that a chain past the limit is E0127 and crashes no phase, not that the parser hands out no tree past the limit, nor what the incremental session does with one; mn fuzz's time limit caught it.
 guard: fn test_a_loop_nests_no_tree_past_the_limit in mente-syntax
