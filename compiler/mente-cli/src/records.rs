@@ -209,9 +209,23 @@ pub const DOCUMENTS: &[Documents] = &[
     },
 ];
 
+/// The directories every walk of the tree leaves out, by name, as `walk-skips.txt` lists them: the
+/// one list this walk, the English-text gate's and `.github/scripts/clean-tree.sh` read.
+pub const WALK_SKIPS: &str = include_str!("walk-skips.txt");
+
+/// Whether a walk of the tree leaves out a directory of name `name` (`WALK_SKIPS`): a line of the
+/// list, comments and blank lines aside.
+pub fn walk_skips(name: &str) -> bool {
+    WALK_SKIPS
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .any(|l| l == name)
+}
+
 /// Every Markdown file under `root`, its path from there with `/` between names, that no kind,
 /// shared file or set of documents claims, or that more than one claims: each with what to do.
-/// The walk leaves out `.git`, `target`, `node_modules` and every directory that holds a `.git`
+/// The walk leaves out the directories of `WALK_SKIPS` and every directory that holds a `.git`
 /// of its own, a worktree or another repository.
 pub fn undeclared(
     root: &Path,
@@ -273,8 +287,7 @@ fn markdown_files(dir: &Path, prefix: &str, out: &mut Vec<String>, problems: &mu
             continue;
         };
         if meta.is_dir() {
-            let skipped = matches!(name.as_str(), ".git" | "target" | "node_modules")
-                || path.join(".git").exists();
+            let skipped = walk_skips(&name) || path.join(".git").exists();
             if !skipped {
                 markdown_files(&path, &format!("{}{}/", prefix, name), out, problems);
             }

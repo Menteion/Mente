@@ -111,25 +111,27 @@ jobs:
         # is read as one: a file moved into a crate whole would show no hunk. And a path is quoted
         # only for a quote, a backslash or a control character, which the floor refuses.
         run: |
-          git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > pr.diff
-          cargo mutants --list --json > all-mutants.json
-          cargo mutants --in-diff pr.diff --list --json > diff-mutants.json
+          w=$RUNNER_TEMP/mutants-work
+          mkdir -p "$w"
+          git -c core.quotePath=false diff --text --no-ext-diff --no-textconv --no-renames "origin/${GITHUB_BASE_REF}...HEAD" > "$w/pr.diff"
+          cargo mutants --list --json > "$w/all-mutants.json"
+          cargo mutants --in-diff "$w/pr.diff" --list --json > "$w/diff-mutants.json"
           # cargo-mutants' diff filter marks only the lines next to a deleted line; every mutant of
           # the function enclosing one runs too.
-          node .github/scripts/mutants-floor.mjs deleted pr.diff all-mutants.json diff-mutants.json > deleted-re.txt
+          node .github/scripts/mutants-floor.mjs deleted "$w/pr.diff" "$w/all-mutants.json" "$w/diff-mutants.json" > "$w/deleted-re.txt"
           deleted=()
-          while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < deleted-re.txt
-          : > deleted-mutants.json
+          while IFS= read -r re; do if [ -n "$re" ]; then deleted+=(--re "$re"); fi; done < "$w/deleted-re.txt"
+          : > "$w/deleted-mutants.json"
           if [ "${#deleted[@]}" -gt 0 ]; then
-            cargo mutants "${deleted[@]}" --list --json > deleted-mutants.json
+            cargo mutants "${deleted[@]}" --list --json > "$w/deleted-mutants.json"
           fi
           # The base's settings, so that a pull request cannot exclude what it changes.
-          if git show --no-textconv "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > base-mutants.toml 2>/dev/null; then
-            config=(--config base-mutants.toml)
+          if git show --no-textconv "origin/${GITHUB_BASE_REF}:.cargo/mutants.toml" > "$w/base-mutants.toml" 2>/dev/null; then
+            config=(--config "$w/base-mutants.toml")
           else
             config=(--no-config)
           fi
-          cargo mutants --list --json "${config[@]}" > base-all-mutants.json
+          cargo mutants --list --json "${config[@]}" > "$w/base-all-mutants.json"
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: The floor of the whole diff, before any code of the change runs
         if: steps.watch.outputs.run != 'false'
@@ -139,19 +141,20 @@ jobs:
         # outside the compiler holds no such mutant: floor 0. Every count must be a number: an
         # empty one fails, never compares.
         run: |
+          w=$RUNNER_TEMP/mutants-work
           count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
-          expected=$(node .github/scripts/mutants-floor.mjs expected pr.diff base-all-mutants.json)
+          expected=$(node .github/scripts/mutants-floor.mjs expected "$w/pr.diff" "$w/base-all-mutants.json")
           count "$expected" "the mutants the diff changes"
-          in_diff=$(node .github/scripts/mutants-floor.mjs count diff-mutants.json)
+          in_diff=$(node .github/scripts/mutants-floor.mjs count "$w/diff-mutants.json")
           count "$in_diff" "the mutants cargo-mutants lists for the diff"
-          around=$(node .github/scripts/mutants-floor.mjs count deleted-mutants.json)
+          around=$(node .github/scripts/mutants-floor.mjs count "$w/deleted-mutants.json")
           count "$around" "the mutants around deleted lines"
-          node .github/scripts/mutants-floor.mjs missing pr.diff base-all-mutants.json diff-mutants.json deleted-mutants.json > missing.txt
-          lost=$(grep -c . missing.txt || true)
+          node .github/scripts/mutants-floor.mjs missing "$w/pr.diff" "$w/base-all-mutants.json" "$w/diff-mutants.json" "$w/deleted-mutants.json" > "$w/missing.txt"
+          lost=$(grep -c . "$w/missing.txt" || true)
           count "$lost" "the expected mutants the run leaves out"
           echo "Mutants the diff changes, under the base's settings: $expected; listed for the run: $((in_diff + around)); left out: $lost" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$lost" -gt 0 ]; then
-            { echo "## Mutants the run leaves out"; echo '```text'; cat missing.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "## Mutants the run leaves out"; echo '```text'; cat "$w/missing.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::$lost of the $expected mutants the diff changes are not in the run's lists: an exclusion lands apart from the change to what it excludes"
             exit 1
           fi
@@ -162,15 +165,16 @@ jobs:
         # again, and the plan's estimate of each mutant (.github/scripts/lib/mutants-floor.mjs).
         # The clock is the shell's, outside the sandbox.
         run: |
+          w=$RUNNER_TEMP/mutants-work
           set -o pipefail
           # The change's tests, under the limits every test runs under.
           . .github/scripts/limits.sh
           cargo nextest run --workspace --no-run
           start=$(date +%s)
-          cargo nextest run --workspace 2>&1 | tee baseline.log
-          echo "$(( $(date +%s) - start ))" > baseline-seconds.txt
+          cargo nextest run --workspace 2>&1 | tee "$w/baseline.log"
+          echo "$(( $(date +%s) - start ))" > "$w/baseline-seconds.txt"
           { echo "## Slowest tests without a mutant"; echo '```text'
-            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
+            sed 's/\x1b\[[0-9;]*m//g' "$w/baseline.log" | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/test-sandbox.sh bound
@@ -181,21 +185,24 @@ jobs:
         # Read from the lists made before the tests ran; the plan checks that every mutant of the
         # run lies in exactly one shard, and writes the shards' names and exact regexes.
         run: |
-          node .github/scripts/mutants-floor.mjs plan diff-mutants.json deleted-mutants.json "$(cat baseline-seconds.txt)" plan >> "$GITHUB_OUTPUT"
-          cat plan/summary.md >> "$GITHUB_STEP_SUMMARY"
+          w=$RUNNER_TEMP/mutants-work
+          node .github/scripts/mutants-floor.mjs plan "$w/diff-mutants.json" "$w/deleted-mutants.json" "$(cat "$w/baseline-seconds.txt")" "$w/plan" >> "$GITHUB_OUTPUT"
+          cat "$w/plan/summary.md" >> "$GITHUB_STEP_SUMMARY"
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Keep the plan for the shards
         if: steps.watch.outputs.run != 'false'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mutants-plan
+          # From the job's working directory outside the checkout, whose layout the artifact keeps:
+          # the shards read the plan as plan/ under where they download it.
           path: |
-            pr.diff
-            diff-mutants.json
-            deleted-mutants.json
-            base-all-mutants.json
-            missing.txt
-            plan
+            ${{ runner.temp }}/mutants-work/pr.diff
+            ${{ runner.temp }}/mutants-work/diff-mutants.json
+            ${{ runner.temp }}/mutants-work/deleted-mutants.json
+            ${{ runner.temp }}/mutants-work/base-all-mutants.json
+            ${{ runner.temp }}/mutants-work/missing.txt
+            ${{ runner.temp }}/mutants-work/plan
           if-no-files-found: error
 
   shard:
@@ -271,12 +278,12 @@ jobs:
           shard=()
           while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.re"
           if [ "${#shard[@]}" -eq 0 ]; then echo "::error::the plan dealt shard $SHARD no mutant"; exit 1; fi
-          cargo mutants "${shard[@]}" --list --json > shard-mutants.json
-          node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
-          unlisted=$(grep -c . unlisted.txt || true)
+          cargo mutants "${shard[@]}" --list --json > "$RUNNER_TEMP/shard-mutants.json"
+          node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$RUNNER_TEMP/shard-mutants.json" > "$RUNNER_TEMP/unlisted.txt"
+          unlisted=$(grep -c . "$RUNNER_TEMP/unlisted.txt" || true)
           count "$unlisted" "the mutants listed otherwise than the plan dealt them"
           if [ "$unlisted" -gt 0 ]; then
-            { echo "## Mutants listed otherwise than the plan dealt them"; echo '```text'; cat unlisted.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "## Mutants listed otherwise than the plan dealt them"; echo '```text'; cat "$RUNNER_TEMP/unlisted.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::cargo-mutants lists $unlisted of this shard's mutants otherwise than the plan dealt them"
             exit 1
           fi
@@ -290,7 +297,7 @@ jobs:
           set -o pipefail
           # The change's tests, under the limits every test runs under.
           . .github/scripts/limits.sh
-          cargo nextest run --workspace 2>&1 | tee baseline.log
+          cargo nextest run --workspace 2>&1 | tee "$RUNNER_TEMP/baseline.log"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
       - name: Mutate this shard's mutants
@@ -327,22 +334,22 @@ jobs:
           # Every mutant counted caught had a test fail under nextest, which had handed its tests
           # to the sandbox, and every one counted unviable a build the compiler refused: its own
           # log shows it (.github/scripts/mutants-floor.mjs).
-          node .github/scripts/mutants-floor.mjs evidence "$out" > evidence.txt
-          lacking=$(grep -c . evidence.txt || true)
+          node .github/scripts/mutants-floor.mjs evidence "$out" > "$RUNNER_TEMP/evidence.txt"
+          lacking=$(grep -c . "$RUNNER_TEMP/evidence.txt" || true)
           count "$lacking" "the mutants whose outcome their logs do not show"
           if [ "$lacking" -gt 0 ]; then
-            { echo "## Outcomes the logs do not show"; echo '```text'; cat evidence.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "## Outcomes the logs do not show"; echo '```text'; cat "$RUNNER_TEMP/evidence.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::$lacking mutants are counted caught or unviable without a failed test or a failed build in their logs"
             failed=1
           fi
           # The run tested exactly the mutants the plan dealt this shard, each once: none left
           # out, none beside them.
-          node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$out" > unrun.txt
-          unrun=$(grep -c . unrun.txt || true)
+          node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$out" > "$RUNNER_TEMP/unrun.txt"
+          unrun=$(grep -c . "$RUNNER_TEMP/unrun.txt" || true)
           count "$unrun" "the mutants tested otherwise than the plan dealt them"
           echo "Mutants tested in shard $SHARD: $tested; otherwise than dealt: $unrun" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$unrun" -gt 0 ]; then
-            { echo "## Mutants tested otherwise than the plan dealt them"; echo '```text'; cat unrun.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            { echo "## Mutants tested otherwise than the plan dealt them"; echo '```text'; cat "$RUNNER_TEMP/unrun.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::$unrun of this shard's mutants were tested otherwise than the plan dealt them"
             failed=1
           fi

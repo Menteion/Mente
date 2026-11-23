@@ -57,18 +57,18 @@ jobs:
         if: steps.watch.outputs.run != 'false'
         run: |
           status=0
-          ./target/release/mn test --mutate --reported examples > gate.txt || status=$?
+          ./target/release/mn test --mutate --reported examples > "$RUNNER_TEMP/gate.txt" || status=$?
           {
             echo '## MIR mutation gate on lowered code'
             echo '```text'
-            sed -n '/^MIR mutation gate/,$p' gate.txt | grep -v '^  survives: '
+            sed -n '/^MIR mutation gate/,$p' "$RUNNER_TEMP/gate.txt" | grep -v '^  survives: '
             echo '```'
-            echo "Survivors of the agent programs, reported: $(grep -c '^  survives: ' gate.txt || true) (in the uploaded log)"
+            echo "Survivors of the agent programs, reported: $(grep -c '^  survives: ' "$RUNNER_TEMP/gate.txt" || true) (in the uploaded log)"
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.watch.outputs.run != 'false'
         with:
           name: mir-mutants
-          path: gate.txt
+          path: ${{ runner.temp }}/gate.txt
           if-no-files-found: ignore

@@ -692,7 +692,8 @@ fn non_english_lines(root: &Path) -> Vec<String> {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
             if path.is_dir() {
-                let skipped = matches!(name.as_str(), ".git" | "target" | "node_modules");
+                // The one list of what every walk of the tree leaves out (records.rs, WALK_SKIPS).
+                let skipped = mente_cli::records::walk_skips(&name);
                 if !skipped && !path.join(".git").exists() {
                     walk(&path, found);
                 }

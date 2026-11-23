@@ -134,9 +134,9 @@ jobs:
           set -o pipefail
           # The tests, under the limits every test runs under.
           . .github/scripts/limits.sh
-          cargo nextest run --workspace 2>&1 | tee baseline.log
+          cargo nextest run --workspace 2>&1 | tee "$RUNNER_TEMP/baseline.log"
           { echo "## Slowest tests without a mutant"; echo '```text'
-            sed 's/\x1b\[[0-9;]*m//g' baseline.log | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
+            sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/baseline.log" | grep -E '^ +PASS \[' | sort -t'[' -k2 -rn | awk 'NR <= 10'
             echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           /usr/bin/bash .github/scripts/test-sandbox.sh ran
           /usr/bin/bash .github/scripts/tools.sh verify
@@ -169,9 +169,9 @@ jobs:
           done
           # Every mutant counted caught or unviable shows it in its log, a caught one with nextest's
           # line that it handed the tests to the sandbox (.github/scripts/mutants-floor.mjs).
-          node .github/scripts/mutants-floor.mjs evidence "$out" > evidence.txt
-          if grep -q . evidence.txt; then
-            { echo "## Outcomes the logs do not show"; echo '```text'; cat evidence.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          node .github/scripts/mutants-floor.mjs evidence "$out" > "$RUNNER_TEMP/evidence.txt"
+          if grep -q . "$RUNNER_TEMP/evidence.txt"; then
+            { echo "## Outcomes the logs do not show"; echo '```text'; cat "$RUNNER_TEMP/evidence.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
             echo "::error::mutants are counted caught or unviable without a failed test or a failed build in their logs"
             failed=1
           fi

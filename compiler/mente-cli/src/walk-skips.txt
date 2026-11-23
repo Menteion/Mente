@@ -1,0 +1,8 @@
+# The directories every walk of the tree leaves out, one name a line: the records' closed world
+# (records.rs, undeclared), the English-text gate (tests/gates.rs) and the check that the tree a
+# job's tests judge is the commit's (.github/scripts/clean-tree.sh) all read this list, so that what
+# the walks read and what the check holds equal to the commit cannot part. Each walk also leaves out
+# every directory that holds a .git of its own, a worktree or another repository.
+.git
+target
+node_modules
