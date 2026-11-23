@@ -1,11 +1,18 @@
 ---
 id: clean-tree-around-every-test-run
-status: active
+status: archived
 trigger: when plan-outside-checkout's pull request (219) has merged
 type: chore
 affectedFiles: [.github/scripts/clean-tree.sh, .github/instrument-paths.txt, .github/scripts/test-sandbox-env.sh, .github/workflows/**, .github/gate-commands.txt, .github/scripts/policy/**, .github/scripts/policy-run.test.mjs, compiler/mente-cli/src/records.rs, compiler/mente-cli/tests/records.rs, compiler/mente-cli/tests/gates.rs, compiler/mente-cli/src/walk-skips.txt, briefs/clean-tree-around-every-test-run.md, briefs/archive/clean-tree-around-every-test-run.md]
 protectedFiles: [spec/**, CLAUDE.md]
+integrity: sha256-cf04c69a210eec4e2824287b619a23b13d98e3e67f04636a6eb1e1b9ae733f29
 ---
+
+<!-- spec-brief:banner -->
+> **Archived 2026-11-23.**
+> Recorded at commit `d823663`.
+> The body below describes the tree before execution and is not maintained.
+<!-- /spec-brief:banner -->
 
 # Keep the tree the tests judge equal to the commit's, before and after every test run
 
