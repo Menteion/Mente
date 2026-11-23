@@ -41,11 +41,82 @@ pub struct Counts {
 
 /// A node of a tree, by its index: an expression, a statement, a block or a type.
 #[derive(Clone, Copy)]
-enum Node {
+pub(crate) enum Node {
     E(u32),
     S(u32),
     B(u32),
     T(u32),
+}
+
+/// The height of each node of a tree, each computed once and without recursion: an expression, a
+/// block or a type counts one level and a statement none, since it only wraps what it holds. The
+/// one definition of a node's height, which [`Tree::too_deep`] asks of every node and the parser
+/// of each operand a loop nests one level deeper as the tree grows (`Parser::nests` in
+/// `body.rs`), so that the work of both stays linear in the tree.
+#[derive(Debug, Default)]
+pub(crate) struct Heights {
+    known: [Vec<Option<u32>>; 4],
+}
+
+impl Heights {
+    /// The height of `root`, working out each node below it not yet known and calling `known`
+    /// with each, children before their parent.
+    pub(crate) fn walk(
+        &mut self,
+        tree: &Tree,
+        root: Node,
+        mut known: impl FnMut(Node, u32),
+    ) -> u32 {
+        let sizes = [
+            tree.exprs.len(),
+            tree.stmts.len(),
+            tree.blocks.len(),
+            tree.types.len(),
+        ];
+        for (table, size) in self.known.iter_mut().zip(sizes) {
+            if table.len() < size {
+                table.resize(size, None);
+            }
+        }
+        let mut stack: Vec<(Node, bool)> = vec![(root, false)];
+        let mut kids = Vec::new();
+        while let Some((n, expanded)) = stack.pop() {
+            if self.get(n).is_some() {
+                continue;
+            }
+            tree.children(n, &mut kids);
+            if expanded {
+                let below = kids.iter().filter_map(|c| self.get(*c)).max().unwrap_or(0);
+                // A statement only wraps what it holds; the rest are levels.
+                let h = below + u32::from(!matches!(n, Node::S(_)));
+                let (k, i) = Heights::slot(n);
+                self.known[k][i] = Some(h);
+                known(n, h);
+            } else {
+                stack.push((n, true));
+                for c in kids.clone() {
+                    if self.get(c).is_none() {
+                        stack.push((c, false));
+                    }
+                }
+            }
+        }
+        self.get(root).unwrap_or(0)
+    }
+
+    fn slot(n: Node) -> (usize, usize) {
+        match n {
+            Node::E(i) => (0, i as usize),
+            Node::S(i) => (1, i as usize),
+            Node::B(i) => (2, i as usize),
+            Node::T(i) => (3, i as usize),
+        }
+    }
+
+    fn get(&self, n: Node) -> Option<u32> {
+        let (k, i) = Heights::slot(n);
+        self.known[k].get(i).copied().flatten()
+    }
 }
 
 /// The nodes of a subtree ([`Tree::subtree`]), each kind in an order of its own.
@@ -543,7 +614,7 @@ impl Tree {
     }
 
     /// The nodes `n` holds directly, written into `out`: the one place the shape of the tree is
-    /// read node by node, for [`Tree::too_deep`] and [`Tree::subtree`].
+    /// read node by node, for [`Heights`] and [`Tree::subtree`].
     fn children(&self, n: Node, out: &mut Vec<Node>) {
         out.clear();
         match n {
@@ -659,18 +730,6 @@ impl Tree {
     /// `limit + 1`, the innermost that goes too deep. Computed without recursion, since it
     /// guards every phase that recurses over the tree.
     pub fn too_deep(&self, limit: u32) -> Option<Span> {
-        let mut heights: [Vec<Option<u32>>; 4] = [
-            vec![None; self.exprs.len()],
-            vec![None; self.stmts.len()],
-            vec![None; self.blocks.len()],
-            vec![None; self.types.len()],
-        ];
-        let slot = |n: Node| match n {
-            Node::E(i) => (0, i as usize),
-            Node::S(i) => (1, i as usize),
-            Node::B(i) => (2, i as usize),
-            Node::T(i) => (3, i as usize),
-        };
         let span = |n: Node| match n {
             Node::E(i) => self.exprs[i as usize].span,
             Node::S(i) => self.stmts[i as usize].span,
@@ -683,45 +742,13 @@ impl Tree {
             .chain((0..self.blocks.len() as u32).map(Node::B))
             .chain((0..self.types.len() as u32).map(Node::T));
         let mut found = None;
-        let mut stack: Vec<(Node, bool)> = Vec::new();
-        let mut kids = Vec::new();
+        let mut heights = Heights::default();
         for root in roots {
-            let (k, i) = slot(root);
-            if heights[k][i].is_some() {
-                continue;
-            }
-            stack.push((root, false));
-            while let Some((n, expanded)) = stack.pop() {
-                let (k, i) = slot(n);
-                if heights[k][i].is_some() {
-                    continue;
+            heights.walk(self, root, |n, h| {
+                if h == limit + 1 && found.is_none() {
+                    found = Some(span(n));
                 }
-                self.children(n, &mut kids);
-                if expanded {
-                    let below = kids
-                        .iter()
-                        .filter_map(|c| {
-                            let (ck, ci) = slot(*c);
-                            heights[ck][ci]
-                        })
-                        .max()
-                        .unwrap_or(0);
-                    // A statement only wraps what it holds; the rest are levels.
-                    let h = below + u32::from(!matches!(n, Node::S(_)));
-                    heights[k][i] = Some(h);
-                    if h == limit + 1 && found.is_none() {
-                        found = Some(span(n));
-                    }
-                } else {
-                    stack.push((n, true));
-                    for c in kids.clone() {
-                        let (ck, ci) = slot(c);
-                        if heights[ck][ci].is_none() {
-                            stack.push((c, false));
-                        }
-                    }
-                }
-            }
+            });
         }
         found
     }
