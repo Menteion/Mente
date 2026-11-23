@@ -86,14 +86,15 @@ function withRepository(body) {
     fs.mkdirSync(work);
     const git = (...args) => execFileSync("git", args, { cwd: work, env, encoding: "utf8" }).trim();
     git("init", "-q", "-b", "main");
-    // The gates' stable entries, as an installed copy leaves them: the refresh entry, the hook entry
-    // core.hooksPath names by its absolute path, and the runner entry cargo's runner names.
+    // The gates as an installed copy leaves them: `current`, naming a commit, the refresh entry, the
+    // hook entry core.hooksPath names by its absolute path, and the runner entry cargo's runner names.
     const gates = path.join(work, ".git", "mente-gates");
     const hooks = path.join(gates, "entry", "hooks").replace(/\\/g, "/");
     fs.mkdirSync(hooks, { recursive: true });
     fs.writeFileSync(path.join(hooks, "pre-push"), "#!/bin/sh\nexit 0\n");
     fs.writeFileSync(path.join(gates, "entry", "refresh.mjs"), "process.exit(0);\n");
     fs.writeFileSync(path.join(gates, "entry", "capped.mjs"), "process.exit(0);\n");
+    fs.writeFileSync(path.join(gates, "current"), `${"0".repeat(40)}\n`);
     env.CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER = `node ${path.join(gates, "entry", "capped.mjs").replace(/\\/g, "/")} --mente-only --`;
     git("config", "core.hooksPath", hooks);
     fs.writeFileSync(path.join(work, "a.md"), "a\n");
@@ -336,6 +337,7 @@ test("a run refreshes the gates first, and a refusing refresh entry stops it", (
 test("with no copy installed, a run warns with the bootstrap and Norman's two lines and keeps today's working-tree gates, until the round's second pull request", () => {
   withRepository((r) => {
     fs.rmSync(path.join(r.gates, "entry"), { recursive: true });
+    fs.rmSync(path.join(r.gates, "current"));
     // Today's working-tree gates: the main checkout's tools/capped.mjs, which cargo's runner names,
     // and its tools/git-hooks, which core.hooksPath names; ignored, so that no check runs for them.
     fs.appendFileSync(path.join(r.work, ".git", "info", "exclude"), "tools/\n");
@@ -357,6 +359,11 @@ test("with no copy installed, a run warns with the bootstrap and Norman's two li
     const early = r.quick([], "pass", r.work, { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: runner });
     assert.equal(early.status, 2);
     assert.match(early.stderr, /core\.hooksPath names the gates' stable hook entry, but no copy of main's gates is installed .*the bootstrap/s);
+    // A copy current whose refresh entry is missing names the bootstrap too, and says so.
+    fs.writeFileSync(path.join(r.gates, "current"), `${"0".repeat(40)}\n`);
+    const missing = r.quick([], "pass", r.work, { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: runner });
+    assert.equal(missing.status, 2);
+    assert.match(missing.stderr, /core\.hooksPath names the gates' stable hook entry, but the refresh entry .*refresh\.mjs is missing.*the bootstrap/s);
   });
 });
 

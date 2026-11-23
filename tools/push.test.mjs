@@ -899,7 +899,10 @@ test("a moved origin/main whose gate-set.json names a local-path remote installs
     git(work, "update-ref", "refs/remotes/origin/main", moved);
     assert.equal(await seam(), 0);
     assert.equal(current(), base);
-    // The bootstrap's staged refresher of that commit: the command admits only https.
+    // A staged refresher of that commit, started by hand: the command admits only https. The answer
+    // the refresh above remembered for that commit is cleared, so that the refresher reaches the
+    // remote rather than stop at it.
+    fs.rmSync(path.join(gates, "kept"), { force: true });
     const staging = path.join(gates, `staging-${moved}-0b`);
     stageByHand(repo(work), moved, staging);
     const r = spawnSync(process.execPath, [path.join(staging, "tools", "gates.mjs")], { encoding: "utf8" });
