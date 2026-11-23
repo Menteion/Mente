@@ -221,10 +221,13 @@ jobs:
           rustup toolchain install
           node .github/scripts/build-time-code.mjs
       - name: The plan
+        # Outside the checkout, as every artifact a workflow downloads: inside it, the plan's files
+        # would stand in the tree the tests judge, which is then not the commit's tree (the escape
+        # plan-downloaded-into-the-checkout: its summary.md failed every shard's tests).
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: mutants-plan
-          path: mutants-plan
+          path: ${{ runner.temp }}/mutants-plan
       - name: cargo-mutants as the plan built it
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -266,10 +269,10 @@ jobs:
           count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
           case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard the matrix gave is no number"; exit 1 ;; esac
           shard=()
-          while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "mutants-plan/plan/shard-$SHARD.re"
+          while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.re"
           if [ "${#shard[@]}" -eq 0 ]; then echo "::error::the plan dealt shard $SHARD no mutant"; exit 1; fi
           cargo mutants "${shard[@]}" --list --json > shard-mutants.json
-          node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
+          node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" shard-mutants.json > unlisted.txt
           unlisted=$(grep -c . unlisted.txt || true)
           count "$unlisted" "the mutants listed otherwise than the plan dealt them"
           if [ "$unlisted" -gt 0 ]; then
@@ -300,7 +303,7 @@ jobs:
           count() { case "$1" in ''|*[!0-9]*) echo "::error::$2 is not a count: '$1'"; exit 1 ;; esac; }
           case "$SHARD" in ''|*[!0-9]*) echo "::error::the shard the matrix gave is no number"; exit 1 ;; esac
           shard=()
-          while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "mutants-plan/plan/shard-$SHARD.re"
+          while IFS= read -r re; do if [ -n "$re" ]; then shard+=(--re "$re"); fi; done < "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.re"
           # The outcome files decide, not the exit code: cargo-mutants exits 2 when a mutant was
           # missed and 3 when one timed out. A mutant that loops without end fails the test
           # nextest stops, and so is caught; a mutant that still runs past the timeout, ten
@@ -334,7 +337,7 @@ jobs:
           fi
           # The run tested exactly the mutants the plan dealt this shard, each once: none left
           # out, none beside them.
-          node .github/scripts/mutants-floor.mjs assigned "mutants-plan/plan/shard-$SHARD.json" "$out" > unrun.txt
+          node .github/scripts/mutants-floor.mjs assigned "$RUNNER_TEMP/mutants-plan/plan/shard-$SHARD.json" "$out" > unrun.txt
           unrun=$(grep -c . unrun.txt || true)
           count "$unrun" "the mutants tested otherwise than the plan dealt them"
           echo "Mutants tested in shard $SHARD: $tested; otherwise than dealt: $unrun" | tee -a "$GITHUB_STEP_SUMMARY"
