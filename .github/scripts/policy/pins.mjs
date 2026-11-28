@@ -160,6 +160,7 @@ export const GATE_FILES = [
   "/benchmark/own.mjs",
   "/benchmark/harness/",
   "/compiler/mente-cli/tests/gates.rs",
+  "/compiler/mente-cli/tests/support/",
   "/compiler/mente-cli/tests/lints.rs",
   "/compiler/mente-cli/tests/register.rs",
   "/compiler/mente-cli/tests/records.rs",

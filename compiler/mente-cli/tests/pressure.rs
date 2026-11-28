@@ -9,6 +9,8 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod support;
+
 /// A log as `pressure::LOG` prints it: a merge of pull request 170 and of 168 on two days, each
 /// with its two parents, a commit that merged no pull request, and each merge's files with their
 /// statuses, a deletion among them.
@@ -199,25 +201,17 @@ fn test_the_report_ranks_files_by_the_pull_requests_that_changed_them() {
     );
 }
 
-/// `git`, with the configuration of the user and the system left out, and a fixed identity and
-/// day for the commits it makes, run in `dir`: what it prints, or why it failed.
+/// `git`, isolated from this machine (`support::isolated_git`), with a fixed identity and day for
+/// the commits it makes, run in `dir`: what it prints, or why it failed.
 fn git(dir: &Path, args: &[&str]) -> io::Result<String> {
-    let empty = dir.parent().unwrap_or(dir).join("gitconfig");
-    fs::write(&empty, "")?;
-    let out = Command::new("git")
+    let out = support::isolated_git(dir)
         .args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_GLOBAL", &empty)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "fixture")
         .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
         .env("GIT_COMMITTER_NAME", "fixture")
         .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
         .env("GIT_AUTHOR_DATE", "2026-11-17T12:00:00Z")
         .env("GIT_COMMITTER_DATE", "2026-11-17T12:00:00Z")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
         .output()?;
     if !out.status.success() {
         return Err(io::Error::other(format!(

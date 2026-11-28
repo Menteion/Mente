@@ -7,7 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+mod support;
+use support::isolated_git;
 
 // JSON as npm reads it, defined once in the library.
 use mente_cli::json::{parse as parse_json, Json};
@@ -743,7 +745,7 @@ fn lines_where(root: &Path, holds: fn(&str) -> bool) -> Vec<String> {
 /// file, a tool's settings written with this machine's paths say, is no repository text. Where git
 /// cannot name them, as in CI's sandbox, which empties `.git`, every file the walk reaches: a
 /// superset of git's list, so the rules can refuse more there, never less, on a disk that CI checks
-/// out fresh from the commit (and `briefs/clean-tree-around-every-test-run.md` is to hold equal to it).
+/// out fresh from the commit (and the brief `clean-tree-around-every-test-run` is to hold equal to it).
 fn repository_files(root: &Path) -> Vec<PathBuf> {
     git_files(root).unwrap_or_else(|| {
         let mut files = Vec::new();
@@ -752,42 +754,52 @@ fn repository_files(root: &Path) -> Vec<PathBuf> {
     })
 }
 
-/// The files git would commit under `root`, with the user's and the system's configuration left
-/// out, so that only the repository's own ignore rules apply; None where git cannot name them.
+/// The files a commit would hold under `root`, tracked or untracked but not ignored, as git names
+/// them, isolated from this machine (`support::isolated_git`); None where git cannot name them.
+/// The list must hold every file of HEAD's tree that the disk holds, which a second command of git
+/// names, or the rules would read less than the repository and pass on nothing: an incomplete list,
+/// an argument dropped say, fails here rather than be read.
 fn git_files(root: &Path) -> Option<Vec<PathBuf>> {
-    let empty = std::env::temp_dir().join(format!("gates-git-config-{}", std::process::id()));
-    fs::write(&empty, "").ok()?;
-    let out = Command::new("git")
-        .args([
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .current_dir(root)
-        .env("GIT_CONFIG_GLOBAL", &empty)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output();
-    let _ = fs::remove_file(&empty);
-    let out = out.ok().filter(|o| o.status.success())?;
-    Some(
-        out.stdout
-            .split(|&c| c == 0)
-            .filter(|name| !name.is_empty())
-            .map(|name| root.join(String::from_utf8_lossy(name).as_ref()))
-            .collect(),
-    )
+    let names = |args: &[&str]| -> Option<BTreeSet<String>> {
+        let out = isolated_git(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(
+            out.stdout
+                .split(|&c| c == 0)
+                .filter(|name| !name.is_empty())
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .collect(),
+        )
+    };
+    let listed = names(&[
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ])?;
+    if let Some(head) = names(&["ls-tree", "-r", "-z", "--name-only", "HEAD"]) {
+        let missing: Vec<&String> = head
+            .iter()
+            .filter(|name| root.join(name).is_file() && !listed.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "git's list of the repository's files under {} lacks files HEAD holds: {missing:?}",
+            root.display()
+        );
+    }
+    Some(listed.iter().map(|name| root.join(name)).collect())
 }
 
 /// Every file under `dir` the walk reaches, where git cannot list them. It leaves out what no
 /// commit holds: git's own `.git`, a directory or, in a worktree, the file that names its git
 /// directory; build output and dependencies (`target`, `node_modules`); and a nested checkout,
 /// a directory holding `.git`, such as a worktree under `.wt` or `.claude/worktrees`, which is
-/// another branch's files. `briefs/clean-tree-around-every-test-run.md` is to make these one list
+/// another branch's files. The brief `clean-tree-around-every-test-run` is to make these one list
 /// with its clean-tree check's, git's own `.git` among them, so that no second rule says it.
 fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
@@ -1435,16 +1447,21 @@ fn test_the_checkout_path_rule_reads_the_commits_text_alone() {
     .unwrap();
     let dot_git = checkout_path_lines(&dir);
     fs::remove_file(dir.join(".git")).unwrap();
-    // In a repository, an ignored file, a tool's settings say, is no text of a commit; an
-    // untracked one that is not ignored is.
+    // In a repository, an ignored file, a tool's settings say, is no text of a commit; a tracked
+    // one is, and an untracked one that is not ignored.
     let repo = dir.join("repo");
     fs::create_dir_all(&repo).unwrap();
-    let init = Command::new("git")
+    let init = isolated_git(&repo)
         .args(["init", "-q"])
-        .current_dir(&repo)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .map(|o| o.status.success());
+    fs::write(
+        repo.join("tracked.md"),
+        format!("hooks at C:/{r}/Mente/tools/git-hooks"),
+    )
+    .unwrap();
+    let added = isolated_git(&repo)
+        .args(["add", "tracked.md"])
         .output()
         .map(|o| o.status.success());
     fs::write(repo.join(".gitignore"), "local.json\n").unwrap();
@@ -1455,12 +1472,33 @@ fn test_the_checkout_path_rule_reads_the_commits_text_alone() {
     .unwrap();
     fs::write(repo.join("new.md"), format!("cd D:\\{r}\\Mente")).unwrap();
     let in_repo = checkout_path_lines(&repo);
+    // A user's default ignore file, `~/.config/git/ignore`, hides no file from the rules.
+    let xdg = dir.join("xdg");
+    fs::create_dir_all(xdg.join("git")).unwrap();
+    fs::write(xdg.join("git").join("ignore"), "new.md\n").unwrap();
+    let unhidden = isolated_git(&repo)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("new.md"));
     let _ = fs::remove_dir_all(&dir);
     for (text, named, found) in read {
         assert_eq!(found, usize::from(named), "{text}");
     }
     assert!(dot_git.is_empty(), "{dot_git:?}");
     assert!(matches!(init, Ok(true)), "git init failed: {init:?}");
-    assert_eq!(in_repo.len(), 1, "{in_repo:?}");
-    assert!(in_repo[0].contains("new.md"), "{in_repo:?}");
+    assert!(matches!(added, Ok(true)), "git add failed: {added:?}");
+    assert_eq!(in_repo.len(), 2, "{in_repo:?}");
+    assert!(
+        in_repo.iter().any(|at| at.contains("tracked.md")),
+        "{in_repo:?}"
+    );
+    assert!(
+        in_repo.iter().any(|at| at.contains("new.md")),
+        "{in_repo:?}"
+    );
+    assert!(
+        matches!(unhidden, Ok(true)),
+        "a user's default ignore file hid a file: {unhidden:?}"
+    );
 }
