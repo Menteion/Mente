@@ -1763,11 +1763,22 @@ mod tests {
     /// returns, the encoding says it returns, the value it returns and the final value of each
     /// parameter, a `mut` one's copy back. An input cut off is counted.
     fn agreement(src: &str, extra: &[(String, Vec<Value>)]) -> Runs {
+        agreement_of(src, extra, |_| {})
+    }
+
+    /// `agreement`, with the module the encoding reads changed by `change`, as a fault in what the
+    /// harness hands it would change it.
+    fn agreement_of(
+        src: &str,
+        extra: &[(String, Vec<Value>)],
+        change: impl Fn(&mut mente_smt::Module<'_>),
+    ) -> Runs {
         let mut runs = Runs::default();
         let Ok(checked) = mente_sema::check_program_without_proofs(src) else {
             return runs;
         };
-        let module = module_of(&checked);
+        let mut module = module_of(&checked);
+        change(&mut module);
         for (i, f) in checked.functions.iter().enumerate() {
             let Some(cf) = f else {
                 continue;
@@ -1777,6 +1788,7 @@ mod tests {
             if !enc.unencoded.is_empty() {
                 continue;
             }
+            let past = enc.overflowed.contains(&cf.syntax.name_span);
             let mut inputs = generated(&enc);
             inputs.extend(
                 extra
@@ -1817,7 +1829,11 @@ mod tests {
                     eval::eval(&eval::parse(&enc.terms.atom(t)).unwrap()[0], &env).unwrap()
                 };
                 let truth = |t: mente_smt::term::T| value(t) == eval::Value::Bool(true);
-                if !truth(enc.admitted) {
+                // A function whose own frame passes the budget admits no input, since the run traps
+                // at its name before any check of its entry; its inputs are run all the same, each
+                // required to trap there, so that a count the encoding gets wrong is a
+                // disagreement, not a silence.
+                if !truth(enc.admitted) && !past {
                     continue;
                 }
                 if truth(enc.cut) {
@@ -1889,6 +1905,12 @@ mod tests {
                             gives = "; the encoding returns".to_string();
                         }
                     }
+                }
+                let at_name = matches!(&outcome, Err(Stop::Trap(t))
+                    if t.kind.name() == "stack-overflow" && t.span == cf.syntax.name_span);
+                if past && !at_name {
+                    agrees = false;
+                    gives.push_str("; the encoding ends every path at the function's name, past the stack budget");
                 }
                 if !agrees {
                     runs.wrong.push(format!(
@@ -3086,6 +3108,32 @@ mod tests {
         let runs = agreement(src, &[]);
         assert!(runs.wrong.is_empty(), "{:#?}", runs.wrong);
         assert!(runs.compared > 0, "no input was compared");
+    }
+
+    /// A function whose own frame passes the budget admits no input, since the run traps at its
+    /// name first; its inputs are still compared, each run required to trap there, so that a count
+    /// the encoding gets wrong is a disagreement, never a silence.
+    #[test]
+    fn test_an_entry_past_the_budget_is_compared_input_by_input() {
+        let past = "module m\npub fn past(k: u8) -> u8 {\n  _ = [[0_u8; 1]; 4294967295]\n  k\n}\n";
+        let runs = agreement(past, &[]);
+        assert!(
+            runs.wrong.is_empty() && runs.compared > 0,
+            "{} compared: {:#?}",
+            runs.compared,
+            runs.wrong
+        );
+        // An encoding handed a budget of nothing counts every entry past it, as a wrong count
+        // would, where the interpreter runs the function: each of its runs is named.
+        let small = "module m\npub fn id(k: u8) -> u8 {\n  val j = k\n  j\n}\n";
+        let wrong = agreement_of(small, &[], |m| m.budget = 0);
+        assert!(
+            wrong.compared > 0 && wrong.wrong.len() == wrong.compared,
+            "{} compared, {} named",
+            wrong.compared,
+            wrong.wrong.len()
+        );
+        assert!(wrong.wrong[0].contains("past the stack budget"), "{:#?}", wrong.wrong);
     }
 
     /// A call from outside the program counts the function's own frame first, as a call inside
