@@ -20,6 +20,8 @@ mod differential;
 pub(crate) mod generate;
 #[cfg(test)]
 mod host_shapes;
+#[cfg(test)]
+mod work;
 
 /// What each test process may reserve on CI: `ulimit -v` on Linux, a job object on Windows
 /// (`.github/scripts/limits.sh`, which a test reads): 8 GiB.
