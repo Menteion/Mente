@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bootstrapLine, declaredUrl, gateEnv, inMente, systemGit } from "./gate-entries/verify.mjs";
+import { bootstrapText, gateEnv, inMente, systemGit } from "./gate-entries/verify.mjs";
 
 export { inMente };
 import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "./store-apps.mjs";
@@ -60,14 +60,9 @@ export const hooksDir = (gates) => path.join(gates, "entry", "hooks");
 /// The file of cargo's configuration on this laptop that holds its runner.
 const cargoConfig = (env = process.env) => path.join(env.CARGO_HOME || path.join(os.homedir(), ".cargo"), "config.toml");
 
-/// The bootstrap line, with the URL this checkout's tools/gate-set.json declares.
-function bootstrapWords() {
-  try {
-    return bootstrapLine(declaredUrl(path.resolve(HERE, "..")));
-  } catch {
-    return "the bootstrap line of CLAUDE.md's Verification section";
-  }
-}
+/// The bootstrap line for `gates`, as every entry prints it (verify.mjs, bootstrapText), this
+/// checkout's own tools/gate-set.json its last source.
+const bootstrapWords = (gates) => bootstrapText(gates, { checkout: path.resolve(HERE, "..") });
 
 // Between this round's two pull requests (briefs/gate-tools-from-main.md, "The rollout"): while no
 // copy of main's gates is installed, the tools keep today's working-tree gates, the main checkout's
@@ -125,7 +120,7 @@ function fallbackWords(gates, installed) {
   const lines = `git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n\nthen cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n`;
   const branches = "Before Norman's lines change, every open branch merges main: a branch from before this round asks for today's lines, and refuses once they change.";
   if (installed) return `local-limits: WARNING: a copy of main's gates is installed in ${gates}, but Norman's lines still name today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change, so these tools run those. ${branches} Norman then points, in his own terminal and in this order, ${lines}`;
-  return `local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. ${branches} Norman, in his own terminal and in this order, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n\nand once it has succeeded, points ${lines}`;
+  return `local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. ${branches} Norman, in his own terminal and in this order, runs the bootstrap from the main checkout:\n\n${bootstrapWords(gates)}\n\nand once it has succeeded, points ${lines}`;
 }
 
 /**
@@ -158,7 +153,7 @@ export function refreshGates({ cwd = process.cwd(), say = (line) => console.erro
   if (namesCopy(cwd, gates)) {
     // The refresh entry also finishes an install a kill left half done.
     if (!fs.existsSync(entry)) {
-      say(`local-limits: core.hooksPath names the gates' stable hook entry, but ${installed ? `the refresh entry ${entry} is missing` : `no copy of main's gates is installed in ${gates}`}, so nothing here runs until Norman, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n`);
+      say(`local-limits: core.hooksPath names the gates' stable hook entry, but ${installed ? `the refresh entry ${entry} is missing` : `no copy of main's gates is installed in ${gates}`}, so nothing here runs until Norman, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords(gates)}\n`);
       return false;
     }
     return refreshed() ? "copy" : false;
@@ -193,7 +188,7 @@ export function requireHooks({ cwd = process.cwd(), say = (line) => console.erro
     return false;
   }
   if (!fs.existsSync(path.join(want, "pre-push"))) {
-    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook; Norman runs the bootstrap from the main checkout:\n\n${bootstrapWords()}\n`);
+    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook; Norman runs the bootstrap from the main checkout:\n\n${bootstrapWords(path.dirname(path.dirname(want)))}\n`);
     return false;
   }
   return true;
@@ -209,16 +204,39 @@ export const slotsDir = () => process.env.MENTE_SLOTS_DIR ?? path.join(process.e
 
 const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
+/// The variable by which a process holding a slot tells every process it starts which one, as
+/// `<slot> <directory>`: a tool started within it, as quick's checks start the tools' tests and
+/// they start cargo.mjs, runs in the slot its tree holds, and takes no second one, which it would
+/// wait for while its tree held the first (the flake of stack-budget's first quick). A claim counts
+/// only while that slot of the same directory is held. That its holder is an ancestor, not another
+/// session's process, is held by review only.
+export const SLOT_HELD = "MENTE_SLOT_HELD";
+
+/// Whether the slot lock `file` is held now, by any process.
+function slotHeld(file) {
+  try {
+    fs.closeSync(fs.openSync(file, fs.constants.O_RDWR | fs.constants.O_CREAT | EXCLUSIVE));
+    return false;
+  } catch (e) {
+    return e.code === "EBUSY";
+  }
+}
+
 /// Takes one of the machine's SLOTS build slots for this process, waiting while all are held and
-/// saying once who holds them; `label` says what it is for. Returns { slot, release }: the slot is
-/// also let go when this process ends.
+/// saying once who holds them; `label` says what it is for. A process its tree's slot already
+/// covers (SLOT_HELD) takes none. Returns { slot, release, covered }: the slot is also let go when
+/// this process ends.
 export function acquireSlot(label, { pollMs = 2000, say = (line) => console.error(line) } = {}) {
   if (!WINDOWS) {
     say("local-limits: no build slots off Windows");
-    return { slot: 0, release() {} };
+    return { slot: 0, release() {}, covered: false };
   }
   const dir = slotsDir();
   fs.mkdirSync(dir, { recursive: true });
+  const claim = /^(\d+) (.+)$/s.exec(process.env[SLOT_HELD] ?? "");
+  if (claim && fold(claim[2]) === fold(dir) && slotHeld(path.join(dir, `slot-${claim[1]}.lock`))) {
+    return { slot: Number(claim[1]), release() {}, covered: true };
+  }
   let told = false;
   for (;;) {
     for (let k = 1; k <= SLOTS; k++) {
@@ -230,7 +248,15 @@ export function acquireSlot(label, { pollMs = 2000, say = (line) => console.erro
         throw e;
       }
       fs.writeFileSync(path.join(dir, `slot-${k}.who`), `pid ${process.pid} since ${new Date().toISOString()}: ${label}\n`);
-      return { slot: k, release: () => fs.closeSync(fd) };
+      process.env[SLOT_HELD] = `${k} ${dir}`;
+      return {
+        slot: k,
+        release: () => {
+          fs.closeSync(fd);
+          delete process.env[SLOT_HELD];
+        },
+        covered: false,
+      };
     }
     if (!told) {
       const who = [];
@@ -375,7 +401,7 @@ export function requireRunner({ cwd = process.cwd(), env = process.env, say = (l
   const line = fallback ? workingTreeRunnerLine() : runnerLine(gates);
   if (held) return true;
   if (unwritten) {
-    say(`local-limits: cargo's runner names the gates' runner entry, ${words[1]}, which no install has written yet, so a test binary cargo starts would die on node's own error, and nothing here runs until it stands. Norman runs the bootstrap from the main checkout, in his own terminal:\n\n${bootstrapWords()}\n`);
+    say(`local-limits: cargo's runner names the gates' runner entry, ${words[1]}, which no install has written yet, so a test binary cargo starts would die on node's own error, and nothing here runs until it stands. Norman runs the bootstrap from the main checkout, in his own terminal:\n\n${bootstrapWords(gates)}\n`);
     return false;
   }
   // The variable cargo reads before every file: when it names the runner, it is what to change

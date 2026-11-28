@@ -406,29 +406,58 @@ export function hooksNamed(gates, { bin = systemGit() } = {}) {
 function urlIn(gates) {
   let names = [];
   try {
-    names = [fs.readFileSync(path.join(gates, "current"), "utf8").trim(), ...fs.readdirSync(gates)];
+    names = fs.readdirSync(gates);
   } catch {
     return null;
   }
+  try {
+    names.unshift(fs.readFileSync(path.join(gates, "current"), "utf8").trim());
+  } catch {
+    // No copy current: the others, in turn.
+  }
   for (const name of names) {
-    try {
-      const url = declaredUrl(path.join(gates, name));
-      if (typeof url === "string" && url.startsWith("https://")) return url;
-    } catch {
-      // Not a copy.
-    }
+    const url = httpsUrlOf(path.join(gates, name));
+    if (url) return url;
   }
   return null;
+}
+
+/// The https URL a file of the set declares, from the copy or checkout `dir`, or null.
+function httpsUrlOf(dir) {
+  try {
+    const url = declaredUrl(dir);
+    return typeof url === "string" && url.startsWith("https://") ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/// The https URL main's own tools/gate-set.json declares, as the local origin/main holds it, which
+/// the bootstrap requires its commit to be; null where it cannot be read.
+function mainUrl(gates, bin) {
+  try {
+    const url = JSON.parse(git(path.dirname(gates), ["cat-file", "blob", `${MAIN_REF}:tools/gate-set.json`], { bin })).url;
+    return typeof url === "string" && url.startsWith("https://") ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The bootstrap line for the repository of `gates`, the one every refusal and every warning of the
+ * tools prints, with the https URL main's gates declare, taken from the most trusted source that
+ * has one: a copy, the current one first; main's own tools/gate-set.json in the local origin/main;
+ * the caller's `checkout`, where it runs from one. Words naming that line where none has one.
+ */
+export function bootstrapText(gates, { checkout = null, bin = systemGit() } = {}) {
+  const url = (gates ? urlIn(gates) : null) ?? (gates && bin ? mainUrl(gates, bin) : null) ?? (checkout ? httpsUrlOf(checkout) : null);
+  return url ? bootstrapLine(url) : "the bootstrap line, with the https URL main's tools/gate-set.json declares, which no copy, no object of the local origin/main and no checkout here could give";
 }
 
 /// What an entry says when it refuses: why, and the one command that clears it.
 export function refusalWords(gates, result) {
   const how = {
-    bootstrap: () => {
-      const url = urlIn(gates);
-      const line = url ? `:\n\n${bootstrapLine(url)}\n` : ", the line of CLAUDE.md's Verification section";
-      return `Norman runs the bootstrap, from the main checkout, in his own terminal${line}`;
-    },
+    bootstrap: () => `Norman runs the bootstrap, from the main checkout, in his own terminal:\n\n${bootstrapText(gates)}\n`,
     refresh: () => `run ${REFRESH}, whose start refreshes the copy and finishes an install left half done`,
     fetch: () => "fetch first (git fetch origin), then run the command again",
   }[result.command];

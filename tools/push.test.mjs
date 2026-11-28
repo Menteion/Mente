@@ -21,10 +21,6 @@ import { LOCK_FD_VARIABLE, TREE_RUNNER, lockHolder, takeLock } from "./gate-proc
 import { GET_URL_MS, REFRESH_MS, REMEMBER_MS, REMOTE_MS, RETRY_MS, WAIT_MS, WRITE_MS, refresh } from "./gates.mjs";
 import { QUICK, prePush } from "./push.mjs";
 
-// Slots of their own for every case, which each process they start inherits, so that no case waits
-// for one of the machine's two (local-limits.test.mjs holds every test file of the tools to it).
-process.env.MENTE_SLOTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "push-slots-"));
-
 const HOOKS = fileURLToPath(new URL("./git-hooks", import.meta.url));
 const GUARD = fileURLToPath(new URL("./push-guard.mjs", import.meta.url));
 
@@ -1949,4 +1945,56 @@ test("a bootstrap run by hand with a commit main does not hold writes no entry o
     },
     { patched: true },
   );
+});
+
+test("every refusal of an entry prints the bootstrap line, from main's tools/gate-set.json where no copy declares one", async () => {
+  await withGates(async ({ work, gates, commit, entry }) => {
+    // main's set declares an https URL, as the real one does. No copy stands, and the entries do,
+    // as a bootstrap whose install was refused leaves them.
+    const url = "https://example.invalid/mente.git";
+    commit("an https remote", { "tools/gate-set.json": () => `${JSON.stringify({ ...SET, url }, null, 2)}\n` });
+    for (const name of ENTRIES) {
+      const to = path.join(gates, "entry", ...name.split("/"));
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(path.join(work, "tools", "gate-entries", ...name.split("/")), to);
+    }
+    fs.writeFileSync(path.join(work, "Cargo.toml"), "[workspace]\n");
+    const line = bootstrapLine(url);
+    for (const [name, args] of [
+      ["hook.mjs", []],
+      ["capped.mjs", ["--mente-only", "--", process.execPath, "-e", "process.exit(7)"]],
+      ["refresh.mjs", []],
+    ]) {
+      const r = entry(name, args);
+      assert.notEqual(r.status, 0, `${name}: ${r.stderr}`);
+      assert.ok(r.stderr.includes(line), `${name} did not print the bootstrap line: ${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /CLAUDE\.md/, name);
+    }
+  });
+});
+
+test("a first install whose entry Windows refuses to replace names what finishes it: the bootstrap while Norman's lines name today's gates, a start once they name the copy", { skip: windowsOnly }, async () => {
+  await withGates(async ({ work, git, gates, said, seam, current, commit }) => {
+    // The entries of an older commit stand, as a refused bootstrap left them, and no copy is current.
+    for (const name of ENTRIES) {
+      const to = path.join(gates, "entry", ...name.split("/"));
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(path.join(work, "tools", "gate-entries", ...name.split("/")), to);
+    }
+    commit("a new hook", { "tools/gate-entries/hooks/pre-push": (old) => `${old}# changed\n` });
+    const fd = fs.openSync(path.join(gates, "entry", "hooks", "pre-push"), fs.constants.O_RDONLY | 0x10000000);
+    try {
+      said.length = 0;
+      assert.equal(await seam({ bootstrap: true }), 0);
+      assert.match(said.join("\n"), /Windows refused to replace the entries hooks\/pre-push, in use; Norman runs the bootstrap again/);
+      assert.doesNotMatch(said.join("\n"), /the next start/);
+      assert.throws(() => current(), "a copy became current with an entry not replaced");
+      git(work, "config", "core.hooksPath", path.join(gates, "entry", "hooks").replace(/\\/g, "/"));
+      said.length = 0;
+      assert.equal(await seam({ bootstrap: true }), 0);
+      assert.match(said.join("\n"), /in use; the next start of quick, cargo or mn tries again/);
+    } finally {
+      fs.closeSync(fd);
+    }
+  });
 });

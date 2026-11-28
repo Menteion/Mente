@@ -128,6 +128,7 @@ The command admits only https however it is started, and a test holds that no ar
 
 **The bootstrap.** With nothing installed, or with a bad current copy, no copy holds a trusted URL, so the install is Norman's one command.
 - The command is written in CLAUDE.md's Verification section, Norman's file, with the URL in it literally. The tools print the same line. A test holds the printed line equal to CLAUDE.md's, and its URL equal to the URL in `gate-set.json`.
+- Every refusal and every warning that names the bootstrap prints the line itself, from one definition (`bootstrapText`). Its https URL comes from the most trusted source that has one: a copy, the current one first; main's own `tools/gate-set.json` in the local `origin/main`, which the bootstrap requires its commit to be; and the caller's checkout last. So after a refused bootstrap, with no copy at all, the entries still print it.
 - The command runs only `git ls-remote` at that URL. It refuses a commit the local `origin/main` does not name, before writing anything, and says to fetch first.
 - It writes the set of the commit the remote names, read from that commit's objects with `--no-replace-objects`, into a directory of its own outside `mente-gates/`, which no sweep reaches. With that set's own modules it takes the lock, waiting at most the refresh's time limit.
 - While no copy is current, it writes each stable entry that does not stand yet, the hook's first. So wherever Norman's lines point, git's hook and cargo's runner refuse with a remedy rather than run nothing. It never replaces an entry, since nothing has confirmed the commit yet: replacing one is the install's, once the remote has.
@@ -262,6 +263,8 @@ They are the branch's own tools, which its own changes test. What judges every b
 - [ ] An installed refresher with a committed bug that keeps it from confirming leaves the current copy in place, and the bootstrap recovers it, planted.
 - [ ] An entry of an older interface version reports itself as stale against a newer copy and names the refresh. The refresh entry, exempt from that check, still runs, planted.
 - [ ] The bootstrap line the tools print equals CLAUDE.md's, and its URL equals the URL in `gate-set.json`. The command admits only https, and no argument or variable changes that.
+- [ ] Every refusal of an entry prints the bootstrap line itself, with no copy installed too, planted. A first install whose entry Windows refuses to replace names what finishes it: the bootstrap while Norman's lines name today's gates, a start once they name the copy, planted.
+- [ ] A tool started within a process tree that holds one of the machine's build slots runs in that slot and takes no second one, which it would wait for while its tree held the first. Only a claim of a slot of the same directory that is held now counts, planted. No test file of the tools takes slots of its own for its whole process, which would run its real work outside the budget, planted.
 - [ ] Running the command a refusal names clears the refusal.
 - [ ] Offline, with the remote's URL unreachable, these hold, each planted:
   - with the local `origin/main` naming `current`, a start asks no remote;

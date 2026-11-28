@@ -28,7 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handDown, inTime, inheritedLock, lockHolder, takeLock } from "./gate-processes.mjs";
-import { COMMIT, ENTRIES, MAIN_REF, NODE_ENGINES, STAGING, bootstrapLine, commitOf, declaredUrl, entriesHold, entryHolds, filesOf, gateEnv, git, gitLocations, laggingSince, localMain, manifestText, mismatch, nodeMeetsFloor, readManifest, setPath, systemGit } from "./gate-entries/verify.mjs";
+import { COMMIT, ENTRIES, MAIN_REF, NODE_ENGINES, STAGING, bootstrapText, commitOf, declaredUrl, entriesHold, entryHolds, filesOf, gateEnv, git, gitLocations, hooksNamed, laggingSince, localMain, manifestText, mismatch, nodeMeetsFloor, readManifest, setPath, systemGit } from "./gate-entries/verify.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -239,7 +239,7 @@ async function refreshFrom(ctx) {
   const { common, gates, url } = ctx;
   const current = readCurrent(gates);
   if (!binOf(ctx)) {
-    ctx.say(`no git is found at ${gitLocations().join(" or ")}, so the current copy stays${lagWords(common, current)}. Add the location to gitLocations in tools/gate-entries/verify.mjs, then run the bootstrap:\n\n${bootstrapLine(url)}\n`);
+    ctx.say(`no git is found at ${gitLocations().join(" or ")}, so the current copy stays${lagWords(common, current)}. Add the location to gitLocations in tools/gate-entries/verify.mjs, then run the bootstrap:\n\n${bootstrapText(gates, { bin: null })}\n`);
     return 0;
   }
   const local = localMain(common);
@@ -393,7 +393,10 @@ async function installAt(ctx, dir) {
   await ctx.stop?.("rename");
   const refused = writeEntries(ctx, files, (f) => fs.readFileSync(path.join(installed, ...f.path.split("/"))));
   if (refused.length > 0) {
-    ctx.say(`the copy of ${commit.slice(0, 12)} is installed but not yet current: Windows refused to replace the entries ${refused.join(", ")}, in use; the next start of quick, cargo or mn tries again`);
+    // A start finishes it where a copy is current, or where Norman's lines name the copy; while
+    // they name today's gates with none current, only the bootstrap does.
+    const next = readCurrent(ctx.gates) || hooksNamed(ctx.gates, { bin: binOf(ctx) }) ? "the next start of quick, cargo or mn tries again" : `Norman runs the bootstrap again, from the main checkout, in his own terminal, once nothing holds them:\n\n${bootstrapText(ctx.gates, { bin: binOf(ctx) })}\n`;
+    ctx.say(`the copy of ${commit.slice(0, 12)} is installed but not yet current: Windows refused to replace the entries ${refused.join(", ")}, in use; ${next}`);
     return 0;
   }
   const previous = readCurrent(ctx.gates);

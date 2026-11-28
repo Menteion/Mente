@@ -27,10 +27,6 @@ import { fileURLToPath } from "node:url";
 
 const QUICK = fileURLToPath(new URL("./quick.mjs", import.meta.url));
 const WINDOWS = process.platform === "win32";
-// Slots of their own for every case, which each process they start inherits: a case that runs the
-// tools themselves, as the own-checkout case runs cargo.mjs, would otherwise wait for one of the
-// machine's two, inside a quick run that holds one, past its time (stack-budget's first quick).
-process.env.MENTE_SLOTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "quick-slots-"));
 
 /**
  * The shims of cargo and npm in `dir`, which do what QUICK_SHIM says, and fail with 3 outside the
