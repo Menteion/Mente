@@ -666,9 +666,7 @@ fn test_the_lock_holds_only_approved_crates() {
     );
 }
 
-/// The lines under `root` that hold a CJK character, as `path:line`. Build output, dependencies
-/// and nested checkouts are skipped: a directory holding `.git`, such as a worktree under `.wt`
-/// or `.claude/worktrees`, is another branch's files, which this tree does not own.
+/// The lines under `root` that hold a CJK character, as `path:line`.
 fn non_english_lines(root: &Path) -> Vec<String> {
     // The same ranges as CJK_RANGES in .github/scripts/lib/commits.mjs, which checks commit
     // messages and pull requests; a test of the workflow policy keeps the two equal.
@@ -686,19 +684,54 @@ fn non_english_lines(root: &Path) -> Vec<String> {
             | 0xFF00..=0xFFEF   // full-width forms
             | 0x20000..=0x3FFFF) // the supplementary ideographic planes
     }
-    fn walk(dir: &Path, found: &mut Vec<String>) {
+    lines_where(root, |line| line.chars().any(is_cjk))
+}
+
+/// The lines under `root` that name a checkout's place by a literal path, as `path:line`: a
+/// drive's `Repos` directory, with slashes or backslashes, single or escaped.
+fn checkout_path_lines(root: &Path) -> Vec<String> {
+    fn names_a_checkout_path(line: &str) -> bool {
+        let b = line.as_bytes();
+        (0..b.len()).any(|i| {
+            if !(b[i].is_ascii_alphabetic() && b.get(i + 1) == Some(&b':'))
+                || (i > 0 && b[i - 1].is_ascii_alphanumeric())
+            {
+                return false;
+            }
+            let mut j = i + 2;
+            while matches!(b.get(j), Some(b'/' | b'\\')) {
+                j += 1;
+            }
+            j > i + 2
+                && b.len() >= j + 6
+                && b[j..j + 5].eq_ignore_ascii_case(b"repos")
+                && matches!(b[j + 5], b'/' | b'\\')
+        })
+    }
+    lines_where(root, names_a_checkout_path)
+}
+
+/// The lines under `root` that `holds`, as `path:line`. Build output, dependencies and nested
+/// checkouts are skipped: a directory holding `.git`, such as a worktree under `.wt` or
+/// `.claude/worktrees`, is another branch's files, which this tree does not own. So is git's own
+/// `.git`, a directory or, in a worktree, the file that names its git directory.
+fn lines_where(root: &Path, holds: fn(&str) -> bool) -> Vec<String> {
+    fn walk(dir: &Path, holds: fn(&str) -> bool, found: &mut Vec<String>) {
         let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         for entry in entries.flatten() {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
+            if name == ".git" {
+                continue;
+            }
             if path.is_dir() {
                 let skipped = matches!(name.as_str(), ".git" | "target" | "node_modules");
                 if !skipped && !path.join(".git").exists() {
-                    walk(&path, found);
+                    walk(&path, holds, found);
                 }
             } else if let Ok(text) = fs::read_to_string(&path) {
                 for (i, line) in text.lines().enumerate() {
-                    if line.chars().any(is_cjk) {
+                    if holds(line) {
                         found.push(format!("{}:{}", path.display(), i + 1));
                     }
                 }
@@ -706,7 +739,7 @@ fn non_english_lines(root: &Path) -> Vec<String> {
         }
     }
     let mut found = Vec::new();
-    walk(root, &mut found);
+    walk(root, holds, &mut found);
     found
 }
 
@@ -1274,4 +1307,39 @@ fn test_repository_text_is_english() {
         "non-English text at:\n{}",
         found.join("\n")
     );
+}
+
+/// Where a checkout lies is read from the checkout at run time, as the tools read it, and never
+/// restated as a literal path: CLAUDE.md's `core.hooksPath` went stale when the repositories
+/// moved from `C:` to `D:`. No file of the working tree names a drive's `Repos` directory.
+#[test]
+fn test_repository_text_names_no_checkout_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let found = checkout_path_lines(&root);
+    assert!(
+        found.is_empty(),
+        "a checkout's place written as a literal path at:\n{}",
+        found.join("\n")
+    );
+    // The rule reads what it is meant to, and no more.
+    let dir = std::env::temp_dir().join(format!("checkout-paths-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    // Built at run time, so that this file names no such path itself.
+    let r = "Repos";
+    for (text, named) in [
+        (format!("hooks at C:/{r}/Mente/tools/git-hooks"), true),
+        (format!("cd D:\\{r}\\Menteion\\Mente"), true),
+        (format!("the json \"C:\\\\{r}\\\\Mente\""), true),
+        ("X:\\checkout\\target\\release\\mn.exe".to_string(), false),
+        (format!("a repository of C:/Users/x/{r}itories"), false),
+        (format!("ABC:/{r}/x"), false),
+    ] {
+        fs::write(dir.join("probe.md"), &text).unwrap();
+        assert_eq!(
+            checkout_path_lines(&dir).len(),
+            usize::from(named),
+            "{text}"
+        );
+    }
+    fs::remove_dir_all(&dir).unwrap();
 }
