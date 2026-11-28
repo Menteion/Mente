@@ -3133,7 +3133,11 @@ mod tests {
             wrong.compared,
             wrong.wrong.len()
         );
-        assert!(wrong.wrong[0].contains("past the stack budget"), "{:#?}", wrong.wrong);
+        assert!(
+            wrong.wrong[0].contains("past the stack budget"),
+            "{:#?}",
+            wrong.wrong
+        );
     }
 
     /// A call from outside the program counts the function's own frame first, as a call inside
