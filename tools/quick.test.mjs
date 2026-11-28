@@ -350,6 +350,7 @@ test("with no copy installed, a run warns with the bootstrap and Norman's two li
     const kept = r.quick([], "pass", r.work, { CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: runner });
     assert.equal(kept.status, 0, `${kept.stdout}\n${kept.stderr}`);
     assert.match(kept.stderr, /WARNING: no copy of main's gates is installed/);
+    assert.ok(kept.stderr.includes(`runs the bootstrap from the main checkout, ${r.work}:`), `the warning named no place for the bootstrap: ${kept.stderr}`);
     assert.match(kept.stderr, /\$c = \(git ls-remote https:\/\/\S+ refs\/heads\/main\)/);
     assert.match(kept.stderr, /runner = \["node", ".*\/mente-gates\/entry\/capped\.mjs", "--mente-only", "--"\]/);
     assert.match(kept.stderr, /git config core\.hooksPath .*\/mente-gates\/entry\/hooks/);

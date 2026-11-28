@@ -1968,6 +1968,7 @@ test("every refusal of an entry prints the bootstrap line, from main's tools/gat
       const r = entry(name, args);
       assert.notEqual(r.status, 0, `${name}: ${r.stderr}`);
       assert.ok(r.stderr.includes(line), `${name} did not print the bootstrap line: ${r.stderr}`);
+      assert.ok(r.stderr.includes(`from the main checkout, ${work}`), `${name} did not name the main checkout's place: ${r.stderr}`);
       assert.doesNotMatch(r.stderr, /CLAUDE\.md/, name);
     }
   });

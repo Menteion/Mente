@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { bootstrapText, gateEnv, inMente, systemGit } from "./gate-entries/verify.mjs";
+import { bootstrapText, gateEnv, inMente, mainCheckoutWords, systemGit } from "./gate-entries/verify.mjs";
 
 export { inMente };
 import { SYSTEM_POWERSHELL, storePowerShell, withoutStoreApps } from "./store-apps.mjs";
@@ -120,7 +120,7 @@ function fallbackWords(gates, installed) {
   const lines = `git's hooks:\n\ngit config core.hooksPath ${hooksDir(gates).replace(/\\/g, "/")}\n\nthen cargo's runner, under [target.${RUNNER_TARGET}] in ${cargoConfig()}:\n\n${runnerLine(gates)}\n`;
   const branches = "Before Norman's lines change, every open branch merges main: a branch from before this round asks for today's lines, and refuses once they change.";
   if (installed) return `local-limits: WARNING: a copy of main's gates is installed in ${gates}, but Norman's lines still name today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change, so these tools run those. ${branches} Norman then points, in his own terminal and in this order, ${lines}`;
-  return `local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. ${branches} Norman, in his own terminal and in this order, runs the bootstrap from the main checkout:\n\n${bootstrapWords(gates)}\n\nand once it has succeeded, points ${lines}`;
+  return `local-limits: WARNING: no copy of main's gates is installed in ${gates}, so these tools still run today's working-tree gates, the main checkout's tools/capped.mjs and tools/git-hooks, which any checkout of it can change. ${branches} Norman, in his own terminal and in this order, runs the bootstrap from ${mainCheckoutWords(gates)}:\n\n${bootstrapWords(gates)}\n\nand once it has succeeded, points ${lines}`;
 }
 
 /**
@@ -153,7 +153,7 @@ export function refreshGates({ cwd = process.cwd(), say = (line) => console.erro
   if (namesCopy(cwd, gates)) {
     // The refresh entry also finishes an install a kill left half done.
     if (!fs.existsSync(entry)) {
-      say(`local-limits: core.hooksPath names the gates' stable hook entry, but ${installed ? `the refresh entry ${entry} is missing` : `no copy of main's gates is installed in ${gates}`}, so nothing here runs until Norman, in his own terminal, runs the bootstrap from the main checkout:\n\n${bootstrapWords(gates)}\n`);
+      say(`local-limits: core.hooksPath names the gates' stable hook entry, but ${installed ? `the refresh entry ${entry} is missing` : `no copy of main's gates is installed in ${gates}`}, so nothing here runs until Norman, in his own terminal, runs the bootstrap from ${mainCheckoutWords(gates)}:\n\n${bootstrapWords(gates)}\n`);
       return false;
     }
     return refreshed() ? "copy" : false;
@@ -188,7 +188,7 @@ export function requireHooks({ cwd = process.cwd(), say = (line) => console.erro
     return false;
   }
   if (!fs.existsSync(path.join(want, "pre-push"))) {
-    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook; Norman runs the bootstrap from the main checkout:\n\n${bootstrapWords(path.dirname(path.dirname(want)))}\n`);
+    say(`local-limits: core.hooksPath names ${want}, which holds no pre-push hook; Norman runs the bootstrap from ${mainCheckoutWords(path.dirname(path.dirname(want)))}:\n\n${bootstrapWords(path.dirname(path.dirname(want)))}\n`);
     return false;
   }
   return true;
@@ -401,7 +401,7 @@ export function requireRunner({ cwd = process.cwd(), env = process.env, say = (l
   const line = fallback ? workingTreeRunnerLine() : runnerLine(gates);
   if (held) return true;
   if (unwritten) {
-    say(`local-limits: cargo's runner names the gates' runner entry, ${words[1]}, which no install has written yet, so a test binary cargo starts would die on node's own error, and nothing here runs until it stands. Norman runs the bootstrap from the main checkout, in his own terminal:\n\n${bootstrapWords(gates)}\n`);
+    say(`local-limits: cargo's runner names the gates' runner entry, ${words[1]}, which no install has written yet, so a test binary cargo starts would die on node's own error, and nothing here runs until it stands. Norman runs the bootstrap from ${mainCheckoutWords(gates)}, in his own terminal:\n\n${bootstrapWords(gates)}\n`);
     return false;
   }
   // The variable cargo reads before every file: when it names the runner, it is what to change

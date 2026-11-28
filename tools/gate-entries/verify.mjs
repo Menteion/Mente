@@ -454,10 +454,21 @@ export function bootstrapText(gates, { checkout = null, bin = systemGit() } = {}
   return url ? bootstrapLine(url) : "the bootstrap line, with the https URL main's tools/gate-set.json declares, which no copy, no object of the local origin/main and no checkout here could give";
 }
 
+/**
+ * Where Norman runs the bootstrap, as every message names it: "the main checkout", with its path,
+ * the directory that holds the common git directory of `gates`, read from where the gates lie and
+ * never written as a literal, since the checkout may move; without the path where the common
+ * directory is not a checkout's `.git`.
+ */
+export function mainCheckoutWords(gates) {
+  const common = typeof gates === "string" && path.isAbsolute(gates) ? path.dirname(gates) : null;
+  return common && path.basename(common) === ".git" ? `the main checkout, ${path.resolve(path.dirname(common))}` : "the main checkout";
+}
+
 /// What an entry says when it refuses: why, and the one command that clears it.
 export function refusalWords(gates, result) {
   const how = {
-    bootstrap: () => `Norman runs the bootstrap, from the main checkout, in his own terminal:\n\n${bootstrapText(gates)}\n`,
+    bootstrap: () => `Norman runs the bootstrap, from ${mainCheckoutWords(gates)}, in his own terminal:\n\n${bootstrapText(gates)}\n`,
     refresh: () => `run ${REFRESH}, whose start refreshes the copy and finishes an install left half done`,
     fetch: () => "fetch first (git fetch origin), then run the command again",
   }[result.command];

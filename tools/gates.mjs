@@ -28,7 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { handDown, inTime, inheritedLock, lockHolder, takeLock } from "./gate-processes.mjs";
-import { COMMIT, ENTRIES, MAIN_REF, NODE_ENGINES, STAGING, bootstrapText, commitOf, declaredUrl, entriesHold, entryHolds, filesOf, gateEnv, git, gitLocations, hooksNamed, laggingSince, localMain, manifestText, mismatch, nodeMeetsFloor, readManifest, setPath, systemGit } from "./gate-entries/verify.mjs";
+import { COMMIT, ENTRIES, MAIN_REF, NODE_ENGINES, STAGING, bootstrapText, commitOf, declaredUrl, entriesHold, entryHolds, filesOf, gateEnv, git, gitLocations, hooksNamed, laggingSince, localMain, manifestText, mismatch, nodeMeetsFloor, mainCheckoutWords, readManifest, setPath, systemGit } from "./gate-entries/verify.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const HERE = path.dirname(SELF);
@@ -395,7 +395,7 @@ async function installAt(ctx, dir) {
   if (refused.length > 0) {
     // A start finishes it where a copy is current, or where Norman's lines name the copy; while
     // they name today's gates with none current, only the bootstrap does.
-    const next = readCurrent(ctx.gates) || hooksNamed(ctx.gates, { bin: binOf(ctx) }) ? "the next start of quick, cargo or mn tries again" : `Norman runs the bootstrap again, from the main checkout, in his own terminal, once nothing holds them:\n\n${bootstrapText(ctx.gates, { bin: binOf(ctx) })}\n`;
+    const next = readCurrent(ctx.gates) || hooksNamed(ctx.gates, { bin: binOf(ctx) }) ? "the next start of quick, cargo or mn tries again" : `Norman runs the bootstrap again, from ${mainCheckoutWords(ctx.gates)}, in his own terminal, once nothing holds them:\n\n${bootstrapText(ctx.gates, { bin: binOf(ctx) })}\n`;
     ctx.say(`the copy of ${commit.slice(0, 12)} is installed but not yet current: Windows refused to replace the entries ${refused.join(", ")}, in use; ${next}`);
     return 0;
   }
