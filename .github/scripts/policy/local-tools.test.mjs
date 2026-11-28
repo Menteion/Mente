@@ -290,7 +290,7 @@ check("the raw-build guard refuses a build outside the local limits and names th
     ["if true; then cargo test; fi", "node tools/cargo.mjs test"],
     ["C:/Users/Dancr/.cargo/bin/cargo.exe check", "node tools/cargo.mjs check"],
     ["target/debug/mn.exe check x.mn", "node tools/mn.mjs check x.mn"],
-    ["C:\\Repos\\Mente\\target\\release\\mn.exe run a.mn", "node tools/mn.mjs run a.mn"],
+    ["X:\\checkout\\target\\release\\mn.exe run a.mn", "node tools/mn.mjs run a.mn"],
     ["./target/debug/deps/mn-0e02cc27629dbce7.exe --list", "node tools/cargo.mjs test -- --list"],
     ["node tools/cargo.mjs test -p mente-cli", null],
     ["node tools/mn.mjs check examples/a.mn", null],

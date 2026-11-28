@@ -6,7 +6,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+mod support;
+use support::isolated_git;
 
 // JSON as npm reads it, defined once in the library.
 use mente_cli::json::{parse as parse_json, Json};
@@ -666,9 +669,7 @@ fn test_the_lock_holds_only_approved_crates() {
     );
 }
 
-/// The lines under `root` that hold a CJK character, as `path:line`. Build output, dependencies
-/// and nested checkouts are skipped: a directory holding `.git`, such as a worktree under `.wt`
-/// or `.claude/worktrees`, is another branch's files, which this tree does not own.
+/// The lines under `root` that hold a CJK character, as `path:line`.
 fn non_english_lines(root: &Path) -> Vec<String> {
     // The same ranges as CJK_RANGES in .github/scripts/lib/commits.mjs, which checks commit
     // messages and pull requests; a test of the workflow policy keeps the two equal.
@@ -686,28 +687,136 @@ fn non_english_lines(root: &Path) -> Vec<String> {
             | 0xFF00..=0xFFEF   // full-width forms
             | 0x20000..=0x3FFFF) // the supplementary ideographic planes
     }
-    fn walk(dir: &Path, found: &mut Vec<String>) {
-        let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if path.is_dir() {
-                let skipped = matches!(name.as_str(), ".git" | "target" | "node_modules");
-                if !skipped && !path.join(".git").exists() {
-                    walk(&path, found);
+    lines_where(root, |line| line.chars().any(is_cjk))
+}
+
+/// The lines under `root` that name a checkout's place by a literal path, as `path:line`: a
+/// drive's `Repos` directory, in each spelling the tree's text would give it, Windows' with
+/// slashes or backslashes, single or escaped, and Git Bash's `/d/`, ending a token or followed by
+/// a separator.
+fn checkout_path_lines(root: &Path) -> Vec<String> {
+    fn names_a_checkout_path(line: &str) -> bool {
+        let b = line.as_bytes();
+        // `repos` at `j`, ending its token: no letter or digit follows.
+        let repos_at = |j: usize| {
+            b.len() >= j + 5
+                && b[j..j + 5].eq_ignore_ascii_case(b"repos")
+                && !b.get(j + 5).is_some_and(u8::is_ascii_alphanumeric)
+        };
+        (0..b.len()).any(|i| {
+            let after_word = i > 0 && b[i - 1].is_ascii_alphanumeric();
+            // A drive, a colon and one or more separators, as Windows writes it.
+            if b[i].is_ascii_alphabetic() && b.get(i + 1) == Some(&b':') && !after_word {
+                let mut j = i + 2;
+                while matches!(b.get(j), Some(b'/' | b'\\')) {
+                    j += 1;
                 }
-            } else if let Ok(text) = fs::read_to_string(&path) {
-                for (i, line) in text.lines().enumerate() {
-                    if line.chars().any(is_cjk) {
-                        found.push(format!("{}:{}", path.display(), i + 1));
-                    }
+                return j > i + 2 && repos_at(j);
+            }
+            // `/d/`, as Git Bash writes a drive, not inside a word or a path's name.
+            b[i] == b'/'
+                && !(after_word || (i > 0 && matches!(b[i - 1], b'_' | b'.' | b'~' | b'-')))
+                && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic)
+                && b.get(i + 2) == Some(&b'/')
+                && repos_at(i + 3)
+        })
+    }
+    lines_where(root, names_a_checkout_path)
+}
+
+/// The lines of the repository's files under `root` (`repository_files`) that `holds`, as
+/// `path:line`. A file that is not UTF-8 text is not read.
+fn lines_where(root: &Path, holds: fn(&str) -> bool) -> Vec<String> {
+    let mut found = Vec::new();
+    for path in repository_files(root) {
+        if let Ok(text) = fs::read_to_string(&path) {
+            for (i, line) in text.lines().enumerate() {
+                if holds(line) {
+                    found.push(format!("{}:{}", path.display(), i + 1));
                 }
             }
         }
     }
-    let mut found = Vec::new();
-    walk(root, &mut found);
     found
+}
+
+/// The repository's files under `root`, the text the rules of this file judge: the files a commit
+/// would hold, tracked or untracked but not ignored, as git names them, so that an ignored local
+/// file, a tool's settings written with this machine's paths say, is no repository text. Where git
+/// cannot name them, as in CI's sandbox, which empties `.git`, every file the walk reaches: a
+/// superset of git's list, so the rules can refuse more there, never less, on a disk that CI checks
+/// out fresh from the commit (and the brief `clean-tree-around-every-test-run` is to hold equal to it).
+fn repository_files(root: &Path) -> Vec<PathBuf> {
+    git_files(root).unwrap_or_else(|| {
+        let mut files = Vec::new();
+        walk_files(root, &mut files);
+        files
+    })
+}
+
+/// The files a commit would hold under `root`, tracked or untracked but not ignored, as git names
+/// them, isolated from this machine (`support::isolated_git`); None where git cannot name them.
+/// The list must hold every file of HEAD's tree that the disk holds, which a second command of git
+/// names, or the rules would read less than the repository and pass on nothing: an incomplete list,
+/// an argument dropped say, fails here rather than be read.
+fn git_files(root: &Path) -> Option<Vec<PathBuf>> {
+    let names = |args: &[&str]| -> Option<BTreeSet<String>> {
+        let out = isolated_git(root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        Some(
+            out.stdout
+                .split(|&c| c == 0)
+                .filter(|name| !name.is_empty())
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .collect(),
+        )
+    };
+    let listed = names(&[
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ])?;
+    if let Some(head) = names(&["ls-tree", "-r", "-z", "--name-only", "HEAD"]) {
+        let missing: Vec<&String> = head
+            .iter()
+            .filter(|name| root.join(name).is_file() && !listed.contains(*name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "git's list of the repository's files under {} lacks files HEAD holds: {missing:?}",
+            root.display()
+        );
+    }
+    Some(listed.iter().map(|name| root.join(name)).collect())
+}
+
+/// Every file under `dir` the walk reaches, where git cannot list them. It leaves out what no
+/// commit holds: git's own `.git`, a directory or, in a worktree, the file that names its git
+/// directory; build output and dependencies (`target`, `node_modules`); and a nested checkout,
+/// a directory holding `.git`, such as a worktree under `.wt` or `.claude/worktrees`, which is
+/// another branch's files. The brief `clean-tree-around-every-test-run` is to make these one list
+/// with its clean-tree check's, git's own `.git` among them, so that no second rule says it.
+fn walk_files(dir: &Path, files: &mut Vec<PathBuf>) {
+    let entries = fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".git" {
+            continue;
+        }
+        if path.is_dir() {
+            if !matches!(name.as_str(), "target" | "node_modules") && !path.join(".git").exists() {
+                walk_files(&path, files);
+            }
+        } else {
+            files.push(path);
+        }
+    }
 }
 
 /// The check reads every directory of the tree but a nested checkout, whose files belong to
@@ -1273,5 +1382,123 @@ fn test_repository_text_is_english() {
         found.is_empty(),
         "non-English text at:\n{}",
         found.join("\n")
+    );
+}
+
+/// Where a checkout lies is read from the checkout at run time, as the tools read it, and never
+/// restated as a literal path: CLAUDE.md's `core.hooksPath` went stale when the repositories
+/// moved from one drive to another. No file of the repository names a drive's `Repos` directory.
+#[test]
+fn test_repository_text_names_no_checkout_path() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let found = checkout_path_lines(&root);
+    assert!(
+        found.is_empty(),
+        "a checkout's place written as a literal path at:\n{}",
+        found.join("\n")
+    );
+}
+
+/// What the checkout path rule reads, and what it leaves: each spelling of a drive's `Repos`
+/// directory, and none of the paths that only resemble one; outside any repository, every file but
+/// git's own `.git` file; in a repository, the files a commit would hold, an ignored one aside.
+/// The probes are built at run time, so that this file names no such path itself, and the probe
+/// directory is removed before any assertion.
+#[test]
+fn test_the_checkout_path_rule_reads_the_commits_text_alone() {
+    let r = "Repos";
+    let spellings = [
+        (format!("hooks at C:/{r}/Mente/tools/git-hooks"), true),
+        (format!("cd D:\\{r}\\Menteion\\Mente"), true),
+        (format!("the json \"C:\\\\{r}\\\\Mente\""), true),
+        (format!("under `D:\\{r}`."), true),
+        (format!("cd /d/{r}/Menteion/Mente"), true),
+        (format!("the drive /c/{r}"), true),
+        ("X:\\checkout\\target\\release\\mn.exe".to_string(), false),
+        (format!("a repository of C:/Users/x/{r}itories"), false),
+        (format!("ABC:/{r}/x"), false),
+        (
+            format!("api.github.com/{}/Menteion/Mente", r.to_lowercase()),
+            false,
+        ),
+        (format!("https://example.com/c/{r}/x"), false),
+        (
+            format!("C:/Program Files/Git/{}/x", r.to_lowercase()),
+            false,
+        ),
+    ];
+    let dir = std::env::temp_dir().join(format!("checkout-paths-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let read: Vec<(String, bool, usize)> = spellings
+        .into_iter()
+        .map(|(text, named)| {
+            fs::write(dir.join("probe.md"), &text).unwrap();
+            let found = checkout_path_lines(&dir).len();
+            (text, named, found)
+        })
+        .collect();
+    // A worktree's `.git` file names its git directory by its path, and is no repository text.
+    fs::write(dir.join("probe.md"), "nothing").unwrap();
+    fs::write(
+        dir.join(".git"),
+        format!("gitdir: C:/{r}/Mente/.git/worktrees/w\n"),
+    )
+    .unwrap();
+    let dot_git = checkout_path_lines(&dir);
+    fs::remove_file(dir.join(".git")).unwrap();
+    // In a repository, an ignored file, a tool's settings say, is no text of a commit; a tracked
+    // one is, and an untracked one that is not ignored.
+    let repo = dir.join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    let init = isolated_git(&repo)
+        .args(["init", "-q"])
+        .output()
+        .map(|o| o.status.success());
+    fs::write(
+        repo.join("tracked.md"),
+        format!("hooks at C:/{r}/Mente/tools/git-hooks"),
+    )
+    .unwrap();
+    let added = isolated_git(&repo)
+        .args(["add", "tracked.md"])
+        .output()
+        .map(|o| o.status.success());
+    fs::write(repo.join(".gitignore"), "local.json\n").unwrap();
+    fs::write(
+        repo.join("local.json"),
+        format!("\"Bash(node D:/{r}/Mente/tools/quick.mjs:*)\""),
+    )
+    .unwrap();
+    fs::write(repo.join("new.md"), format!("cd D:\\{r}\\Mente")).unwrap();
+    let in_repo = checkout_path_lines(&repo);
+    // A user's default ignore file, `~/.config/git/ignore`, hides no file from the rules.
+    let xdg = dir.join("xdg");
+    fs::create_dir_all(xdg.join("git")).unwrap();
+    fs::write(xdg.join("git").join("ignore"), "new.md\n").unwrap();
+    let unhidden = isolated_git(&repo)
+        .env("XDG_CONFIG_HOME", &xdg)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("new.md"));
+    let _ = fs::remove_dir_all(&dir);
+    for (text, named, found) in read {
+        assert_eq!(found, usize::from(named), "{text}");
+    }
+    assert!(dot_git.is_empty(), "{dot_git:?}");
+    assert!(matches!(init, Ok(true)), "git init failed: {init:?}");
+    assert!(matches!(added, Ok(true)), "git add failed: {added:?}");
+    assert_eq!(in_repo.len(), 2, "{in_repo:?}");
+    assert!(
+        in_repo.iter().any(|at| at.contains("tracked.md")),
+        "{in_repo:?}"
+    );
+    assert!(
+        in_repo.iter().any(|at| at.contains("new.md")),
+        "{in_repo:?}"
+    );
+    assert!(
+        matches!(unhidden, Ok(true)),
+        "a user's default ignore file hid a file: {unhidden:?}"
     );
 }
