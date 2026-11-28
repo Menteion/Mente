@@ -45,9 +45,10 @@ impl std::fmt::Display for Origin {
 /// The dependency policy of CLAUDE.md, applied to one crate of the workspace and its dependencies,
 /// each with where it comes from: a compiler crate depends only on the workspace's own crates;
 /// `mente-mir` depends on nothing; the reference interpreter never on `mente-mir` or
-/// `mente-codegen`; only `mente-codegen` may add Cranelift, and `gimli` and `object` for its object
-/// files and debug information (Norman, 2026-11-10), from crates.io; and nothing comes from
-/// anywhere else. Returns each dependency outside the policy.
+/// `mente-codegen`; the independent SMT encoding `mente-smt` on `mente-syntax` alone, so that it
+/// shares no code with Tier 1, whose proofs it checks; only `mente-codegen` may add Cranelift, and
+/// `gimli` and `object` for its object files and debug information (Norman, 2026-11-10), from
+/// crates.io; and nothing comes from anywhere else. Returns each dependency outside the policy.
 fn dependency_policy_violations(krate: &str, deps: &[(String, Origin)]) -> Vec<String> {
     deps.iter()
         .filter(|(name, origin)| {
@@ -56,6 +57,7 @@ fn dependency_policy_violations(krate: &str, deps: &[(String, Origin)]) -> Vec<S
                     && krate != "mente-mir"
                     && !(krate == "mente-interp"
                         && matches!(name.as_str(), "mente-mir" | "mente-codegen"))
+                    && !(krate == "mente-smt" && name != "mente-syntax")
             } else {
                 (name.starts_with("cranelift") || matches!(name.as_str(), "gimli" | "object"))
                     && krate == "mente-codegen"
@@ -256,6 +258,13 @@ fn test_crates_depend_only_on_allowed_crates() {
             &["mente-sema", "mente-mir", "mente-codegen"],
         ),
         package("mente-mir", "0.1.0", false, &["mente-ast 0.1.0"]),
+        package(
+            "mente-smt",
+            "0.1.0",
+            false,
+            &["mente-syntax", "mente-sema", "mente-interp"],
+        ),
+        package("mente-syntax", "0.1.0", false, &[]),
         package("mente-cli", "0.1.0", false, &["mente-ast 0.1.1"]),
         package("mente-ast", "0.1.1", true, &[]),
         package("cranelift-codegen", "0.137.1", true, &[]),
@@ -275,6 +284,8 @@ fn test_crates_depend_only_on_allowed_crates() {
         "mente-codegen",
         "mente-interp",
         "mente-mir",
+        "mente-smt",
+        "mente-syntax",
         "mente-cli",
     ]
     .map(String::from)
@@ -311,6 +322,15 @@ fn test_crates_depend_only_on_allowed_crates() {
     assert_eq!(
         refused("mente-mir"),
         ["mente-mir: mente-ast, from the workspace"]
+    );
+    // The independent SMT encoding reads the syntax tree alone: neither Tier 1 nor the checker,
+    // whose facts it would then share, nor any other crate of the workspace.
+    assert_eq!(
+        refused("mente-smt"),
+        [
+            "mente-smt: mente-sema, from the workspace",
+            "mente-smt: mente-interp, from the workspace"
+        ]
     );
     // A crate named as one of the workspace's but taken from outside it is refused.
     assert_eq!(

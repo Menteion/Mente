@@ -8,6 +8,7 @@ members = [
     "compiler/mente-codegen",
     "compiler/mente-cli",
     "compiler/mente-interp",
+    "compiler/mente-smt",
     "compiler/mente-threads",
     "spikes/tier1-latency",
 ]
