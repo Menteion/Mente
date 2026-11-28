@@ -2,9 +2,10 @@
 //! the instrument that missed it and the guard its fix added (`docs/design-review.md`,
 //! `guard-per-problem`). One file an escape, `docs/escapes/<key>.md` (Norman, 2026-11-17), so that
 //! two fixes in flight never touch one file: the file's name is the escape's key, by the one rule
-//! of [`crate::records`], and its front matter holds the escape's fields. The directory is read
-//! here, once: by `mn escapes`, which counts the escapes per week and per area, and by the test
-//! that checks every file (`tests/escapes.rs`). No count is written into a document.
+//! of [`crate::records`], and its front matter holds the escape's fields, whether its fix removed
+//! the root among them. The directory is read here, once: by `mn escapes`, which counts the
+//! escapes per week, per area and per root, and by the test that checks every file
+//! (`tests/escapes.rs`). No count is written into a document.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,7 +17,23 @@ use crate::records;
 pub const RECORD: &str = records::ESCAPES.dir;
 
 /// The fields of an escape's front matter, each once, in this order.
-pub const FIELDS: [&str; 5] = ["date", "fixed-by", "area", "missed-by", "guard"];
+pub const FIELDS: [&str; 6] = ["date", "fixed-by", "area", "missed-by", "guard", "root"];
+
+/// Whether an escape's cause is removed from `main` or its class is held at the guard, as `main`
+/// stands (`docs/escapes.md`, `root-cause-first`): the distinction is cause versus effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Root {
+    /// A fix made the cause's own form impossible to write or reach on `main`: one shared
+    /// definition, exhaustiveness the compiler enforces, or a check that refuses the form, a hard
+    /// gate of `main` (a compile error, a denied lint in the workspace's lint table or a required
+    /// check) that refuses the whole form, not just the instance found.
+    Removed,
+    /// The cause can still be written, and a test, an oracle or a check catches its effect.
+    Held,
+}
+
+/// Each root with the word the record writes it as, in the order `mn escapes` counts them.
+pub const ROOTS: [(Root, &str); 2] = [(Root::Removed, "removed"), (Root::Held, "held")];
 
 /// The areas an escape may be in, so that the counts per area are not split by a spelling.
 pub const AREAS: &[&str] = &[
@@ -61,6 +78,7 @@ pub struct Escape {
     pub area: String,
     pub missed: String,
     pub guard: Guard,
+    pub root: Root,
 }
 
 /// Every escape in the record's directory `dir`, in the order of their keys, or every problem in
@@ -103,6 +121,11 @@ pub fn parse(key: &str, text: &str) -> Result<Escape, String> {
         guard: guard_of(value(4)).ok_or(
             "a guard that is none of `fn test_... in <package>`, `policy check \"...\"`, `node test \"...\"`, `quick check \"...\"`",
         )?,
+        root: ROOTS
+            .iter()
+            .find(|(_, word)| *word == value(5))
+            .map(|(root, _)| *root)
+            .ok_or("a root that is neither `removed` nor `held`")?,
     })
 }
 
@@ -201,7 +224,8 @@ pub fn week((y, m, d): (i32, u32, u32)) -> String {
     format!("{}-W{:02}", year, week)
 }
 
-/// The escapes per ISO week and per area, as `mn escapes` prints them.
+/// The escapes per ISO week, per area and per root, each root counted, the one no escape has as 0,
+/// as `mn escapes` prints them.
 pub fn counts(rows: &[Escape]) -> String {
     let mut weeks: BTreeMap<String, usize> = BTreeMap::new();
     let mut areas: BTreeMap<&str, usize> = BTreeMap::new();
@@ -216,6 +240,11 @@ pub fn counts(rows: &[Escape]) -> String {
     out.push_str("Escapes per area:\n");
     for (a, n) in &areas {
         out.push_str(&format!("  {}  {}\n", a, n));
+    }
+    out.push_str("Escapes per root:\n");
+    for (root, word) in ROOTS {
+        let n = rows.iter().filter(|r| r.root == root).count();
+        out.push_str(&format!("  {}  {}\n", word, n));
     }
     out
 }

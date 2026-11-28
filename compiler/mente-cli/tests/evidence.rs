@@ -693,7 +693,7 @@ fn test_a_test_runs_from_exactly_its_target_file() {
 
 fn escape_with(guard: &str) -> String {
     format!(
-        "---\ndate: 2026-11-14\nfixed-by: https://github.com/Menteion/Mente/pull/129\narea: checker\nmissed-by: No lint.\nguard: {}\n---\n",
+        "---\ndate: 2026-11-14\nfixed-by: https://github.com/Menteion/Mente/pull/129\narea: checker\nmissed-by: No lint.\nguard: {}\nroot: held\n---\n",
         guard
     )
 }
@@ -848,7 +848,7 @@ fn mn(dir: &Path, args: &[&str]) -> (Option<i32>, String, String) {
 /// each that does not, with a list that cannot be read, and with an argument it does not take.
 #[test]
 fn test_mn_evidence_checks_guards_and_evidence_against_the_lists() {
-    let escape = "---\ndate: 2026-11-14\nfixed-by: https://github.com/Menteion/Mente/pull/129\narea: harness\nmissed-by: No test.\nguard: node test \"a subtest\"\n---\n";
+    let escape = "---\ndate: 2026-11-14\nfixed-by: https://github.com/Menteion/Mente/pull/129\narea: harness\nmissed-by: No test.\nguard: node test \"a subtest\"\nroot: held\n---\n";
     let quick = "{\"checks\": [{\"name\": \"MIR mutation gate\"}]}";
     let guard_report = spec_guard(&[&count(
         "spec/a.md",

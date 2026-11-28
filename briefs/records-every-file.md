@@ -32,6 +32,8 @@ Since any file can break the closure, a quick check for every file runs `cargo t
 
 **Re-weigh the CI list step first** (the Manager, 2026-11-23): `clean-tree-around-every-test-run`, which runs before this round, checks before and after every test run that the tree is the commit's, so in CI the disk then holds no tool's output when the tests read it, which removes the cause that made #175's walk of the disk fail. This round decides whether its list step is still needed in CI, or whether the walk of the disk, with the clean tree's check beside it, holds there; off CI, the list from the sanctioned routes still tells a record from a scratch file.
 
+**Broad globs of a declaration** (the review of pull request 221, information): a declaration whose glob is broad, `benchmark/results/**/*.md` say, would admit a new directory of records beneath it as documents of its set, so that no kind declares it. This round weighs narrowing each such glob, or refusing a directory of files named like records under one.
+
 ## Negative Scope
 
 - No change to the kinds, the key rule or what a record holds.

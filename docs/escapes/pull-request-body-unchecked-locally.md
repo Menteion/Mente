@@ -4,6 +4,7 @@ fixed-by: https://github.com/Menteion/Mente/pull/214
 area: local checks
 missed-by: No local check read a pull request's text, since the Commits check's rules on its title and body ran only on GitHub; pull request 213's body, which quoted Norman's words in Chinese, first met them in the required check, and the slip cost a round of CI and a rerun.
 guard: node test "the session's hook refuses a request whose pull request text fails the Commits check's rules, read from the file the client sends"
+root: held
 ---
 
 Pull request 213's body quoted Norman's words in Chinese, and the Commits check, a required check, refused it, as it should. The text never reached `main`, but nothing let the session check the body before it sent it.
