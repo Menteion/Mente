@@ -32,7 +32,7 @@ use crate::bounds;
 use crate::check::Typing;
 use crate::literals;
 use crate::names::{BindingKind, Resolution};
-use crate::octagon::{Exact, Octagon, Term, BIG, INF, RELATIONAL_LIMIT};
+use crate::octagon::{Exact, Octagon, Steps, Term, BIG, INF, RELATIONAL_LIMIT};
 use crate::types::{Int, IntTy, Ty, I64, INT_TYPES, USIZE};
 
 pub mod smt;
@@ -240,6 +240,9 @@ pub struct Report {
     /// How many variables the function has: Tier 1 relates their values up to
     /// [`RELATIONAL_LIMIT`], and holds each one's bounds alone in a function of more.
     pub variables: usize,
+    /// The work Tier 1 did on its states for the function, in the octagon's entries visited
+    /// ([`Steps`]), the same on every machine.
+    pub steps: u64,
 }
 
 /// What a caller's check reads of a function, but its name, which a session's context holds
@@ -1271,7 +1274,7 @@ fn mentions(v: &Val, var: usize) -> bool {
 
 /// After `var = terms + c`: the bounds beyond the octagon's reach that a single term carries,
 /// shifted by `c` and negated with the term. A sum of more terms carries none, which is sound.
-fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
+fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128, steps: &mut Steps) {
     let [t] = terms else {
         return;
     };
@@ -1284,12 +1287,17 @@ fn copy_far(st: &mut Octagon, var: usize, terms: &[Term], c: i128) {
     } else {
         (lo, hi)
     };
-    st.add_exact(var, lo.and_then(|x| x.plus(c)), hi.and_then(|x| x.plus(c)));
+    st.add_exact(
+        var,
+        lo.and_then(|x| x.plus(c)),
+        hi.and_then(|x| x.plus(c)),
+        steps,
+    );
 }
 
 /// Narrows `st` to the points where `t + k op c` holds, `c` a constant beyond the octagon's
 /// reach, as an exact bound of `t`'s variable.
-fn constrain_far(st: &mut Octagon, op: Rel, t: Term, k: i128, c: Exact) {
+fn constrain_far(st: &mut Octagon, op: Rel, t: Term, k: i128, c: Exact, steps: &mut Steps) {
     // `±x + k op c` is `±x op c - k`, and `-x op b` is `x op' -b`.
     let Some(b) = c.plus(k.checked_neg().unwrap_or(i128::MAX)) else {
         return;
@@ -1317,30 +1325,36 @@ fn constrain_far(st: &mut Octagon, op: Rel, t: Term, k: i128, c: Exact) {
         // A value other than one beyond the octagon's reach: no bound narrows to it.
         Rel::Ne => (None, None),
     };
-    st.add_exact_of(t, lower, upper);
+    st.add_exact_of(t, lower, upper, steps);
 }
 
 /// `x - (terms + c)` lies in `[lo, hi]`: exactly when `terms` has at most one term, else as the
 /// octagon facts the sum allows.
-fn constrain_offset(st: &mut Octagon, x: usize, terms: &[Term], c: i128, lo: i128, hi: i128) {
+fn constrain_offset(
+    st: &mut Octagon,
+    x: usize,
+    terms: &[Term],
+    (c, lo, hi): (i128, i128, i128),
+    steps: &mut Steps,
+) {
     let xt = Term::pos(x);
     let (low, high) = bounds::add(INF, (c, c), (lo, hi));
     match terms {
         [t] => {
-            st.add_lin(&[xt, t.negated()], high);
-            st.add_lin(&[xt.negated(), *t], -low);
+            st.add_lin(&[xt, t.negated()], high, steps);
+            st.add_lin(&[xt.negated(), *t], -low, steps);
         }
         // No term, or two: each term against `x` by the other's bounds, then `x`'s own.
         _ => {
             for (k, t) in terms.iter().enumerate() {
                 let other = lin_interval(st, &[terms[1 - k]], 0);
                 let (olo, ohi) = bounds::add(INF, (low, high), other);
-                st.add_lin(&[xt, t.negated()], ohi);
-                st.add_lin(&[xt.negated(), *t], -olo);
+                st.add_lin(&[xt, t.negated()], ohi, steps);
+                st.add_lin(&[xt.negated(), *t], -olo, steps);
             }
             let (slo, shi) = bounds::add(INF, (low, high), lin_interval(st, terms, 0));
-            st.add_lin(&[xt], shi);
-            st.add_lin(&[xt.negated()], -slo);
+            st.add_lin(&[xt], shi, steps);
+            st.add_lin(&[xt.negated()], -slo, steps);
         }
     }
 }
@@ -2054,10 +2068,29 @@ enum Site {
 }
 
 /// The states a loop's body sends to its next round by `continue` and to its exit by `break`.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Debug, Default)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Frame {
     breaks: Vec<Octagon>,
     continues: Vec<Octagon>,
+}
+
+impl Frame {
+    fn copy(&self, steps: &mut Steps) -> Frame {
+        let Frame { breaks, continues } = self;
+        Frame {
+            breaks: breaks.iter().map(|s| s.copy(steps)).collect(),
+            continues: continues.iter().map(|s| s.copy(steps)).collect(),
+        }
+    }
+
+    /// Whether two frames hold the same states, in order, each compared counted.
+    fn same(&self, other: &Frame, steps: &mut Steps) -> bool {
+        let same = |a: &[Octagon], b: &[Octagon], steps: &mut Steps| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.same_bounds(y, steps))
+        };
+        same(&self.breaks, &other.breaks, steps) && same(&self.continues, &other.continues, steps)
+    }
 }
 
 /// What analysing a loop from its entry state changes of [`Fx`] outside the recording pass,
@@ -2086,12 +2119,14 @@ struct Frame {
 ///   the loops around it, which an assignment in it moves. Each loop around pushes its own at
 ///   each pass, from its text, and the state holds what they have moved by, so the memo's key
 ///   is the loop and its entry state;
-/// - the memo itself and its instruments: `loop_memo`, `passes`, `replays`.
+/// - the memo itself and its instruments: `loop_memo`, `passes`, `replays`, and `steps`, the work
+///   done, which a replay saves and so does not repeat.
 ///
 /// A field added to `Fx` is placed in one of these, or in the outcome. The replay test
 /// ([`check_with`] asking for [`Ask::replays`]) analyses each loop met again beside its memo's
 /// outcome over the corpus and the generated programs, and fails where they differ.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 struct LoopOutcome {
     exit: Octagon,
     unproven: usize,
@@ -2099,11 +2134,36 @@ struct LoopOutcome {
 }
 
 impl LoopOutcome {
+    fn copy(&self, steps: &mut Steps) -> LoopOutcome {
+        let LoopOutcome {
+            exit,
+            unproven,
+            escapes,
+        } = self;
+        LoopOutcome {
+            exit: exit.copy(steps),
+            unproven: *unproven,
+            escapes: escapes.iter().map(|f| f.copy(steps)).collect(),
+        }
+    }
+
+    /// Whether two outcomes are the same, each state compared counted.
+    fn same(&self, other: &LoopOutcome, steps: &mut Steps) -> bool {
+        self.unproven == other.unproven
+            && self.exit.same_bounds(&other.exit, steps)
+            && self.escapes.len() == other.escapes.len()
+            && self
+                .escapes
+                .iter()
+                .zip(&other.escapes)
+                .all(|(a, b)| a.same(b, steps))
+    }
+
     /// The outcome computed from entry `from`, replayed at entry `to`, equal to it but in its
     /// stamps: a variable the loop left as it was entered holds `to`'s evaluation, not
     /// `from`'s, so that a value read before the loop reads the same evaluation after it.
-    fn restamped(&self, from: &Octagon, to: &Octagon) -> LoopOutcome {
-        let mut out = self.clone();
+    fn restamped(&self, from: &Octagon, to: &Octagon, steps: &mut Steps) -> LoopOutcome {
+        let mut out = self.copy(steps);
         out.exit.restamp(from, to);
         for frame in &mut out.escapes {
             for st in frame.breaks.iter_mut().chain(frame.continues.iter_mut()) {
@@ -2237,6 +2297,9 @@ struct Fx<'a> {
     states: Option<states::States>,
     /// The passes over a loop's body, for the test that keeps them linear in nesting.
     passes: usize,
+    /// The meter of the check this is a pass of ([`Steps`]), which counts the work done on the
+    /// states and which the report gives.
+    steps: &'a mut Steps,
     /// The `match` arm written as an expression being checked, before which a `guard` goes
     /// once the arm is made a block, when no statement inside it is the innermost.
     arm: Option<ExprId>,
@@ -2309,25 +2372,30 @@ pub fn check_with(
 }
 
 fn checked(f: &Function, callees: &[Option<Callee>], src: &str, ask: Ask) -> (Report, Extras) {
-    let (mut report, retries, extras) = run(f, callees, src, ask);
+    // One meter for every pass of this function's check: the first, and each a retry runs. A
+    // pass is run only with a meter, so none goes uncounted.
+    let mut steps = Steps::of_a_check();
+    let (mut report, retries, extras) = run(f, callees, src, ask, &mut steps);
     for r in &retries {
-        if let Some(fix) = refined_var_fix(f, callees, src, &report.diagnostics, r) {
+        if let Some(fix) = refined_var_fix(f, callees, src, &report.diagnostics, r, &mut steps) {
             report.diagnostics[r.diagnostic].fixes.insert(0, fix);
         }
     }
+    report.steps = steps.count();
     report.diagnostics.sort_by_key(|d| d.primary.start);
     (report, extras)
 }
 
 /// One pass of Tier 1 over a function, its diagnostics in the order it found them, and what
-/// `ask` asks for besides.
+/// `ask` asks for besides; its work is counted on `steps`.
 fn run(
     f: &Function,
     callees: &[Option<Callee>],
     src: &str,
     ask: Ask,
+    steps: &mut Steps,
 ) -> (Report, Vec<Retry>, Extras) {
-    let mut fx = Fx::new(f, callees, src);
+    let mut fx = Fx::new(f, callees, src, steps);
     if ask.queries {
         fx.queries = Some(Vec::new());
     }
@@ -2373,6 +2441,7 @@ fn refined_var_fix(
     src: &str,
     before: &[Diagnostic],
     r: &Retry,
+    steps: &mut Steps,
 ) -> Option<Fix> {
     let (name, refinement) = &r.declared;
     let key = |d: &Diagnostic| (d.code, d.primary.start, d.primary.end);
@@ -2405,7 +2474,7 @@ fn refined_var_fix(
             syntax: &syntax,
             ..*f
         };
-        let after = run(&g, callees, src, Ask::default()).0.diagnostics;
+        let after = run(&g, callees, src, Ask::default(), steps).0.diagnostics;
         let fixed = after.iter().all(|d| key(d) != failed);
         let nothing_new = after
             .iter()
@@ -2533,7 +2602,13 @@ fn is_int_type(tree: &Tree, t: TypeId) -> bool {
 }
 
 impl<'a> Fx<'a> {
-    fn new(f: &Function<'a>, callees: &'a [Option<Callee<'a>>], src: &'a str) -> Fx<'a> {
+    /// The analysis of `f`, counting its work on `steps`, the meter of the check it is a pass of.
+    fn new(
+        f: &Function<'a>,
+        callees: &'a [Option<Callee<'a>>],
+        src: &'a str,
+        steps: &'a mut Steps,
+    ) -> Fx<'a> {
         let tree = &f.syntax.tree;
         let mut n = Counter(0);
         let result = n.alloc(f.syntax.result.is_some_and(|t| is_int_type(tree, t)));
@@ -2606,6 +2681,7 @@ impl<'a> Fx<'a> {
             scratch,
             probe,
             count: n.0,
+            steps,
             report: Report::default(),
             recording: true,
             unproven: 0,
@@ -2708,8 +2784,8 @@ impl<'a> Fx<'a> {
     }
 
     /// The state a function's analysis starts from: every variable unconstrained, and named.
-    fn start(&self) -> Octagon {
-        let mut st = Octagon::new(self.count);
+    fn start(&mut self) -> Octagon {
+        let mut st = Octagon::new(self.count, self.steps);
         st.name(self.names.clone());
         st
     }
@@ -3269,7 +3345,7 @@ impl<'a> Fx<'a> {
 
     /// Binding `b`'s paths under `prefix` keep only their types and refinements: after a call
     /// that takes them `mut`, and at the head of a loop that changes them.
-    fn havoc_paths(&self, st: &mut Octagon, b: usize, prefix: &[String]) {
+    fn havoc_paths(&mut self, st: &mut Octagon, b: usize, prefix: &[String]) {
         for (_, p) in self.paths_under(b, prefix) {
             self.track(st, p.var, &TOP);
             st.forget(p.var);
@@ -3473,7 +3549,7 @@ impl<'a> Fx<'a> {
     /// A point of a failing state over the bindings in scope and `named`, as text, then the
     /// values the same point gives `extra`.
     fn valuation(
-        &self,
+        &mut self,
         st: &Octagon,
         named: &[(String, usize)],
         extra: &[usize],
@@ -3496,7 +3572,7 @@ impl<'a> Fx<'a> {
             vars.push(*v);
         }
         vars.extend(extra);
-        let picked = st.pick(&vars).unwrap_or_default();
+        let picked = st.pick(&vars, self.steps).unwrap_or_default();
         let text: Vec<String> = names
             .iter()
             .zip(&picked)
@@ -3785,7 +3861,7 @@ impl<'a> Fx<'a> {
     // -- the octagon operations that need scratch variables ----------------------------------
 
     /// Gives `var` the value `v`.
-    fn assign(&self, st: &mut Octagon, var: usize, v: &Val) {
+    fn assign(&mut self, st: &mut Octagon, var: usize, v: &Val) {
         let mentions = |t: &[Term]| t.iter().any(|t| t.var == var);
         let self_ref = match v {
             Val::Lin(t, _) => mentions(t),
@@ -3796,33 +3872,33 @@ impl<'a> Fx<'a> {
             let s = self.scratch;
             self.assign(st, s, v);
             st.forget(var);
-            constrain_offset(st, var, &[Term::pos(s)], 0, 0, 0);
-            copy_far(st, var, &[Term::pos(s)], 0);
+            constrain_offset(st, var, &[Term::pos(s)], (0, 0, 0), self.steps);
+            copy_far(st, var, &[Term::pos(s)], 0, self.steps);
             st.forget(s);
             return;
         }
         st.forget(var);
         match v {
             Val::Lin(t, c) => {
-                constrain_offset(st, var, t, *c, 0, 0);
-                copy_far(st, var, t, *c);
+                constrain_offset(st, var, t, (*c, 0, 0), self.steps);
+                copy_far(st, var, t, *c, self.steps);
             }
             Val::Quot { base, num, div } => {
                 let num_itv = lin_interval(st, &num.0, num.1);
                 let (qlo, qhi) = bounds::div(INF, num_itv, (*div, *div));
-                constrain_offset(st, var, &base.0, base.1, qlo, qhi);
+                constrain_offset(st, var, &base.0, (base.1, qlo, qhi), self.steps);
                 if let Some(sum) = lin_add(st, &base.0, &num.0) {
                     let (llo, lhi) = bounds::neg(INF, bounds::rest(INF, num_itv, *div));
-                    constrain_offset(st, var, &sum, base.1 + num.1, llo, lhi);
+                    constrain_offset(st, var, &sum, (base.1 + num.1, llo, lhi), self.steps);
                 }
             }
-            Val::Itv(lo, hi) => constrain_offset(st, var, &[], 0, *lo, *hi),
+            Val::Itv(lo, hi) => constrain_offset(st, var, &[], (0, *lo, *hi), self.steps),
             Val::Arr(_) | Val::Other => {}
         }
     }
 
     /// A value as a linear form, put in `temp` when it is not one already.
-    fn linear(&self, st: &mut Octagon, v: &Val, temp: usize) -> Option<Lin> {
+    fn linear(&mut self, st: &mut Octagon, v: &Val, temp: usize) -> Option<Lin> {
         match v {
             Val::Lin(t, c) => Some((t.clone(), *c)),
             Val::Quot { .. } | Val::Itv(..) => {
@@ -3834,7 +3910,7 @@ impl<'a> Fx<'a> {
     }
 
     /// Adds `a - b <= k`.
-    fn le(&self, st: &mut Octagon, a: &Val, b: &Val, k: i128) {
+    fn le(&mut self, st: &mut Octagon, a: &Val, b: &Val, k: i128) {
         let [t0, t1] = self.temps;
         if let (Some(x), Some(y)) = (self.linear(st, a, t0), self.linear(st, b, t1)) {
             let (terms, c) = match lin_add(st, &x.0, &neg_terms(&y.0)) {
@@ -3845,13 +3921,13 @@ impl<'a> Fx<'a> {
                     (vec![Term::pos(t0), Term::pos(t1).negated()], 0)
                 }
             };
-            st.add_lin(&terms, k - c);
+            st.add_lin(&terms, k - c, self.steps);
         }
         st.forget(t0);
         st.forget(t1);
     }
 
-    fn constrain(&self, st: &mut Octagon, op: Rel, l: &Val, r: &Val) {
+    fn constrain(&mut self, st: &mut Octagon, op: Rel, l: &Val, r: &Val) {
         match op {
             Rel::Lt => self.le(st, l, r, -1),
             Rel::Le => self.le(st, l, r, 0),
@@ -3862,16 +3938,16 @@ impl<'a> Fx<'a> {
                 self.le(st, r, l, 0);
             }
             Rel::Ne => {
-                let mut below = st.clone();
+                let mut below = st.copy(self.steps);
                 self.le(&mut below, l, r, -1);
                 self.le(st, r, l, -1);
-                *st = below.join(st);
+                *st = below.join(st, self.steps);
             }
         }
     }
 
     /// Narrows `st` to the points where `c` has the value `polarity`.
-    fn assume(&self, st: &mut Octagon, c: &Cond, polarity: bool) {
+    fn assume(&mut self, st: &mut Octagon, c: &Cond, polarity: bool) {
         if st.is_empty() {
             return;
         }
@@ -3887,10 +3963,10 @@ impl<'a> Fx<'a> {
                     self.assume(st, a, polarity);
                     self.assume(st, b, polarity);
                 } else {
-                    let mut x = st.clone();
+                    let mut x = st.copy(self.steps);
                     self.assume(&mut x, a, polarity);
                     self.assume(st, b, polarity);
-                    *st = x.join(st);
+                    *st = x.join(st, self.steps);
                 }
             }
             Cond::Cmp(op, l, r) => {
@@ -3912,7 +3988,7 @@ impl<'a> Fx<'a> {
                         (Term::pos(self.scratch), 0)
                     }
                 };
-                constrain_far(st, op, t, k, far.1);
+                constrain_far(st, op, t, k, far.1, self.steps);
                 st.forget(self.scratch);
             }
             Cond::Unknown => {}
@@ -3921,41 +3997,42 @@ impl<'a> Fx<'a> {
 
     /// The bounds of `v` in `st`, exactly, beyond the octagon's reach included: those the
     /// scratch variable takes from it. `None` for none.
-    fn exact_range(&self, st: &Octagon, v: &Val) -> (Option<Exact>, Option<Exact>) {
-        let mut s = st.clone();
-        self.assign(&mut s, self.scratch, v);
+    fn exact_range(&mut self, st: &Octagon, v: &Val) -> (Option<Exact>, Option<Exact>) {
+        let mut s = st.copy(self.steps);
+        let scratch = self.scratch;
+        self.assign(&mut s, scratch, v);
         s.exact_bounds(self.scratch)
     }
 
     /// A state in which `c` fails, or `None` when it holds wherever `st` does.
-    fn refute(&self, st: &Octagon, c: &Cond) -> Option<Octagon> {
-        let mut s = st.clone();
+    fn refute(&mut self, st: &Octagon, c: &Cond) -> Option<Octagon> {
+        let mut s = st.copy(self.steps);
         self.assume(&mut s, c, false);
         (!s.is_empty()).then_some(s)
     }
 
     /// Adds the facts a scalar shape gives `var`.
-    fn facts(&self, st: &mut Octagon, var: usize, shape: &Shape) {
+    fn facts(&mut self, st: &mut Octagon, var: usize, shape: &Shape) {
         if let Shape::Int { int, refine } = shape {
             if let Some(t) = int {
                 let (lo, hi) = int_range(*t);
-                constrain_offset(st, var, &[], 0, lo, hi);
+                constrain_offset(st, var, &[], (0, lo, hi), self.steps);
                 // The ends of a 128-bit type lie beyond the octagon's reach, and are kept
                 // beside it.
                 if t.bits == 128 {
                     let lower = t.signed.then(|| Exact::new(true, t.min_magnitude()));
-                    st.add_exact(var, lower, Some(Exact::new(false, t.max())));
+                    st.add_exact(var, lower, Some(Exact::new(false, t.max())), self.steps);
                 }
             }
             if let Some(r) = refine {
                 let v = var_val(var);
                 let op = if r.inclusive { Rel::Le } else { Rel::Lt };
                 match far(r.lo_lit) {
-                    Some(c) => constrain_far(st, Rel::Ge, Term::pos(var), 0, c),
+                    Some(c) => constrain_far(st, Rel::Ge, Term::pos(var), 0, c, self.steps),
                     None => self.constrain(st, Rel::Ge, &v, &r.lo),
                 }
                 match far(r.hi_lit) {
-                    Some(c) => constrain_far(st, op, Term::pos(var), 0, c),
+                    Some(c) => constrain_far(st, op, Term::pos(var), 0, c, self.steps),
                     None => self.constrain(st, op, &v, &r.hi),
                 }
             }
@@ -4004,7 +4081,7 @@ impl<'a> Fx<'a> {
             detail,
             tag: t.map_or(Tag::None, |t| Tag::Into(t.name)),
         };
-        self.record_check(o, |_| vec![(st.clone(), Goal::Fits(v.clone(), t))]);
+        self.record_check(o, |fx| vec![(st.copy(fx.steps), Goal::Fits(v.clone(), t))]);
         // An empty interval is a value no path computes, after an operation that always traps.
         let (tlo, thi) = range.filter(|_| !st.is_empty() && lo <= hi)?;
         if hi < tlo {
@@ -4188,16 +4265,19 @@ impl<'a> Fx<'a> {
         };
         let fail_low = self.refute(st, &low);
         let fail_high = self.refute(st, &high);
-        let failing = fail_low.clone().or(fail_high.clone());
+        let failing = match (&fail_low, &fail_high) {
+            (Some(s), _) | (None, Some(s)) => Some(s.copy(self.steps)),
+            (None, None) => None,
+        };
         self.record(
             ObligationKind::Refinement,
             span,
             true,
             failing.is_none(),
             tag,
-            |_| {
+            |fx| {
                 let within = Cond::And(Box::new(low), Box::new(high));
-                vec![(st.clone(), Goal::Holds(within))]
+                vec![(st.copy(fx.steps), Goal::Holds(within))]
             },
         );
         let (Some(mut s), true) = (failing, self.recording) else {
@@ -4208,11 +4288,16 @@ impl<'a> Fx<'a> {
             .as_ref()
             .map_or("the value".to_string(), |w| format!("`{}`", w.0));
         // A binding in scope, or a field path of one, which a valuation names.
-        let in_scope = |t: &Term| {
-            self.scope.iter().any(|b| {
-                self.vars[*b] == Some(t.var) || self.paths[*b].iter().any(|p| p.var == t.var)
+        let scoped: Vec<usize> = self
+            .scope
+            .iter()
+            .flat_map(|b| {
+                self.vars[*b]
+                    .into_iter()
+                    .chain(self.paths[*b].iter().map(|p| p.var))
             })
-        };
+            .collect();
+        let in_scope = |t: &Term| scoped.contains(&t.var);
         let named = what.as_ref().is_some_and(|w| {
             self.scope.iter().any(|b| {
                 let name = &self.resolution.bindings[*b].name;
@@ -4377,7 +4462,9 @@ impl<'a> Fx<'a> {
             detail: format!("into an array of {}", len),
             tag: Tag::None,
         };
-        self.record_check(o, |_| vec![(st.clone(), Goal::Index(i.clone(), len))]);
+        self.record_check(o, |fx| {
+            vec![(st.copy(fx.steps), Goal::Index(i.clone(), len))]
+        });
     }
 
     /// The function's `ensures`, at a return of `v` or at the end of its body.
@@ -4393,7 +4480,7 @@ impl<'a> Fx<'a> {
         if st.is_empty() {
             return;
         }
-        let mut out = st.clone();
+        let mut out = st.copy(self.steps);
         let mut extra = Vec::new();
         if let (Some(r), Some(shape)) = (self.result, self.result_shape.clone()) {
             self.assign(&mut out, r, v);
@@ -4420,7 +4507,7 @@ impl<'a> Fx<'a> {
             if !self.proves_at_returns(c) {
                 continue;
             }
-            let mut s = out.clone();
+            let mut s = out.copy(self.steps);
             let k = self.cond(&mut s, c.expr);
             let failing = self.refute(&s, &k);
             let tag = Tag::Clause(self.span(c.expr));
@@ -4709,7 +4796,7 @@ impl<'a> Fx<'a> {
             }
             StmtKind::Guard { cond, otherwise } => {
                 let c = self.decide(st, *cond);
-                let mut o = st.clone();
+                let mut o = st.copy(self.steps);
                 self.assume(&mut o, &c, false);
                 self.block(&mut o, *otherwise, None);
                 self.assume(st, &c, true);
@@ -4726,7 +4813,7 @@ impl<'a> Fx<'a> {
                 st.set_empty();
             }
             StmtKind::Break | StmtKind::Continue => {
-                let snapshot = st.clone();
+                let snapshot = st.copy(self.steps);
                 if let Some(f) = self.loops.last_mut() {
                     if tree.stmt(s).kind == StmtKind::Break {
                         f.breaks.push(snapshot);
@@ -4850,7 +4937,7 @@ impl<'a> Fx<'a> {
     }
 
     /// Before `var` takes `v`: each tracked measure with `var` in it changes by what `var` does.
-    fn track(&self, st: &mut Octagon, var: usize, v: &Val) {
+    fn track(&mut self, st: &mut Octagon, var: usize, v: &Val) {
         for t in &self.tracks {
             for term in t.terms.iter().filter(|term| term.var == var) {
                 let diff = add_vals(st, v, &negate(&var_val(var)));
@@ -4858,9 +4945,9 @@ impl<'a> Fx<'a> {
                 let (lo, hi) = interval(st, &change);
                 let s = self.scratch;
                 st.forget(s);
-                constrain_offset(st, s, &[Term::pos(t.delta)], 0, lo, hi);
+                constrain_offset(st, s, &[Term::pos(t.delta)], (0, lo, hi), self.steps);
                 st.forget(t.delta);
-                constrain_offset(st, t.delta, &[Term::pos(s)], 0, 0, 0);
+                constrain_offset(st, t.delta, &[Term::pos(s)], (0, 0, 0), self.steps);
                 st.forget(s);
             }
         }
@@ -4909,7 +4996,7 @@ impl<'a> Fx<'a> {
             Site::Value(var) => {
                 let exact = Exact::new(false, value);
                 st.forget(var);
-                st.add_exact(var, Some(exact), Some(exact));
+                st.add_exact(var, Some(exact), Some(exact), self.steps);
                 let at = self.evaluation();
                 st.stamp(var, at);
                 site_val(var, at)
@@ -5158,7 +5245,9 @@ impl<'a> Fx<'a> {
                     tag: Tag::None,
                 };
                 let bits = lt.map_or(0, |t| t.bits);
-                self.record_check(o, |_| vec![(st.clone(), Goal::Shift(r.clone(), bits))]);
+                self.record_check(o, |fx| {
+                    vec![(st.copy(fx.steps), Goal::Shift(r.clone(), bits))]
+                });
                 let v = shift_vals(st, op, l, r, None);
                 self.fits(st, &v, lt, span);
                 return clamp_to(v, lt, st);
@@ -5177,7 +5266,7 @@ impl<'a> Fx<'a> {
                     false,
                     st.is_empty() || lo > 0 || hi < 0,
                     Tag::None,
-                    |_| vec![(st.clone(), Goal::NonZero(r.clone()))],
+                    |fx| vec![(st.copy(fx.steps), Goal::NonZero(r.clone()))],
                 );
                 // A dividend smaller in magnitude than every divisor, one beyond the octagon's
                 // reach included, has a quotient of 0 and is its own remainder.
@@ -5215,7 +5304,7 @@ impl<'a> Fx<'a> {
 
     /// Whether every value of `l` is smaller in magnitude than every value of the divisor `r`,
     /// their bounds beyond the octagon's reach included.
-    fn below_divisor(&self, st: &Octagon, l: &Val, r: &Val) -> bool {
+    fn below_divisor(&mut self, st: &Octagon, l: &Val, r: &Val) -> bool {
         let zero = Exact::from_i128(0);
         let (rlo, rhi) = self.exact_range(st, r);
         // The divisor's least magnitude: 0 where it may be 0, or of either sign.
@@ -5297,7 +5386,8 @@ impl<'a> Fx<'a> {
     /// A `match` (`core-calculus.md`, item 14): its scrutinee evaluated once, then each arm on
     /// the states its pattern selects, joined as an `if`'s branches are.
     fn match_expr(&mut self, st: &mut Octagon, e: ExprId, scrutinee: ExprId, arms: &[Arm]) -> Val {
-        let ends = self.match_arms(st.clone(), e, scrutinee, arms);
+        let entry = st.copy(self.steps);
+        let ends = self.match_arms(entry, e, scrutinee, arms);
         let v = match self.sites[e.0 as usize] {
             Site::Value(var) => {
                 // Every arm gives the one evaluation of the `match` its value.
@@ -5307,12 +5397,12 @@ impl<'a> Fx<'a> {
                     self.assign(&mut s, var, &v);
                     s.stamp(var, at);
                     out = Some(match out {
-                        Some(o) => o.join(&s),
+                        Some(o) => o.join(&s, self.steps),
                         None => s,
                     });
                 }
                 *st = out.unwrap_or_else(|| {
-                    let mut s = st.clone();
+                    let mut s = st.copy(self.steps);
                     s.set_empty();
                     s
                 });
@@ -5334,12 +5424,12 @@ impl<'a> Fx<'a> {
         let mut out: Option<Octagon> = None;
         for (s, _) in ends {
             out = Some(match out {
-                Some(o) => o.join(&s),
+                Some(o) => o.join(&s, self.steps),
                 None => s,
             });
         }
         *st = out.unwrap_or_else(|| {
-            let mut s = st.clone();
+            let mut s = st.copy(self.steps);
             s.set_empty();
             s
         });
@@ -5454,7 +5544,7 @@ impl<'a> Fx<'a> {
         let mut literals: Vec<Exact> = Vec::new();
         let mut ends = Vec::new();
         for (k, arm) in arms.iter().enumerate() {
-            let mut a = st.clone();
+            let mut a = st.copy(self.steps);
             let mark = self.scope.len();
             match &arm.pattern.kind {
                 PatternKind::Bool(b) => {
@@ -5557,10 +5647,10 @@ impl<'a> Fx<'a> {
         otherwise: Option<Else>,
     ) -> Val {
         let c = self.decide(st, cond);
-        let mut t = st.clone();
+        let mut t = st.copy(self.steps);
         self.assume(&mut t, &c, true);
         let tv = self.block(&mut t, then, None);
-        let mut o = st.clone();
+        let mut o = st.copy(self.steps);
         self.assume(&mut o, &c, false);
         let ov = match otherwise {
             Some(Else::Block(b)) => self.block(&mut o, b, None),
@@ -5590,7 +5680,7 @@ impl<'a> Fx<'a> {
                 }
             }
         };
-        *st = t.join(&o);
+        *st = t.join(&o, self.steps);
         v
     }
 
@@ -5646,7 +5736,7 @@ impl<'a> Fx<'a> {
                 let and = *op == BinaryOp::And;
                 let l = self.cond(st, *lhs);
                 self.changes_nothing(*rhs, "right operand");
-                let mut s2 = st.clone();
+                let mut s2 = st.copy(self.steps);
                 self.assume(&mut s2, &l, and);
                 let r = self.cond(&mut s2, *rhs);
                 // Where the left operand decided that the right one does not run, the right
@@ -5660,7 +5750,7 @@ impl<'a> Fx<'a> {
                 for &v in &self.operand_sites[rhs.0 as usize] {
                     st.forget(v);
                 }
-                *st = st.join(&s2);
+                *st = st.join(&s2, self.steps);
                 if and {
                     Cond::And(Box::new(l), Box::new(r))
                 } else {
@@ -5864,7 +5954,7 @@ impl<'a> Fx<'a> {
 
     /// A place a call may change through a `mut` parameter: a scalar binding loses its facts
     /// but its type's.
-    fn clobber(&self, st: &mut Octagon, place: ExprId) {
+    fn clobber(&mut self, st: &mut Octagon, place: ExprId) {
         if let Some((root, prefix)) = field_chain(self.tree, self.resolution, place) {
             self.havoc_paths(st, root, &prefix);
         }
@@ -6072,7 +6162,7 @@ impl<'a> Fx<'a> {
                 true,
                 failing.is_none(),
                 tag,
-                |_| vec![(st.clone(), Goal::Holds(k))],
+                |fx| vec![(st.copy(fx.steps), Goal::Holds(k))],
             );
             let Some(failing) = failing else {
                 continue;
@@ -6562,13 +6652,13 @@ impl<'a> Fx<'a> {
     /// to, every check of the loop `s` would count as proven, so the check stops the compile
     /// there, in every build, with an internal error that names the loop and the candidate.
     fn refute_cand(&mut self, st: &Octagon, c: Cand, s: StmtId) -> Option<Octagon> {
-        let mut after = st.clone();
+        let mut after = st.copy(self.steps);
         let outer = std::mem::replace(&mut self.unproven, 0);
         let k = self.cand(&mut after, c);
         let may_trap = self.unproven > 0;
         self.unproven = outer;
         if may_trap {
-            return Some(st.clone());
+            return Some(st.copy(self.steps));
         }
         if after.is_empty() && !st.is_empty() {
             let at = self.tree.stmt(s).span;
@@ -6593,7 +6683,7 @@ impl<'a> Fx<'a> {
         alive: &[bool],
         axioms: &[ExprId],
     ) -> Octagon {
-        let mut h = entry.clone();
+        let mut h = entry.copy(self.steps);
         for &b in changed {
             if let Some(v) = self.vars[b] {
                 self.track(&mut h, v, &TOP);
@@ -6632,9 +6722,9 @@ impl<'a> Fx<'a> {
         self.passes += 1;
         self.note_point(head, states::Point::Head(s));
         let header = self.head_of.replace(s);
-        let mut at = head.clone();
+        let mut at = head.copy(self.steps);
         let c = self.decide(&mut at, cond);
-        let mut b = at.clone();
+        let mut b = at.copy(self.steps);
         self.assume(&mut b, &c, true);
         // The measures at the start of a round that runs: never negative, and followed. One
         // linear in bindings is tracked by its change; any other is kept, to compare with.
@@ -6672,9 +6762,12 @@ impl<'a> Fx<'a> {
         let back = ends
             .iter()
             .skip(1)
-            .fold(ends[0].clone(), |acc, x| acc.join(x));
+            .fold(ends[0].copy(self.steps), |acc, x| acc.join(x, self.steps));
         self.assume(&mut at, &c, false);
-        let exit = frame.breaks.iter().fold(at, |acc, x| acc.join(x));
+        let exit = frame
+            .breaks
+            .iter()
+            .fold(at, |acc, x| acc.join(x, self.steps));
         (back, exit)
     }
 
@@ -6718,13 +6811,13 @@ impl<'a> Fx<'a> {
             true,
             failing.is_none(),
             Tag::Clause(self.span(e)),
-            |_| vec![(b.clone(), Goal::Holds(never_negative))],
+            |fx| vec![(b.copy(fx.steps), Goal::Holds(never_negative))],
         );
         let Some(failing) = failing else {
             return;
         };
         self.recording = false;
-        let mut first = entry.clone();
+        let mut first = entry.copy(self.steps);
         let c = self.decide(&mut first, cond);
         self.assume(&mut first, &c, true);
         let v0 = self.eval(&mut first, e);
@@ -6779,7 +6872,8 @@ impl<'a> Fx<'a> {
             self.stmt = Some(s);
             match &tree.stmt(s).kind {
                 StmtKind::Expr(e) if i + 1 == stmts.len() => {
-                    ends = self.if_ends(std::mem::replace(&mut st, Octagon::new(0)), *e);
+                    let none = Octagon::new(0, self.steps);
+                    ends = self.if_ends(std::mem::replace(&mut st, none), *e);
                 }
                 StmtKind::Binding { .. }
                 | StmtKind::Assign { .. }
@@ -6825,7 +6919,7 @@ impl<'a> Fx<'a> {
             return vec![st];
         };
         let c = self.decide(&mut st, *cond);
-        let mut t = st.clone();
+        let mut t = st.copy(self.steps);
         self.assume(&mut t, &c, true);
         self.block(&mut t, *then, None);
         let mut o = st;
@@ -6865,7 +6959,7 @@ impl<'a> Fx<'a> {
         measures: &[(ExprId, usize, usize)],
         tracked: &[bool],
     ) -> (Octagon, Vec<Val>, Vec<Val>) {
-        let mut next = end.clone();
+        let mut next = end.copy(self.steps);
         let c = self.decide(&mut next, cond);
         self.assume(&mut next, &c, true);
         // A tracked measure has changed by its delta, which is below 0 when it decreased; any
@@ -6986,7 +7080,7 @@ impl<'a> Fx<'a> {
                 true,
                 failing.is_none(),
                 tag,
-                |_| vec![(st.clone(), Goal::Holds(never_negative))],
+                |fx| vec![(st.copy(fx.steps), Goal::Holds(never_negative))],
             );
             if let Some(failing) = failing {
                 let (valuation, _) = self.valuation(&failing, &named, &[]);
@@ -7036,12 +7130,12 @@ impl<'a> Fx<'a> {
             true,
             failing.is_none(),
             Tag::Smaller,
-            |_| vec![(st.clone(), Goal::Holds(smaller))],
+            |fx| vec![(st.copy(fx.steps), Goal::Holds(smaller))],
         );
         let Some(mut failing) = failing else {
             return;
         };
-        for (v, m) in values.iter().zip(&self.entry_measures) {
+        for (v, m) in values.iter().zip(self.entry_measures.clone()) {
             self.assign(&mut failing, m.1, v);
         }
         let extra: Vec<usize> = self
@@ -7084,12 +7178,12 @@ impl<'a> Fx<'a> {
         invariants: &[ExprId],
         body: BlockId,
     ) {
-        let entry = (!self.recording).then(|| st.clone());
+        let entry = (!self.recording).then(|| st.copy(self.steps));
         let replayed = entry.as_ref().and_then(|entry| {
             self.loop_memo
                 .iter()
-                .find(|m| m.stmt == s && m.entry == *entry)
-                .map(|m| m.outcome.restamped(&m.entry, entry))
+                .find(|m| m.stmt == s && m.entry.same_bounds(entry, self.steps))
+                .map(|m| m.outcome.restamped(&m.entry, entry, self.steps))
         });
         let outcome = match replayed {
             Some(outcome) => {
@@ -7101,7 +7195,7 @@ impl<'a> Fx<'a> {
                     let span = self.tree.stmt(s).span;
                     if let Some(r) = &mut self.replays {
                         r.compared += 1;
-                        if again != outcome {
+                        if !again.same(&outcome, self.steps) {
                             r.differing.push(span);
                         }
                     }
@@ -7114,7 +7208,7 @@ impl<'a> Fx<'a> {
                     self.loop_memo.push(Memo {
                         stmt: s,
                         entry,
-                        outcome: outcome.clone(),
+                        outcome: outcome.copy(self.steps),
                     });
                 }
                 outcome
@@ -7143,7 +7237,7 @@ impl<'a> Fx<'a> {
         let stand_ins = self.loops.iter().map(|_| Frame::default()).collect();
         let frames = std::mem::replace(&mut self.loops, stand_ins);
         let outer = std::mem::replace(&mut self.unproven, 0);
-        let mut exit = st.clone();
+        let mut exit = st.copy(self.steps);
         self.analyse_loop(&mut exit, s, cond, invariants, body);
         LoopOutcome {
             exit,
@@ -7369,7 +7463,7 @@ impl<'a> Fx<'a> {
         [entry, back]
             .into_iter()
             .map(|from| {
-                let mut s = from.clone();
+                let mut s = from.copy(self.steps);
                 let k = self.cand(&mut s, c);
                 (s, Goal::Holds(k))
             })
@@ -7392,6 +7486,14 @@ mod tests {
 
     /// Tier 1's report for each function of the module that has a body.
     fn reports(src: &str) -> Vec<Report> {
+        each_function(src, check)
+    }
+
+    /// `go` on each function of the module that has a body, with its callees and text.
+    fn each_function<T>(
+        src: &str,
+        mut go: impl FnMut(&Function, &[Option<Callee>], &str) -> T,
+    ) -> Vec<T> {
         let text = module(src);
         let m = match mente_syntax::parse_module(&text) {
             Ok(m) => m,
@@ -7443,7 +7545,7 @@ mod tests {
                 routing: *routing,
                 structs: &structs,
             };
-            out.push(check(&f, &callees, &text));
+            out.push(go(&f, &callees, &text));
         }
         out
     }
@@ -7451,7 +7553,7 @@ mod tests {
     /// The passes over loop bodies Tier 1 makes in the module's last function.
     fn passes(src: &str) -> usize {
         with_fx(src, |fx, st| {
-            let mut st = st.clone();
+            let mut st = st.copy(&mut Steps::default());
             fx.body(&mut st);
             fx.passes
         })
@@ -7462,7 +7564,7 @@ mod tests {
     fn passes_replaying(src: &str) -> (usize, usize) {
         with_fx(src, |fx, st| {
             fx.replays = Some(Replays::default());
-            let mut st = st.clone();
+            let mut st = st.copy(&mut Steps::default());
             fx.body(&mut st);
             (fx.passes, fx.replays.as_ref().map_or(0, |r| r.compared))
         })
@@ -7495,7 +7597,8 @@ mod tests {
             routing: Routing::default(),
             structs: &structs,
         };
-        let mut fx = Fx::new(&f, &callees, &text);
+        let mut steps = Steps::default();
+        let mut fx = Fx::new(&f, &callees, &text, &mut steps);
         fx.route();
         let mut st = fx.start();
         fx.entry(&mut st);
@@ -8530,9 +8633,9 @@ mod tests {
     fn test_a_value_read_from_another_evaluation_stops_the_compile() {
         with_fx(STALE, |fx, st| {
             let cond = guard_condition(fx);
-            let mut held = st.clone();
+            let mut held = st.copy(&mut Steps::default());
             fx.cond(&mut held, cond);
-            let mut again = held.clone();
+            let mut again = held.copy(&mut Steps::default());
             let c = fx.cond(&mut again, cond);
             fx.assume(&mut held, &c, true);
         });
@@ -8547,11 +8650,11 @@ mod tests {
     fn test_a_value_read_where_two_evaluations_are_joined_stops_the_compile() {
         with_fx(STALE, |fx, st| {
             let cond = guard_condition(fx);
-            let mut one = st.clone();
+            let mut one = st.copy(&mut Steps::default());
             fx.cond(&mut one, cond);
-            let mut two = st.clone();
+            let mut two = st.copy(&mut Steps::default());
             let c = fx.cond(&mut two, cond);
-            let mut joined = one.join(&two);
+            let mut joined = one.join(&two, &mut Steps::default());
             fx.assume(&mut joined, &c, true);
         });
     }
@@ -8616,7 +8719,7 @@ mod tests {
                     panic!("a block body");
                 };
                 let stmts = fx.tree.block(b).stmts.clone();
-                let mut at = st.clone();
+                let mut at = st.copy(&mut Steps::default());
                 fx.stmt_eval(&mut at, stmts[0], None);
                 assert!(at.is_empty(), "the state after {} is reached", leaves);
             });
@@ -8672,7 +8775,7 @@ mod tests {
         expected = "internal error: variable 0 is combined in one value from two evaluations"
     )]
     fn test_a_value_of_two_evaluations_of_one_variable_stops_the_compile() {
-        let st = Octagon::new(1);
+        let st = Octagon::new(1, &mut Steps::default());
         lin_add(&st, &[Term::of(0, 5)], &[Term::of(0, 4).negated()]);
     }
 
@@ -8712,10 +8815,10 @@ mod tests {
                 })
                 .unwrap_or((StmtId(0), ExprId(0), Vec::new(), BlockId(0)));
             fx.recording = false;
-            let mut first = st.clone();
+            let mut first = st.copy(&mut Steps::default());
             fx.eval(&mut first, rem);
             fx.while_loop(&mut first, s, cond, &invariants, body);
-            let mut again = st.clone();
+            let mut again = st.copy(&mut Steps::default());
             let v = fx.eval(&mut again, rem);
             fx.while_loop(&mut again, s, cond, &invariants, body);
             assert_eq!(fx.loop_memo.len(), 1, "the second loop is replayed");
@@ -8829,11 +8932,11 @@ mod tests {
         let src = "pub fn f(d: u8) -> u8 {\n  var i: u8 = d + 1\n  while i < 3 {\n    i += 7 % d\n  }\n  i\n}";
         with_fx(src, |fx, st| {
             fx.recording = false;
-            let mut first = st.clone();
+            let mut first = st.copy(&mut Steps::default());
             fx.body(&mut first);
             let (once, passes) = (fx.unproven, fx.passes);
             assert!(once > 1);
-            let mut again = st.clone();
+            let mut again = st.copy(&mut Steps::default());
             fx.body(&mut again);
             assert_eq!(fx.passes, passes, "the loop is met again from its memo");
             assert_eq!(fx.unproven, 2 * once);
@@ -8954,7 +9057,7 @@ mod tests {
         // The replay test sees a memo that loses what a loop sends to the loops around it.
         with_fx(src, |fx, st| {
             fx.recording = false;
-            let mut first = st.clone();
+            let mut first = st.copy(&mut Steps::default());
             fx.body(&mut first);
             assert!(fx.loop_memo.iter().any(|m| m
                 .outcome
@@ -8962,7 +9065,7 @@ mod tests {
                 .iter()
                 .any(|f| !f.breaks.is_empty())));
             fx.replays = Some(Replays::default());
-            let mut again = st.clone();
+            let mut again = st.copy(&mut Steps::default());
             fx.body(&mut again);
             assert_eq!(fx.replays.as_ref().map(|r| r.differing.len()), Some(0));
             // Only the innermost loop's outcomes stay, without the state its `break` sends: the
@@ -8973,7 +9076,7 @@ mod tests {
             for m in &mut fx.loop_memo {
                 m.outcome.escapes.iter_mut().for_each(|f| f.breaks.clear());
             }
-            let mut lossy = st.clone();
+            let mut lossy = st.copy(&mut Steps::default());
             fx.body(&mut lossy);
             assert!(fx.replays.as_ref().is_some_and(|r| !r.differing.is_empty()));
         });
@@ -10160,7 +10263,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_a_guard_condition_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  guard next(mut i) > 3 else {\n    return 0\n  }\n  i\n}";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     #[test]
@@ -10169,7 +10272,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_an_if_condition_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  val k: u8 = if (if n > 3 {\n    i = 0\n    true\n  } else {\n    false\n  }) {\n    1\n  } else {\n    0\n  }\n  k + i\n}";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     #[test]
@@ -10178,7 +10281,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_a_loop_condition_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while next(mut i) > 0 and r < 8 {\n    r += 1\n  }\n  r\n}";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     /// The same for a loop's `invariant` and its `decreases`, clauses that the loop's statement
@@ -10189,7 +10292,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_a_loop_invariant_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while r < 8\n    invariant next(mut i) >= 0\n  {\n    r += 1\n  }\n  r\n}";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     #[test]
@@ -10198,7 +10301,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_a_loop_measure_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  var r: u8 = 0\n  while r < 8\n    decreases next(mut i)\n  {\n    r += 1\n  }\n  r\n}";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     /// The same for a `bool` scrutinee, a clause and the right operand of an `and` in a value.
@@ -10208,7 +10311,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_a_bool_scrutinee_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> u8 {\n  var i = n\n  val k: u8 = match next(mut i) > 3 {\n    true => 1\n    false => 0\n  }\n  k + i\n}";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     #[test]
@@ -10217,7 +10320,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_a_clause_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(mut n: u8) -> u8\n  requires next(mut n) > 0\n= n";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     #[test]
@@ -10226,7 +10329,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
     )]
     fn test_an_operand_that_changes_state_stops_the_compile() {
         let src = "fn next(mut i: u8) -> u8 {\n  i = i / 2\n  i\n}\npub fn f(n: u8) -> bool {\n  var i = n\n  val c = n > 3 and next(mut i) > 0\n  c\n}";
-        with_fx(src, |fx, st| fx.body(&mut st.clone()));
+        with_fx(src, |fx, st| fx.body(&mut st.copy(&mut Steps::default())));
     }
 
     /// A binding a condition declares itself, in a block of an `if` or a pattern of a `match`
@@ -10424,7 +10527,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         );
         let x = Term::pos(0);
         let y = Term::pos(1);
-        let three = Octagon::new(3);
+        let three = Octagon::new(3, &mut Steps::default());
         assert_eq!(lin_add(&three, &[x], &[x.negated()]), Some(vec![]));
         assert_eq!(lin_add(&three, &[x], &[x]), None);
         assert_eq!(lin_add(&three, &[x, y], &[Term::pos(2)]), None);
@@ -10435,7 +10538,7 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         assert_eq!(negate(&Val::Itv(1, 3)), Val::Itv(-3, -1));
         assert_eq!(as_const(&Val::Lin(vec![x], 3)), None);
         assert_eq!(as_const(&Val::Itv(3, 3)), None);
-        let st = Octagon::new(3);
+        let st = Octagon::new(3, &mut Steps::default());
         assert_eq!(summary_of(&st, &Val::Other), Val::Other);
         assert_eq!(summary_of(&st, &Val::Lin(vec![], 4)), Val::Itv(4, 4));
         assert_eq!(join_summary(&Val::Other, &Val::Itv(0, 1)), Val::Other);
@@ -10453,10 +10556,10 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         assert_eq!(interval(&st, &Val::Other), (-INF, INF));
         // `x0 + 1 + (x1 - x0 + 2) / 2` with `0 <= x0 < x1 <= 10`: the sum `x1 + 3` bounds it
         // above by 11, tighter than `x0 + 1` and the quotient's bounds apart.
-        let mut rel = Octagon::new(2);
-        rel.add_lin(&[x.negated()], 0);
-        rel.add_lin(&[y], 10);
-        rel.add_lin(&[x, y.negated()], -1);
+        let mut rel = Octagon::new(2, &mut Steps::default());
+        rel.add_lin(&[x.negated()], 0, &mut Steps::default());
+        rel.add_lin(&[y], 10, &mut Steps::default());
+        rel.add_lin(&[x, y.negated()], -1, &mut Steps::default());
         let q = Val::Quot {
             base: (vec![x], 1),
             num: (vec![y, x.negated()], 2),
@@ -10649,12 +10752,18 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
 
     #[test]
     fn test_assignments_relate_their_targets() {
-        let mut st = Octagon::new(3);
-        st.add_lin(&[Term::pos(0)], 5);
-        st.add_lin(&[Term::pos(0).negated()], -1);
-        st.add_lin(&[Term::pos(1)], 3);
-        st.add_lin(&[Term::pos(1).negated()], 0);
-        constrain_offset(&mut st, 2, &[Term::pos(0), Term::pos(1)], 1, 0, 0);
+        let mut st = Octagon::new(3, &mut Steps::default());
+        st.add_lin(&[Term::pos(0)], 5, &mut Steps::default());
+        st.add_lin(&[Term::pos(0).negated()], -1, &mut Steps::default());
+        st.add_lin(&[Term::pos(1)], 3, &mut Steps::default());
+        st.add_lin(&[Term::pos(1).negated()], 0, &mut Steps::default());
+        constrain_offset(
+            &mut st,
+            2,
+            &[Term::pos(0), Term::pos(1)],
+            (1, 0, 0),
+            &mut Steps::default(),
+        );
         assert_eq!(st.bounds(2), (2, 9));
         assert!(st.implies(&[Term::pos(2), Term::pos(0).negated()], 4));
         assert!(st.implies(&[Term::pos(0), Term::pos(2).negated()], -1));
@@ -10662,14 +10771,20 @@ pub fn f() -> u8 = take(~(1 << 1) - 1)",
         assert!(st.implies(&[Term::pos(1), Term::pos(2).negated()], -2));
         assert!(!st.implies(&[Term::pos(2), Term::pos(1).negated()], 5));
         assert!(!st.implies(&[Term::pos(1), Term::pos(2).negated()], -3));
-        let mut one = Octagon::new(2);
-        constrain_offset(&mut one, 1, &[Term::pos(0)], 2, -1, 3);
+        let mut one = Octagon::new(2, &mut Steps::default());
+        constrain_offset(
+            &mut one,
+            1,
+            &[Term::pos(0)],
+            (2, -1, 3),
+            &mut Steps::default(),
+        );
         assert!(one.implies(&[Term::pos(1), Term::pos(0).negated()], 5));
         assert!(!one.implies(&[Term::pos(1), Term::pos(0).negated()], 4));
         assert!(one.implies(&[Term::pos(0), Term::pos(1).negated()], -1));
         assert!(!one.implies(&[Term::pos(0), Term::pos(1).negated()], -2));
-        let mut none = Octagon::new(1);
-        constrain_offset(&mut none, 0, &[], 2, -1, 3);
+        let mut none = Octagon::new(1, &mut Steps::default());
+        constrain_offset(&mut none, 0, &[], (2, -1, 3), &mut Steps::default());
         assert_eq!(none.bounds(0), (1, 5));
         // A self-referential assignment, `x = x + 1`, and one through a quotient.
         for (src, ok) in [
@@ -11802,6 +11917,128 @@ pub fn f() -> B = B(b: 300)"
             messages(&src)[0].contains("a field of a value that is not a binding"),
             "{}",
             messages(&src)[0]
+        );
+    }
+
+    /// A meter starts at zero only where a function's check does: in every file of the crate,
+    /// read whole, its tests included, which start theirs by `Default`, `Steps::of_a_check` is
+    /// named once, in `checked`, which hands the meter to every pass. A pass, an operation or a
+    /// call site that started its own would count on a meter nothing reads. A meter cannot be
+    /// copied, defaulted outside the tests or built from its count outside its own module, which
+    /// the compiler holds, and that module builds one once, in the start, which this test holds,
+    /// so the start is the only way to have one.
+    #[test]
+    fn test_a_meter_starts_only_where_a_check_does() {
+        // The start's name, spelled so that this test does not name it.
+        let start = ["of_a", "_check"].concat();
+        // The function a use stands in, for the report: the last line before it that declares one.
+        let within = |before: &str| {
+            let declared = before.lines().rev().find_map(|line| {
+                let line = line.trim_start();
+                let line = ["pub(crate) ", "pub(super) ", "pub "]
+                    .iter()
+                    .find_map(|vis| line.strip_prefix(vis))
+                    .unwrap_or(line);
+                line.strip_prefix("fn ")
+            });
+            let name = declared.and_then(|f| f.split(['(', '<']).next());
+            format!("fn {}", name.unwrap_or("?"))
+        };
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let (mut starts, mut builds) = (Vec::new(), Vec::new());
+        let mut dirs = vec![src];
+        while let Some(d) = dirs.pop() {
+            for entry in std::fs::read_dir(&d).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                // Every line of the file but a comment.
+                let code: String = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .flat_map(|line| [line, "\n"])
+                    .collect();
+                // Every use of the start's name but its definition: a call, a path to it however
+                // its type is named, or the function taken as a value.
+                for (at, _) in code
+                    .match_indices(&start)
+                    .filter(|(at, _)| !code[..*at].ends_with("fn "))
+                {
+                    starts.push(format!("{}: {}", path.display(), within(&code[..at])));
+                }
+                if !path.ends_with("octagon/steps.rs") {
+                    continue;
+                }
+                // Every meter the module builds: a literal of its type, by either name, as a
+                // tuple or in braces, but the type's declaration and a function's return type.
+                for pattern in ["Steps(", "Steps {", "Self(", "Self {"] {
+                    for (at, _) in code.match_indices(pattern) {
+                        let before = &code[..at];
+                        if ["struct ", "impl ", "for ", "-> "]
+                            .iter()
+                            .any(|named| before.ends_with(named))
+                        {
+                            continue;
+                        }
+                        builds.push(within(before));
+                    }
+                }
+            }
+        }
+        assert_eq!(starts.len(), 1, "{starts:?}");
+        assert!(starts[0].ends_with("tier1.rs: fn checked"), "{starts:?}");
+        assert_eq!(builds, ["fn of_a_check"]);
+    }
+
+    /// The passes an `E0502`'s retry runs, with a `var` declared refined, are work of the
+    /// function's check and count in its steps beside the first pass, exactly: the check counts
+    /// the first pass, metered alone, and the retry passes, metered apart, and nothing else. A
+    /// function with no retry counts its first pass alone.
+    #[test]
+    fn test_tier1_counts_the_passes_of_a_retry() {
+        let steps = |src: &str| {
+            each_function(src, |f, callees, text| {
+                let mut first = Steps::default();
+                let (report, retries, _) = run(f, callees, text, Ask::default(), &mut first);
+                let mut retried = Steps::default();
+                for r in &retries {
+                    refined_var_fix(f, callees, text, &report.diagnostics, r, &mut retried);
+                }
+                (
+                    first.count(),
+                    retried.count(),
+                    check(f, callees, text).steps,
+                )
+            })[0]
+        };
+        let retried = "pub fn index_of_max(a: [8]i32) -> usize[0..8] {\n  var best: usize = 0\n  var i: usize = 1\n  while i < 8 {\n    if a[i] > a[best] {\n      best = i\n    }\n    i += 1\n  }\n  best\n}";
+        let (first, again, whole) = steps(retried);
+        assert!(first > 0 && again > 0, "{first} {again}");
+        assert_eq!(whole, first + again, "{first} and {again} make {whole}");
+        let plain = "pub fn f(x: u8) -> u8 {\n  val y: u8 = x\n  y\n}";
+        let (first, again, whole) = steps(plain);
+        assert_eq!((again, whole), (0, first));
+    }
+
+    /// Tier 1 counts the work it does on its states, the octagon's entries its closures, joins
+    /// and copies visit: the same count on every run of the same function, and a larger one for
+    /// a function that makes it copy and join more.
+    #[test]
+    fn test_tier1_counts_the_work_it_does_on_its_states() {
+        let steps = |src: &str| reports(src).iter().map(|r| r.steps).sum::<u64>();
+        let plain = "pub fn f(x: u8, y: u8) -> u8 {\n  var a: u8 = x\n  a = y\n  a\n}";
+        let branching =
+            "pub fn f(x: u8, y: u8) -> u8 {\n  var a: u8 = x\n  if y > 3 {\n    a = y\n  }\n  a\n}";
+        assert_eq!(steps(branching), steps(branching));
+        assert!(steps(plain) > 0);
+        assert!(
+            steps(plain) < steps(branching),
+            "{} {}",
+            steps(plain),
+            steps(branching)
         );
     }
 }

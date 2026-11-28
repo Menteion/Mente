@@ -175,6 +175,8 @@ export const GATE_FILES = [
   "/compiler/mente-cli/src/front-matter/",
   "/compiler/*/src/overflow_traps.rs",
   "/compiler/mente-threads/",
+  "/compiler/mente-cli/src/mir_run/work.rs",
+  "/compiler/mente-cli/tests/golden/work.txt",
   "/compiler/*/Cargo.toml",
   "/spikes/*/Cargo.toml",
   "/.gitattributes",
