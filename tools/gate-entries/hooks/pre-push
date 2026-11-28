@@ -1,0 +1,18 @@
+#!/bin/sh
+# git's pre-push hook for every checkout of this repository: core.hooksPath names this directory,
+# <common git directory>/mente-gates/entry/hooks, a path that never changes
+# (briefs/gate-tools-from-main.md). It removes NODE_OPTIONS, has hook.mjs check the copy that
+# mente-gates/current names, and runs that copy's tools/git-hooks/pre-push, which refuses a push of
+# a tree the quick checks have not passed (tools/push.mjs). An install writes this file first, so
+# that a push runs it from then on; until the files beside it are written, and whenever the check
+# refuses, it refuses the push, naming what to do.
+unset NODE_OPTIONS
+here=$(dirname "$0")
+for file in verify.mjs hook.mjs; do
+  if [ ! -f "$here/../$file" ]; then
+    echo "mente-gates: the hook's entry stands, but $file beside it is not installed yet, so the push is refused: Norman runs the bootstrap from the main checkout (CLAUDE.md, Verification), then pushes again" >&2
+    exit 1
+  fi
+done
+copy=$(node "$here/../hook.mjs") || exit 1
+exec "$copy/tools/git-hooks/pre-push" "$@"

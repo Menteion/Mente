@@ -19,10 +19,11 @@
 // second review of #203 found seven pushes a reading of refspecs, options and directories let
 // through), so the rule reads only for these.
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { PASSED, capped } from "./local-limits.mjs";
+import { inTime } from "./gate-processes.mjs";
+import { PASSED } from "./local-limits.mjs";
 import { simpleCommands } from "./raw-build.mjs";
 
 /** What the guard asks a session to run when it refuses. */
@@ -60,63 +61,14 @@ function exists(dir, ref) {
 /** How long the hook waits for the remote to say which commit is main. */
 export const REMOTE_TIMEOUT_MS = 60000;
 
-/**
- * A runner of one command whose whole process tree is held to a time, run by `node -e`. A time
- * limit on the command alone would kill git and leave its transport, git-remote-http, holding its
- * connection (the eighth review of #203). The tree is never found by process ids, which Windows
- * reuses and does not clear from a dead parent's children (the ninth review):
- * - on posix the command leads a process group of its own, killed whole whenever its time passes
- *   before the runner has seen it close, even once git has exited while a transport holds its pipes:
- *   a group's id is not reused while any member lives (the tenth review);
- * - on Windows the command is tools/capped.ps1, which runs git in a job object that ends every
- *   process in it when the job's owner ends (local-limits.mjs, capped); killing that one direct
- *   child, by its own handle, ends exactly the job's members.
- * It reports once, as JSON: the command's status, output, and whether its time passed.
- */
-export const TREE_RUNNER = `
-const { spawn } = require("node:child_process");
-const [cmd, ...args] = JSON.parse(process.env.TREE_ARGS);
-const windows = process.platform === "win32";
-const child = spawn(cmd, args, { detached: !windows, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-let out = "", err = "", timedOut = false, finished = false;
-child.stdout.setEncoding("utf8").on("data", (d) => (out += d));
-child.stderr.setEncoding("utf8").on("data", (d) => (err += d));
-const timer = setTimeout(() => {
-  timedOut = true;
-  if (windows) {
-    if (child.exitCode === null && child.signalCode === null) child.kill();
-  } else {
-    try { process.kill(-child.pid, "SIGKILL"); } catch {}
-  }
-}, Number(process.env.TREE_TIMEOUT));
-const done = (code) => {
-  if (finished) return;
-  finished = true;
-  clearTimeout(timer);
-  process.stdout.write(JSON.stringify({ code, out, err, timedOut }));
-};
-child.on("close", (code) => done(code));
-child.on("error", (e) => { err += String(e.message); done(-1); });
-`;
 
 /**
  * The output of `args`, a git command run in `dir` with `env`, its whole process tree held to
- * `timeoutMs` (TREE_RUNNER): throws with code ETIMEDOUT when the time passed, and with git's words
+ * `timeoutMs` (local-limits.mjs, inTime): throws with code ETIMEDOUT when the time passed, and with git's words
  * when it failed.
  */
 function gitInTime(dir, args, timeoutMs, env) {
-  const run = ["git", "-C", dir, ...args];
-  // On Windows, git runs in capped.ps1's job; its own limit, in minutes, is a backstop behind the
-  // runner's time.
-  const job = process.platform === "win32" ? capped(run, { processGB: 4, jobGB: 8, minutes: 2 }) : null;
-  const r = spawnSync(process.execPath, ["-e", TREE_RUNNER], {
-    encoding: "utf8",
-    env: { ...env, ...(job ? job.env : {}), TREE_ARGS: JSON.stringify(job ? [job.cmd, ...job.args] : run), TREE_TIMEOUT: String(timeoutMs) },
-    timeout: timeoutMs + 30000,
-    windowsHide: true,
-  });
-  if (r.error) throw r.error;
-  const result = JSON.parse(r.stdout);
+  const result = inTime(["git", "-C", dir, ...args], timeoutMs, { env });
   if (result.timedOut) throw Object.assign(new Error(`git ${args[0]} took more than ${timeoutMs} ms`), { code: "ETIMEDOUT" });
   if (result.code !== 0) throw Object.assign(new Error(result.err.trim() || `git ${args[0]} failed`), { stderr: result.err, status: result.code });
   return result.out.trim();

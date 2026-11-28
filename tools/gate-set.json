@@ -1,0 +1,25 @@
+{
+  "about": "The local gates' set (briefs/gate-tools-from-main.md): the files a copy of main holds, at their paths in the repository, so that their imports and loads resolve inside the copy; the remote whose main a copy comes from; and the version of the interface between the stable entries (tools/gate-entries/) and a copy. The set is the load closure of cargo's runner (tools/capped.mjs), git's pre-push hook (tools/git-hooks/pre-push) and the refresher (tools/gates.mjs). A test of tools/push.test.mjs reads every file of the set, its imports and the files it loads by path, and fails when one lies outside the set or is not a blob of mode 100644 or 100755.",
+  "url": "https://github.com/Menteion/Mente.git",
+  "interface": 1,
+  "set": [
+    ".github/scripts/lib/job-object.cs",
+    "tools/capped.mjs",
+    "tools/capped.ps1",
+    "tools/gate-entries/bootstrap.mjs",
+    "tools/gate-entries/capped.mjs",
+    "tools/gate-entries/hook.mjs",
+    "tools/gate-entries/hooks/pre-push",
+    "tools/gate-entries/refresh.mjs",
+    "tools/gate-entries/verify.mjs",
+    "tools/gate-processes.mjs",
+    "tools/gate-set.json",
+    "tools/gates.mjs",
+    "tools/git-hooks/pre-push",
+    "tools/git-hooks/pre-push.mjs",
+    "tools/local-limits.mjs",
+    "tools/push.mjs",
+    "tools/raw-build.mjs",
+    "tools/store-apps.mjs"
+  ]
+}

@@ -7,15 +7,25 @@
 //   node tools/cargo.mjs test -p mente-sema frames
 //   node tools/cargo.mjs --minutes 60 build --release
 
-import { BUILD, acquireSlot, minutesFrom, requireHooks, requireRunner, runCapped } from "./local-limits.mjs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { BUILD, acquireSlot, minutesFrom, refreshGates, requireHooks, requireRunner, runCapped } from "./local-limits.mjs";
+
+// The checkout these tools belong to, whose gates they refresh and whose hooks they require,
+// wherever they are run from.
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 const { args, limits } = minutesFrom(process.argv.slice(2), BUILD);
 if (args.length === 0) {
   console.error("usage: node tools/cargo.mjs [--minutes N] <cargo arguments>");
   process.exit(2);
 }
-if (!requireRunner()) process.exit(2);
-if (!requireHooks()) process.exit(2);
+const gates = refreshGates({ cwd: ROOT });
+if (!gates) process.exit(2);
+// FALLBACK: with no copy installed, today's working-tree gates (local-limits.mjs, refreshGates).
+const fallback = gates === "fallback";
+if (!requireRunner({ fallback })) process.exit(2);
+if (!requireHooks({ cwd: ROOT, fallback })) process.exit(2);
 const slot = acquireSlot(`cargo ${args.join(" ")}`);
 const status = runCapped(["cargo", ...args], limits);
 slot.release();

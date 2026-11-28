@@ -5,7 +5,7 @@
   "license": "MIT OR Apache-2.0 WITH LLVM-exception",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": "^22.18.0 || >=24.2.0"
   },
   "scripts": {
     "spec-guard": "spec-guard \"spec/*.md\" \"docs/*.md\" README.md ROADMAP.md CLAUDE.md",

@@ -18,14 +18,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { SLOT_HELD, acquireSlot, gatesDir, mainCheckout } from "./local-limits.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");
 const skip = process.platform !== "win32" && "the local limits bound processes on Windows alone";
-// Slots of their own for every proof, which each process they start inherits: the machine's may
-// both be held, by the quick checks running these proofs and by another session, and a proof's run
-// held there would wait past its time (it did, on 2026-11-22, for the runner's proof).
-process.env.MENTE_SLOTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "proof-slots-"));
+// One of the machine's slots for this file, whose proofs allocate up to the build limits and run
+// cargo.mjs: under the quick checks, the slot they hold covers it and every process it starts
+// (SLOT_HELD), so none waits for a second one, as the runner's proof did on 2026-11-22; run alone,
+// it takes one, as a build does, and the budget holds either way.
+acquireSlot("node --test tools/local-limits.test.mjs", { say: () => {} });
+
+/// The environment of a process that takes slots of `dir`, a stand-in's: no claim of this file's.
+const standIn = (dir, extra = {}) => {
+  const env = { ...process.env, MENTE_SLOTS_DIR: dir, ...extra };
+  if (!(SLOT_HELD in extra)) delete env[SLOT_HELD];
+  return env;
+};
 
 /// Runs `run` through local-limits' runCapped under `limits`, from a node process of its own in
 /// `cwd`, as the tools do: its status, output and time; or, with `wait` false, that process.
@@ -46,6 +55,18 @@ const alive = (pid) => {
     return false;
   }
 };
+
+// Slots of a directory of their own are for stand-ins alone, which need none: a test file that
+// set them for its whole process would run its real work outside the machine's budget, and leave
+// the directory behind. The slot its tree holds covers it instead (SLOT_HELD).
+test("no test file of the tools takes slots of its own for its whole process", () => {
+  const files = fs.readdirSync(HERE).filter((name) => name.endsWith(".test.mjs"));
+  assert.ok(files.includes("quick.test.mjs") && files.includes("push.test.mjs"));
+  for (const name of files) {
+    const text = fs.readFileSync(path.join(HERE, name), "utf8");
+    assert.doesNotMatch(text, /^process\.env\.MENTE_SLOTS_DIR\s*=/m, `${name} runs its processes outside the machine's build slots`);
+  }
+});
 
 test("a process that allocates without end dies alone at its limit, which the wrapper names", { skip }, () => {
   // The loop stops itself at 2 GB, so that a cap that holds nothing fails this proof without
@@ -78,30 +99,66 @@ test("outside a checkout of this repository, menteOnly leaves a command untouche
 /// A process that takes a slot in `dir` and holds it for `ms`, and says "held <slot>" once it has.
 function holder(dir, ms) {
   const script = `import(${JSON.stringify(new URL("./local-limits.mjs", import.meta.url).href)}).then((m)=>{const s=m.acquireSlot("test holder");console.log("held "+s.slot);setTimeout(()=>s.release(),${ms})})`;
-  const child = spawn(process.execPath, ["-e", script], { env: { ...process.env, MENTE_SLOTS_DIR: dir }, stdio: ["ignore", "pipe", "inherit"] });
-  const held = new Promise((done) => child.stdout.on("data", (d) => /held \d/.test(String(d)) && done()));
+  const child = spawn(process.execPath, ["-e", script], { env: standIn(dir), stdio: ["ignore", "pipe", "inherit"] });
+  const held = new Promise((done) =>
+    child.stdout.on("data", (d) => {
+      const m = /held (\d)/.exec(String(d));
+      if (m) done(Number(m[1]));
+    }),
+  );
   return { child, held, ended: new Promise((done) => child.on("exit", done)) };
 }
 
-/// Takes a slot of `dir` in a process of its own, as a third build would: the slot it got, how long
-/// it took, and whether it said it was waiting.
-function third(dir) {
-  const script = `import(${JSON.stringify(new URL("./local-limits.mjs", import.meta.url).href)}).then((m)=>{const t=Date.now();let waited=false;const s=m.acquireSlot("third",{pollMs:100,say:()=>{waited=true}});console.log(JSON.stringify({slot:s.slot,ms:Date.now()-t,waited}))})`;
-  const r = spawnSync(process.execPath, ["-e", script], { env: { ...process.env, MENTE_SLOTS_DIR: dir }, encoding: "utf8", timeout: 60000 });
+/// Takes a slot of `dir` in a process of its own, as a third build would, with `extra` in its
+/// environment: the slot it got, how long it took, whether it said it was waiting, and whether the
+/// slot of the tree it was started in covered it.
+function third(dir, extra = {}) {
+  const script = `import(${JSON.stringify(new URL("./local-limits.mjs", import.meta.url).href)}).then((m)=>{const t=Date.now();let waited=false;const s=m.acquireSlot("third",{pollMs:100,say:()=>{waited=true}});console.log(JSON.stringify({slot:s.slot,ms:Date.now()-t,waited,covered:s.covered}))})`;
+  const r = spawnSync(process.execPath, ["-e", script], { env: standIn(dir, extra), encoding: "utf8", timeout: 60000 });
   return JSON.parse(r.stdout.trim());
 }
 
 test("a third build waits while two hold the machine's slots, and takes the first freed", { skip }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slots-"));
-  const a = holder(dir, 3000);
-  const b = holder(dir, 60000);
-  await Promise.all([a.held, b.held]);
-  const got = third(dir);
-  b.child.kill();
-  await Promise.all([a.ended, b.ended]);
-  assert.equal(got.waited, true, "the third build did not wait");
-  assert.ok(got.ms >= 1500, `the third build waited ${got.ms} ms for a slot held 3 s`);
-  assert.ok(got.slot === 1 || got.slot === 2, JSON.stringify(got));
+  try {
+    const a = holder(dir, 3000);
+    const b = holder(dir, 60000);
+    await Promise.all([a.held, b.held]);
+    const got = third(dir);
+    b.child.kill();
+    await Promise.all([a.ended, b.ended]);
+    assert.equal(got.waited, true, "the third build did not wait");
+    assert.ok(got.ms >= 1500, `the third build waited ${got.ms} ms for a slot held 3 s`);
+    assert.ok(got.slot === 1 || got.slot === 2, JSON.stringify(got));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test("a slot a process holds covers every process it starts, which takes none and waits for none, and only while that slot of the same directory is held", { skip }, async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "slots-"));
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "slots-"));
+  try {
+    const a = holder(dir, 60000);
+    const b = holder(dir, 60000);
+    const [sa, sb] = await Promise.all([a.held, b.held]);
+    // Started within the holder of sb: covered, while both slots are held.
+    const within = third(dir, { [SLOT_HELD]: `${sb} ${dir}` });
+    assert.deepEqual([within.covered, within.waited, within.slot], [true, false, sb]);
+    a.child.kill();
+    await a.ended;
+    // A claim of a slot no process holds covers nothing, nor one of another directory: each takes
+    // the slot freed, as a build does.
+    const free = third(dir, { [SLOT_HELD]: `${sa} ${dir}` });
+    assert.deepEqual([free.covered, free.slot], [false, sa]);
+    const elsewhere = third(dir, { [SLOT_HELD]: `${sb} ${other}` });
+    assert.deepEqual([elsewhere.covered, elsewhere.slot], [false, sa]);
+    b.child.kill();
+    await b.ended;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+    fs.rmSync(other, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
 });
 
 test("every argument reaches the command as it was given, whatever PowerShell would make of it", { skip }, () => {
@@ -214,20 +271,29 @@ test("when a parent that is not node ends, the wrapper ends the command too", { 
  * hooks alone (local-limits.mjs, requireHooks), which they read from their own checkout after the
  * runner, so that this proof of the runner holds whatever this machine's hooks are.
  */
+/// Whether a copy of main's gates is installed here, which `current` says, not the entries a
+/// bootstrap writes first: until one is, the tools keep today's working-tree gates (FALLBACK, until
+/// the round's second pull request).
+const COPY = fs.existsSync(path.join(gatesDir(ROOT), "current"));
+/// The runner the tools require here: the gates' stable runner entry, or with no copy installed
+/// the main checkout's tools/capped.mjs.
+const ENTRY = (COPY ? path.join(gatesDir(ROOT), "entry", "capped.mjs") : path.join(mainCheckout(ROOT), "tools", "capped.mjs")).replace(/\\/g, "/");
+const RUNNER_TAIL = COPY ? String.raw`\/mente-gates\/entry\/capped\.mjs` : String.raw`\/tools\/capped\.mjs`;
+
 const pastRunner = (r) => r.status === 0 || (r.status === 2 && /core\.hooksPath/.test(r.stderr) && !/cargo's runner|_RUNNER is set/.test(r.stderr));
 
-test("the tools refuse to run until cargo's runner is the capped one, and name the lines to add", { skip }, () => {
+test("the tools refuse to run until cargo's runner is the gates' capped one, or today's while no copy is installed, and name the lines to add", { skip }, () => {
   // The review of round 4: CLAUDE.md called cargo's runner the wall, which nothing set or checked.
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cargo-home-"));
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER"));
   const cargo = () => spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home }, encoding: "utf8", timeout: 60000 });
   const none = cargo();
   assert.equal(none.status, 2, `${none.stdout}${none.stderr}`);
-  assert.match(none.stderr, /\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*\/tools\/capped\.mjs", "--mente-only", "--"\]/);
+  assert.match(none.stderr, new RegExp(String.raw`\[target\.x86_64-pc-windows-msvc\]\nrunner = \["node", ".*${RUNNER_TAIL}", "--mente-only", "--"\]`));
   assert.ok(none.stderr.includes(path.join(home, "config.toml")), none.stderr);
   for (const [runner, what] of [
     ['["node", "C:/nowhere/tools/capped.mjs", "--mente-only", "--"]', "a capped.mjs that does not exist"],
-    ['["node", "' + path.join(HERE, "capped.mjs").replace(/\\/g, "/") + '", "--"]', "no --mente-only"],
+    ['["node", "' + ENTRY + '", "--"]', "no --mente-only"],
     ['"wine"', "another runner"],
   ]) {
     fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ${runner}\n`);
@@ -236,11 +302,11 @@ test("the tools refuse to run until cargo's runner is the capped one, and name t
     assert.match(refused.stderr, /cargo's runner on this laptop is/, `the tools refused ${what} for another reason than the runner`);
   }
   // The capped runner, but for another target: cargo would not use it here.
-  fs.writeFileSync(path.join(home, "config.toml"), `[target.aarch64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
+  fs.writeFileSync(path.join(home, "config.toml"), `[target.aarch64-pc-windows-msvc]\nrunner = ["node", "${ENTRY}", "--mente-only", "--"]\n`);
   const elsewhere = cargo();
   assert.equal(elsewhere.status, 2, "the tools ran with the capped runner set for another target");
   assert.match(elsewhere.stderr, /cargo's runner on this laptop is/, "the tools refused the runner of another target for another reason");
-  fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`);
+  fs.writeFileSync(path.join(home, "config.toml"), `[build]\njobs = 12\n\n[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${ENTRY}", "--mente-only", "--"]\n`);
   const held = cargo();
   assert.ok(pastRunner(held), `${held.stdout}${held.stderr}`);
   if (held.status === 0) assert.match(held.stdout, /^cargo \d/);
@@ -250,15 +316,15 @@ test("the tools refuse to run until cargo's runner is the capped one, and name t
     fs.writeFileSync(path.join(home, "config.toml"), config);
     return spawnSync(process.execPath, [path.join(HERE, "cargo.mjs"), "--version"], { cwd: ROOT, env: { ...env, CARGO_HOME: home, CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER: value }, encoding: "utf8", timeout: 60000 });
   };
-  const capped = `node ${path.join(HERE, "capped.mjs").replace(/\\/g, "/")} --mente-only --`;
+  const capped = `node ${ENTRY} --mente-only --`;
   assert.ok(pastRunner(variable(capped, "")), "the capped runner set by CARGO_TARGET_..._RUNNER was refused");
-  const good = `[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${path.join(HERE, "capped.mjs").replace(/\\/g, "/")}", "--mente-only", "--"]\n`;
+  const good = `[target.x86_64-pc-windows-msvc]\nrunner = ["node", "${ENTRY}", "--mente-only", "--"]\n`;
   const over = variable("wine", good);
   assert.equal(over.status, 2, "another runner set by CARGO_TARGET_..._RUNNER passed over a capped one in the file");
   // The refusal names the variable, which is what to change, not the file, which is right (the
   // review of PR 195's last round).
   assert.match(over.stderr, /CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER is set to "wine"/);
-  assert.match(over.stderr, /\nCARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=node .*\/tools\/capped\.mjs --mente-only --\n/);
+  assert.match(over.stderr, new RegExp(String.raw`\nCARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUNNER=node .*${RUNNER_TAIL} --mente-only --\n`));
 });
 
 test("the hook's command refuses when the guard cannot load", () => {
