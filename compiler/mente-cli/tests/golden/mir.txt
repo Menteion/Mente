@@ -41251,6 +41251,7 @@ t1: unreachable @4:8 ["unreachable reached: control left the code the checker al
 == conformance/grammar/assignment_to_a_sum.mn == (exit 2)
 == conformance/grammar/binary_digit_out_of_base.mn == (exit 2)
 == conformance/grammar/binding_without_value.mn == (exit 2)
+== conformance/grammar/chain_beyond_256_levels.mn == (exit 2)
 == conformance/grammar/chained_comparison.mn == (exit 2)
 == conformance/grammar/char_literal.mn == (exit 2)
 == conformance/grammar/enum_without_variants.mn == (exit 2)

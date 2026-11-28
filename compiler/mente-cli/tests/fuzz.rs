@@ -678,7 +678,10 @@ fn test_fuzz_unfinished_deep_chain_is_e0127_and_no_crash() {
 /// Found by `mn fuzz`: deep nesting overflowed the stack, in the body parser, the tree dump,
 /// the checker or the incremental session, whichever recursed deepest first. Past the nesting
 /// limit of 256 levels each way of nesting the fuzzer makes is `E0127`, and no phase crashes.
-/// Each is written out here rather than as a file, at a depth far past the limit.
+/// Each is written out here rather than as a file, at a depth far past the limit. Issue 220
+/// added the chains the parser reads in a loop, of each kind of operator and of fields, and
+/// an `ensures` of one, whose tree the parser handed out past the limit and the incremental
+/// session rendered in time growing with the square of its links.
 #[test]
 fn test_fuzz_deep_nesting_is_e0127_and_no_crash() {
     // Four times the limit: past it in every shape, and quick through every phase in a debug
@@ -696,6 +699,20 @@ fn test_fuzz_deep_nesting_is_e0127_and_no_crash() {
             " } else { 0 }".repeat(DEPTH)
         )),
         expression(format!("x{}", " + 1".repeat(DEPTH))),
+        expression(format!("x{}", " * 1".repeat(DEPTH))),
+        expression(format!("x > 0{}", " and x > 0".repeat(DEPTH))),
+        expression(format!("x > 0{}", " && x > 0".repeat(DEPTH))),
+        expression(format!("x{}", ".a".repeat(DEPTH))),
+        expression(format!("{}x", "x > 0 ? x : ".repeat(DEPTH))),
+        expression(format!("{}x", "&".repeat(DEPTH))),
+        format!(
+            "module m
+pub fn deep(n: u32) -> u32
+  ensures result < n{}
+= n
+",
+            " + 1".repeat(DEPTH)
+        ),
         expression(format!("{}x{}", "[".repeat(DEPTH), "]".repeat(DEPTH))),
         expression(format!("{}x{}", "f(".repeat(DEPTH), ")".repeat(DEPTH))),
         expression(format!("x{}", "[0]".repeat(DEPTH))),

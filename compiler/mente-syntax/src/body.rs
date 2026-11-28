@@ -13,9 +13,9 @@
 use crate::diagnostics::{Applicability, Diagnostic};
 use crate::tree::{
     Arg, Arm, ArmBody, AssignOp, BinaryOp, Block, BlockId, Body, Bound, Contract, ContractKind,
-    Else, EnumSyntax, ExprId, ExprKind, FieldInit, FieldSyntax, FnSyntax, Param, PatBinding,
-    Pattern, PatternKind, Payload, Refinement, StmtId, StmtKind, StructSyntax, Tree, TypeId,
-    TypeKind, UnaryOp, VariantSyntax,
+    Else, EnumSyntax, ExprId, ExprKind, FieldInit, FieldSyntax, FnSyntax, Heights, Node, Param,
+    PatBinding, Pattern, PatternKind, Payload, Refinement, StmtId, StmtKind, StructSyntax, Tree,
+    TypeId, TypeKind, UnaryOp, VariantSyntax,
 };
 use crate::{Span, Token, TokenKind};
 
@@ -45,19 +45,32 @@ pub fn language_type(name: &str) -> bool {
 }
 
 /// Parses one function from its tokens, `fn` to the end of its body, which `src` holds at the
-/// tokens' spans.
-pub fn parse_function(src: &str, tokens: &[Token]) -> (FnSyntax, Vec<Diagnostic>) {
+/// tokens' spans: its tree, never one higher than [`NESTING_LIMIT`], and what the parser
+/// reported.
+pub fn parse_function(src: &str, tokens: &[Token]) -> (Option<FnSyntax>, Vec<Diagnostic>) {
     let mut p = Parser::new(src, tokens);
     let syntax = p.function();
-    // A tree too high for the phases that recurse over it, such as a long chain of `+`,
-    // which the parser reads in a loop: measured after another error too, since a phase that
-    // reads a tree with errors, as `mn dump --tree` does, recurses over it all the same.
-    if !p.errors.iter().any(|e| e.code == "E0127") {
-        if let Some(span) = syntax.tree.too_deep(NESTING_LIMIT) {
-            p.errors.push(too_deep(span));
-        }
-    }
+    let syntax = within_the_limit(syntax, &mut p.errors);
     (syntax, p.errors)
+}
+
+/// `syntax`, unless it is higher than [`NESTING_LIMIT`]. The parser counts every level it builds,
+/// a descent's ([`Parser::deeper`]) and a loop's ([`Parser::nests`]), and cuts a function's tree
+/// at the limit, so none it builds is higher; should one be, by a construct its count missed, it
+/// is reported (`E0127`) and withheld. Every phase after the parser recurses over the tree, a
+/// tree with errors too, as `mn dump --tree` and the incremental session's context do, so it is
+/// measured after another error too.
+fn within_the_limit(syntax: FnSyntax, errors: &mut Vec<Diagnostic>) -> Option<FnSyntax> {
+    if errors.iter().any(|e| e.code == "E0127") {
+        return Some(syntax);
+    }
+    match syntax.tree.too_deep(NESTING_LIMIT) {
+        Some(span) => {
+            errors.push(too_deep(span));
+            None
+        }
+        None => Some(syntax),
+    }
 }
 
 /// Parses one struct declaration from its tokens, `struct` to its closing `}`, which `src`
@@ -112,8 +125,16 @@ struct Parser {
     recovering: bool,
     /// How many `(` and `[` are open, inside which a newline is whitespace.
     nest: u32,
-    /// How deep the parser has descended into expressions, blocks and types.
+    /// How deep the parser has descended into expressions, blocks and types: the level of the
+    /// node it is reading, its children one deeper.
     depth: u32,
+    /// How many of `depth`'s levels are a parenthesis, or an idiom read as its operand, which
+    /// hold no node of their own: the node being read stands `depth - grouped` levels deep in the
+    /// tree.
+    grouped: u32,
+    /// The height of each node read so far, which a loop that nests an operand one level deeper
+    /// asks first ([`Parser::nests`]).
+    heights: Heights,
     /// `nest` inside the brackets of the index being parsed, where a range makes a view.
     index_nest: Option<u32>,
     /// `nest` where the condition or clause being parsed stands, where a `{` after a name opens
@@ -145,6 +166,8 @@ impl Parser {
             recovering: false,
             nest: 0,
             depth: 0,
+            grouped: 0,
+            heights: Heights::default(),
             index_nest: None,
             cond_nest: None,
         }
@@ -230,13 +253,59 @@ impl Parser {
     /// its end, so that the parser itself never recurses past the limit.
     fn deeper(&mut self) -> bool {
         if self.depth >= NESTING_LIMIT {
-            let d = too_deep(self.span());
-            self.error(d);
-            self.pos = self.tokens.len() - 1;
+            let at = self.span();
+            self.too_deep_at(at);
             return false;
         }
         self.depth += 1;
         true
+    }
+
+    /// Before a loop makes `e` an operand of the node it builds next, which takes `e` and all it
+    /// holds one level deeper: within the limit it goes on, and past it reports the function as
+    /// nesting too deep (`E0127`) and skips to its end, as [`Parser::deeper`] does for a descent.
+    /// A chain read in a loop, `a + b + c` or `x[0][0]`, pushes all it has read down a level at
+    /// each step, which no descent counts, so the parser measures the operand here and never
+    /// builds a tree past the limit.
+    fn nests(&mut self, e: ExprId) -> bool {
+        let height = self.heights.walk(&self.tree, Node::E(e.0), |_, _| {});
+        let level = self.depth.saturating_sub(self.grouped);
+        if level + height > NESTING_LIMIT {
+            let at = self.tree.expr(e).span;
+            self.too_deep_at(at);
+            return false;
+        }
+        true
+    }
+
+    /// Reports the function as nesting too deep at `at` and skips to its end: a descent at the
+    /// token it would descend into, a loop at the operand it would take past the limit, which the
+    /// tree's own measure names too ([`Tree::too_deep`]).
+    fn too_deep_at(&mut self, at: Span) {
+        let d = too_deep(at);
+        self.error(d);
+        self.pos = self.tokens.len() - 1;
+    }
+
+    /// An idiom's operand, which the idiom is read as after its diagnostic: the parser descends
+    /// into it, a level of its recursion, and it takes the idiom's own place in the tree.
+    fn in_place(&mut self) -> ExprId {
+        self.grouped += 1;
+        let e = self.operand(UNARY_OPERAND_BP);
+        self.grouped -= 1;
+        e
+    }
+
+    /// An operand one level below the node being read, such as an operator's right side or a
+    /// condition, read as [`Parser::binary`] reads it.
+    fn operand(&mut self, min_bp: u8) -> ExprId {
+        let start = self.span();
+        if !self.deeper() {
+            return self.tree.push_expr(ExprKind::Error, start);
+        }
+        let e = self.binary(min_bp);
+        self.depth -= 1;
+        e
     }
 
     /// Reports `d`, unless the parser is already recovering from an error.
@@ -1315,9 +1384,11 @@ impl Parser {
     }
 
     /// A condition or a clause: an expression that is not itself an `if`.
+    /// The condition of an `if`, a `while` or a `guard`, a loop's clause or the scrutinee of a
+    /// `match`: one level below the expression that holds it, or the block its statement stands in.
     fn cond(&mut self) -> ExprId {
         let outer = self.cond_nest.replace(self.nest);
-        let e = self.binary(0);
+        let e = self.operand(0);
         self.cond_nest = outer;
         e
     }
@@ -1702,7 +1773,7 @@ impl Parser {
             }
             if let Some((op, word)) = self.c_logical() {
                 let lbp = if op == BinaryOp::And { 2 } else { 1 };
-                if lbp < min_bp {
+                if lbp < min_bp || !self.nests(lhs) {
                     break;
                 }
                 let first = self.bump().span;
@@ -1723,7 +1794,7 @@ impl Parser {
                     word,
                 );
                 self.note(d);
-                let rhs = self.binary(lbp + 1);
+                let rhs = self.operand(lbp + 1);
                 let span = self.span_from(start);
                 lhs = self.tree.push_expr(ExprKind::Binary { op, lhs, rhs }, span);
                 continue;
@@ -1733,7 +1804,7 @@ impl Parser {
                 continue;
             }
             if self.at(&TokenKind::Question) && self.ternary_follows() {
-                if min_bp > 0 {
+                if min_bp > 0 || !self.nests(lhs) {
                     break;
                 }
                 self.ternary(&mut lhs, start);
@@ -1742,11 +1813,11 @@ impl Parser {
             let Some((op, lbp)) = infix(self.peek()) else {
                 break;
             };
-            if lbp < min_bp {
+            if lbp < min_bp || !self.nests(lhs) {
                 break;
             }
             self.bump();
-            let rhs = self.binary(lbp + 1);
+            let rhs = self.operand(lbp + 1);
             if is_comparison(op) && !self.recovering && !self.ends_here() {
                 if let Some((next, _)) = infix(self.peek()) {
                     if is_comparison(next) {
@@ -1806,13 +1877,13 @@ impl Parser {
     /// diagnostic, whose fix writes it so.
     fn ternary(&mut self, cond: &mut ExprId, start: Span) {
         let question = self.bump().span;
-        let then_value = self.binary(0);
+        let then_value = self.in_block();
         if self.recovering || !self.at(&TokenKind::Colon) {
             self.later(question, "error propagation (`?` and `!`)", Some("M2"));
             return;
         }
         self.bump();
-        let else_value = self.binary(0);
+        let else_value = self.in_block();
         if self.recovering {
             return;
         }
@@ -1845,6 +1916,18 @@ impl Parser {
             },
             whole,
         );
+    }
+
+    /// A value of `c ? a : b`, which the `if` read from it holds in a block of its own: two levels
+    /// below the `if`, the block's and its own.
+    fn in_block(&mut self) -> ExprId {
+        let start = self.span();
+        if !self.deeper() {
+            return self.tree.push_expr(ExprKind::Error, start);
+        }
+        let e = self.operand(0);
+        self.depth -= 1;
+        e
     }
 
     /// A block holding one expression, as an `if` read from `? :` has.
@@ -1892,6 +1975,9 @@ impl Parser {
                 if self.at(&TokenKind::DotDot) {
                     let span = self.span();
                     self.later(span, "a view `x[..]`", Some("M2"));
+                    return true;
+                }
+                if !self.nests(*lhs) {
                     return true;
                 }
                 self.nest += 1;
@@ -1957,7 +2043,7 @@ impl Parser {
                 }
                 if self.at(&TokenKind::LParen) && !self.newline_before() {
                     self.later(name_span, "a method call", Some("M2"));
-                } else {
+                } else if self.nests(*lhs) {
                     let span = self.span_from(start);
                     *lhs = self
                         .tree
@@ -2034,7 +2120,7 @@ impl Parser {
                     )
                     .with_fix(Applicability::Suggestion, "remove `await`", removed, "");
                     self.note(d);
-                    return self.binary(UNARY_OPERAND_BP);
+                    return self.in_place();
                 } else if n == "async" && self.at(&TokenKind::LBrace) {
                     let d = Diagnostic::error(
                         "E0121",
@@ -2062,7 +2148,10 @@ impl Parser {
             TokenKind::LParen => {
                 self.bump();
                 self.nest += 1;
+                // A level of the parser's descent, and none of the tree's.
+                self.grouped += 1;
                 let inner = self.expr();
+                self.grouped -= 1;
                 if !self.recovering {
                     self.expect(&TokenKind::RParen, "`)` to close the parenthesis");
                 }
@@ -2114,7 +2203,7 @@ impl Parser {
             TokenKind::Amp => return self.reference(),
             TokenKind::Bang => {
                 let bang = self.bump().span;
-                let operand = self.binary(UNARY_OPERAND_BP);
+                let operand = self.operand(UNARY_OPERAND_BP);
                 if !self.recovering {
                     let operand_span = self.tree.expr(operand).span;
                     let text = format!("not {}", self.text_of(operand_span));
@@ -2233,7 +2322,7 @@ impl Parser {
             "",
         );
         self.note(d);
-        self.binary(UNARY_OPERAND_BP)
+        self.in_place()
     }
 
     fn unary(&mut self, op: UnaryOp, operand_bp: u8) -> ExprKind {
@@ -2771,7 +2860,11 @@ mod tests {
             .into_iter()
             .filter(|t| t.kind != TokenKind::Eof)
             .collect();
-        parse_function(src, &tokens)
+        let (syntax, errors) = parse_function(src, &tokens);
+        let Some(syntax) = syntax else {
+            panic!("{}: no tree within the limit: {:?}", src, errors);
+        };
+        (syntax, errors)
     }
 
     /// The canonical form of an expression body.
@@ -3862,6 +3955,8 @@ _ == b"
             recovering: false,
             nest: 0,
             depth: 0,
+            grouped: 0,
+            heights: Heights::default(),
             index_nest: None,
             cond_nest: None,
         };
@@ -3974,20 +4069,234 @@ _ == b"
         let deep = |n: usize| format!("module m\nstruct S {{\n  a: {}u8\n}}\n", r("[1]", n));
         assert_eq!(struct_codes(deep(300)), ["E0127"]);
         assert!(struct_codes(deep(200)).is_empty());
-        // A chain past the limit with another error in it is measured too: `mn dump --tree`
-        // recurses over a tree with errors (the fuzzer's finding 12).
-        for (src, other) in [
-            (f(format!("x{}[0", r("[0]", 300))), "E0111"),
-            (f(format!("x{} +", r(" + 1", 300))), "E0110"),
+        // A chain past the limit with another error after it stops at the limit, as a descent
+        // does, and what follows, that error too, is not read: `mn dump --tree` recursed over the
+        // over-deep tree of such a body (the fuzzer's finding 12), which no tree is now.
+        for src in [
+            f(format!("x{}[0", r("[0]", 300))),
+            f(format!("x{} +", r(" + 1", 300))),
         ] {
-            let got = codes(src.clone());
+            assert_eq!(codes(src.clone()), ["E0127"], "{}", &src[..80]);
+        }
+    }
+
+    /// A chain the parser reads in a loop pushes all it has read one level deeper at each link
+    /// (`Parser::nests`): every loop-built shape is read up to exactly the limit, and one link
+    /// more is `E0127` alone, the tree cut there as a descent cuts it, handed out and no higher
+    /// than the limit. A parenthesis is a level of the parser's descent and none of the tree's, so
+    /// a chain inside or after 200 of them still reaches the limit. Each runs on a stack of the
+    /// size `mn` gives its work.
+    #[test]
+    fn test_a_loop_nests_no_tree_past_the_limit() {
+        let parsed = |src: String| {
+            mente_threads::alone(None, Some(256 << 20), move || {
+                let m = crate::parse_module(&src).unwrap();
+                let mut functions = crate::parse_bodies(&src, &m);
+                assert_eq!(functions.len(), 1, "{}", &src[..src.len().min(80)]);
+                let p = functions.remove(0);
+                let codes: Vec<&'static str> = p.errors.iter().map(|d| d.code).collect();
+                // The tree's height: no more than the limit, and how far below it.
+                let height = p.syntax.as_ref().map(|f| {
+                    (0..=NESTING_LIMIT)
+                        .rev()
+                        .find(|&h| f.tree.too_deep(h).is_some())
+                        .map_or(0, |h| h + 1)
+                });
+                (codes, height)
+            })
+            .unwrap()
+            .unwrap()
+        };
+        let r = |s: &str, n: usize| s.repeat(n);
+        let limit = NESTING_LIMIT as usize;
+        let f = |body: String| {
+            format!(
+                "module m\npub fn d(x: i32, b: bool, n: u32) -> i32 = {}\n",
+                body
+            )
+        };
+        // Each shape, given its links, and how many links make its tree exactly the limit high.
+        type Shape = (&'static str, Box<dyn Fn(usize) -> String>, usize);
+        let shapes: Vec<Shape> = vec![
+            (
+                "+",
+                Box::new(move |k| f(format!("x{}", r(" + 0", k)))),
+                limit - 1,
+            ),
+            (
+                "*",
+                Box::new(move |k| f(format!("x{}", r(" * 1", k)))),
+                limit - 1,
+            ),
+            (
+                "and",
+                Box::new(move |k| f(format!("b{}", r(" and b", k)))),
+                limit - 1,
+            ),
+            (
+                "or",
+                Box::new(move |k| f(format!("b{}", r(" or b", k)))),
+                limit - 1,
+            ),
+            (
+                "index",
+                Box::new(move |k| f(format!("x{}", r("[0]", k)))),
+                limit - 1,
+            ),
+            (
+                "field",
+                Box::new(move |k| f(format!("x{}", r(".a", k)))),
+                limit - 1,
+            ),
+            (
+                "under a unary",
+                Box::new(move |k| f(format!("-(x{})", r(" + 0", k)))),
+                limit - 2,
+            ),
+            (
+                "a right operand's",
+                Box::new(move |k| f(format!("x + 0{}", r(" * 1", k)))),
+                limit - 2,
+            ),
+            (
+                "after 200 parentheses",
+                Box::new(move |k| f(format!("{}x{}{}", r("(", 200), r(")", 200), r(" + 0", k)))),
+                limit - 1,
+            ),
+            (
+                "inside 200 parentheses",
+                Box::new(move |k| f(format!("{}x{}{}", r("(", 200), r(" + 0", k), r(")", 200)))),
+                limit - 1,
+            ),
+            (
+                "a clause's operand",
+                Box::new(move |k| {
+                    format!(
+                        "module m\npub fn d(n: u32) -> u32\n  ensures result < n{}\n= n\n",
+                        r(" + 1", k)
+                    )
+                }),
+                limit - 2,
+            ),
+            (
+                "a statement's",
+                Box::new(move |k| {
+                    format!(
+                        "module m\npub fn d(x: i32) -> i32 {{\n  x{}\n}}\n",
+                        r(" + 0", k)
+                    )
+                }),
+                limit - 2,
+            ),
+            (
+                "a loop's condition",
+                Box::new(move |k| {
+                    format!(
+                        "module m\npub fn d(x: i32) -> i32 {{\n  while x{} > 0 {{\n  }}\n  x\n}}\n",
+                        r(" + 0", k)
+                    )
+                }),
+                limit - 3,
+            ),
+        ];
+        for (name, shape, at) in &shapes {
+            let (codes, height) = parsed(shape(*at));
+            assert!(codes.is_empty(), "{} at the limit: {:?}", name, codes);
+            assert_eq!(height, Some(NESTING_LIMIT), "{} at the limit", name);
+            for past in [at + 1, 4 * limit] {
+                let (codes, height) = parsed(shape(past));
+                assert_eq!(codes, ["E0127"], "{} with {} links", name, past);
+                let height = height.unwrap_or_else(|| panic!("{}: no tree handed out", name));
+                assert!(
+                    height <= NESTING_LIMIT,
+                    "{} with {} links: {}",
+                    name,
+                    past,
+                    height
+                );
+            }
+        }
+        // A child stands a level below its parent in the parser's descent as in the tree: a
+        // condition and an operator's right side too, as a unary operand always did. So 254
+        // parentheses fit in either, below a body at the first level, and 255 are `E0127`.
+        for (name, shape) in [
+            (
+                "a right operand",
+                Box::new(move |k| f(format!("x + {}x{}", r("(", k), r(")", k))))
+                    as Box<dyn Fn(usize) -> String>,
+            ),
+            (
+                "a condition",
+                Box::new(move |k| {
+                    f(format!(
+                        "if {}b{} {{ x }} else {{ 0 }}",
+                        r("(", k),
+                        r(")", k)
+                    ))
+                }),
+            ),
+        ] {
             assert!(
-                got.contains(&"E0127") && got.contains(&other),
-                "{}: {:?}",
-                &src[..80],
-                got
+                parsed(shape(limit - 2)).0.is_empty(),
+                "{} within the limit",
+                name
+            );
+            assert_eq!(
+                parsed(shape(limit - 1)).0,
+                ["E0127"],
+                "{} past the limit",
+                name
             );
         }
+        // Another language's idiom read as its operand, a chain of `&&` or a `? :` nested in
+        // its last value: `E0127` past the limit beside the idiom's own notes, and no higher tree.
+        for src in [
+            f(format!("b{}", r(" && b", 4 * limit))),
+            f(format!("{}x", r("b ? x : ", 4 * limit))),
+            f(format!("{}x", r("&", 4 * limit))),
+        ] {
+            let (codes, height) = parsed(src.clone());
+            assert!(codes.contains(&"E0127"), "{}: {:?}", &src[..60], codes);
+            let height = height.unwrap_or_else(|| panic!("{}: no tree handed out", &src[..60]));
+            assert!(height <= NESTING_LIMIT, "{}: {}", &src[..60], height);
+        }
+    }
+
+    /// The parser's last word on a tree's height (`within_the_limit`): a tree higher than the
+    /// limit, which no construct the parser reads builds now, is reported (`E0127`) and withheld,
+    /// since every phase after the parser recurses over it; one already reported is handed out
+    /// as the descent cut it, and one within the limit as it is.
+    #[test]
+    fn test_a_tree_past_the_limit_is_withheld() {
+        let built = |levels: u32| {
+            let (mut syntax, errors) = parse("fn d(x: i32) -> i32 = x");
+            assert!(errors.is_empty(), "{:?}", errors);
+            let Some(Body::Expr(mut e)) = syntax.body else {
+                panic!("an expression body")
+            };
+            let span = syntax.tree.expr(e).span;
+            for _ in 1..levels {
+                e = syntax.tree.push_expr(
+                    ExprKind::Unary {
+                        op: UnaryOp::Neg,
+                        operand: e,
+                    },
+                    span,
+                );
+            }
+            syntax.body = Some(Body::Expr(e));
+            syntax
+        };
+        let codes = |errors: &[Diagnostic]| errors.iter().map(|d| d.code).collect::<Vec<_>>();
+        let mut errors = Vec::new();
+        assert!(within_the_limit(built(NESTING_LIMIT + 1), &mut errors).is_none());
+        assert_eq!(codes(&errors), ["E0127"]);
+        let mut errors = vec![too_deep(Span::default())];
+        assert!(within_the_limit(built(NESTING_LIMIT + 1), &mut errors).is_some());
+        assert_eq!(codes(&errors), ["E0127"]);
+        let mut errors = Vec::new();
+        assert!(within_the_limit(built(NESTING_LIMIT), &mut errors).is_some());
+        assert!(errors.is_empty(), "{:?}", errors);
     }
 
     /// An enum declaration, `grammar.md` item 10.

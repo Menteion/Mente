@@ -287,6 +287,7 @@ grammar/arm_holding_an_assignment.mn 0 0 - -
 grammar/assignment_to_a_sum.mn 0 0 - -
 grammar/binary_digit_out_of_base.mn 0 0 - -
 grammar/binding_without_value.mn 0 0 - -
+grammar/chain_beyond_256_levels.mn 0 0 - -
 grammar/chained_comparison.mn 0 0 - -
 grammar/char_literal.mn 0 0 - -
 grammar/enum_without_variants.mn 0 0 - -

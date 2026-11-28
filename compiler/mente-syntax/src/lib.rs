@@ -863,8 +863,7 @@ pub fn parse_bodies(src: &str, module: &ModuleFile) -> Vec<ParsedFn> {
             let has_body =
                 f.is_expr_body || f.tokens.last().is_some_and(|t| t.kind == TokenKind::RBrace);
             let (syntax, errors) = if has_body {
-                let (syntax, errors) = body::parse_function(src, &f.tokens);
-                (Some(syntax), errors)
+                body::parse_function(src, &f.tokens)
             } else {
                 (None, Vec::new())
             };

@@ -430,6 +430,45 @@ mod tests {
         assert!(item_by_item > 100, "{}", item_by_item);
     }
 
+    /// 2026-11-23 (issue 220, `incremental-hang-d7b82fc0`): an `ensures` of a million links of `+ 1`
+    /// took the session 185 s and the whole module's check 1 s. The body parser reported the
+    /// tree too high (`E0127`) and handed it out all the same, and the session rendered it into
+    /// its callers' context, copying each link's text into the next. The parser now cuts every
+    /// chain it reads in a loop at the nesting limit, so a session reads no tree higher: on each
+    /// such shape past the limit, near it and far past it, a clause's, a body's and a callee's
+    /// beside its caller, the session reports what the whole module's check does.
+    #[test]
+    fn test_a_session_reports_what_the_whole_check_does_past_the_nesting_limit() {
+        let limit = mente_syntax::body::NESTING_LIMIT as usize;
+        let r = |s: &str, n: usize| s.repeat(n);
+        for links in [limit, 4 * limit, 20_000] {
+            for src in [
+                format!(
+                    "module m\n\npub fn bucket(n: u32[1..=64]) -> u32[0..64]\n  ensures result < n{}\n= n - 1\n\npub fn caller() -> u32 = bucket(3)\n",
+                    r(" + 1", links)
+                ),
+                format!("module m\n\npub fn f(x: i32) -> i32 = x{}\n", r(" * 1", links)),
+                format!("module m\n\npub fn f(b: bool) -> bool {{\n  b{}\n}}\n", r(" and b", links)),
+                format!("module m\n\npub fn f(x: [1]i32) -> i32 = x{}\n", r("[0]", links)),
+            ] {
+                let session = Session::new(&src);
+                assert_eq!(
+                    session.diagnostics(),
+                    whole(&src).as_slice(),
+                    "{} links: {}",
+                    links,
+                    &src[..80]
+                );
+                assert!(
+                    session.diagnostics().iter().any(|d| d.code == "E0127"),
+                    "{} links: {:?}",
+                    links,
+                    session.diagnostics()
+                );
+            }
+        }
+    }
+
     const MODULE: &str = "module m\n\npub fn id(x: u8) -> u8 = x\n\n/// Doubles.\npub fn twice(x: u8) -> u16 {\n  val y: u16 = x\n  y + y\n}\n\npub fn main() -> u16 = twice(id(3))\n";
 
     /// Applies an edit to a session and to the text, and checks that they agree.
